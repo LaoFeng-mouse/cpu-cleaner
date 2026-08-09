@@ -60,7 +60,7 @@ jobs:
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction SilentlyContinue
           Import-Module PSScriptAnalyzer
           $all = @()
-          foreach ($f in @('cpu-cleaner.ps1','gui-cleaner.ps1')) { $all += @(Invoke-ScriptAnalyzer -Path $f -Severity Error) }
+          foreach ($f in @('cpu-cleaner.ps1','gui-cleaner.ps1') + @(Get-ChildItem src/Core -Filter *.ps1 | ForEach-Object { $_.FullName })) { $all += @(Invoke-ScriptAnalyzer -Path $f -Severity Error) }
           if ($all) { $all | Format-Table; throw "PSScriptAnalyzer found $($all.Count) error(s)" }
 
       # 5. 特征库 schema 校验 (v1.6.0: v3 + match_type 合法)

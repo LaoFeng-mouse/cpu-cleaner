@@ -8,8 +8,22 @@
 - 特征库数字签名验证（profiles.json.sig + 内置公钥）：SHA256 只能防下载损坏/镜像不一致/单文件篡改，攻击者同时控制 JSON 与 SHA256 下载地址时可整体替换——真正身份验证需要签名
 - 多品牌规则实测积累：当前 23 条规则中 Lenovo 11 条全实测，非联想规则大多 tested=false→investigate（正确但价值有限）。10 分方向是逐台实机积累 Dell/HP/ASUS/Xiaomi/Acer/MSI/Huawei 规则（每台机器扫描→人工确认→测试禁用/恢复→补 evidence 实测字段）。技术框架已跑在数据前面，**找机器实测的价值 > 继续加功能**
 - 特征库 impact 字段（规则级"影响"说明，如"AI 助手不可用"）：GUI 勾选视图已预留展示位，内容随各品牌实测积累补充（不编造）
-- 模块化拆分：cpu-cleaner.ps1 已 ~80KB、gui-cleaner.ps1 ~25KB，下一阶段拆 src/Core/{Scanner,RiskEngine,ProfileEngine,ActionEngine,BackupManager}.psm1 + src/UI/{MainWindow.xaml,GuiController.ps1}，不再往单文件塞功能
+- src/Core/ 进一步 psm1 化：当前 dot-source .ps1 拆分保持 $script: 作用域共享（低风险）；下一阶段转真模块（.psm1 + Export-ModuleMember，需显式传递共享状态）
 - v2.0 GUI（鼠鼠风格 WPF 壳，进行中）
+
+## [1.7.0] - 2026-08-09
+
+### 工程：模块化拆分（不再往单文件塞功能）
+- **cpu-cleaner.ps1 从 1539 行拆分为 7 个域文件**（dot-source 加载，保持 $script: 作用域共享——低风险渐进式，不破坏现有测试/状态）：
+  - `src/Core/Utils.ps1`：Read-Utf8Json / Normalize-ProcessName（跨域共用）
+  - `src/Core/ProfileEngine.ps1`：Schema 校验/迁移/match_type 匹配分发/Load-Profiles/Match-Profiles
+  - `src/Core/Scanner.ps1`：系统采集（概况/CPU 多采样/服务/自启/任务/可疑进程）
+  - `src/Core/RiskEngine.ps1`：多维风险评分体系
+  - `src/Core/ReportEngine.ps1`：文本报告 + HTML 报告
+  - `src/Core/ActionEngine.ps1`：待办清单/授权验证/clean/restore/update
+  - `src/Core/BackupManager.ps1`：单值备份/恢复
+- 主脚本瘦身为 ~90 行：头部说明/常量/dot-source 加载/主流程 switch；GUI 通过子进程调用主脚本（不受影响）
+- run-unit.ps1 适配：截取段删除 dot-source 块（截取环境 $script:Root 指向 tests 会路径错误），改为按依赖顺序点源 src/Core/；CI analyzer 覆盖 src/Core/ 全部文件
 
 ## [1.6.0] - 2026-08-09
 

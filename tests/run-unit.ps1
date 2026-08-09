@@ -7,7 +7,13 @@ $src = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF
 $idx = $src.IndexOf("switch (`$Mode)")
 if ($idx -lt 0) { Write-Host '未找到主流程 switch, 无法截取' -ForegroundColor Red; exit 1 }
 $defs = $src.Substring(0, $idx)
+# v1.7.0 模块化: 截取段里的 dot-source 在截取环境下 $script:Root 指向 tests 目录, 路径错误
+# 删除 dot-source 块, 改为下方按依赖顺序点源 src/Core/
+$defs = $defs -replace "(?s)# ---------- v1\.7\.0 模块化.*?\n\}", ''
 Invoke-Expression $defs
+foreach ($f in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
+    . (Join-Path $projectRoot ('src\Core\' + $f + '.ps1'))
+}
 
 Write-Host '===== 逻辑测试 (映射/状态机/safe) =====' -ForegroundColor Cyan
 $test1 = Get-Content (Join-Path $PSScriptRoot 'unit-logic.ps1') -Raw -Encoding UTF8
