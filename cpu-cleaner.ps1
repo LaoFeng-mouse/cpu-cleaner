@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 v1.1 (cpu-cleaner.ps1)
+#  CPU 后台整理工具 v1.2 (cpu-cleaner.ps1) — Reliability Release
 #  适用: Windows 10/11, PowerShell 5.1+
 #
 #  用法:
@@ -273,7 +273,7 @@ function Write-ScanReport {
 
     $lines = @()
     $lines += '=' * 60
-    $lines += '  CPU 后台整理工具 - 诊断报告 v1.1'
+    $lines += '  CPU 后台整理工具 - 诊断报告 v1.2'
     $lines += '  生成时间: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     $lines += '=' * 60
     $lines += ''
@@ -355,11 +355,13 @@ function Write-ScanReport {
     return ($lines -join "`r`n")
 }
 
-# ---------- 9. 待办清单 (A1 结构化字段 + C8 done 利用) ----------
+# ---------- 9. 待办清单 (v1.2: safe 强制规则 + status 状态机) ----------
 function Save-PendingActions($Hits, $Suspicious) {
     $actions = @()
     foreach ($h in $Hits) {
         if ($h.action -eq 'none' -or $h.action -eq 'investigate') { continue }
+        # v1.2 强制规则: safe=false 只报告, 永不进入待办队列 (即使 -YesToAll 也不能执行)
+        if (-not $h.safe) { continue }
 
         # 跳过已经是目标状态的条目
         $skip = $false
@@ -392,7 +394,9 @@ function Save-PendingActions($Hits, $Suspicious) {
             autostart_name    = $h.autostart_name
             task_path         = $h.task_path
             process_name      = $h.process_name
-            done      = $false
+            safe      = $h.safe
+            # v1.2 状态机: pending / success / failed / skipped / manual_required
+            status    = 'pending'
         }
     }
 
@@ -414,6 +418,48 @@ function Save-PendingActions($Hits, $Suspicious) {
 }
 
 # ---------- 10. clean 模式 ----------
+# v1.2: 服务启动类型映射 (sc.exe 参数 vs StartType 枚举)
+function Convert-StartTypeToSc($startType) {
+    switch ($startType.ToString()) {
+        'Automatic' { return 'auto' }
+        'Manual'    { return 'demand' }
+        'Disabled'  { return 'disabled' }
+        'Boot'      { return 'boot' }
+        'System'    { return 'system' }
+        default     { return 'disabled' }
+    }
+}
+
+# 旧 manifest 兼容: 数字枚举 0=Boot 1=System 2=Automatic 3=Manual 4=Disabled
+function Convert-NumberToSc($n) {
+    switch ([int]$n) {
+        0 { return 'boot' }
+        1 { return 'system' }
+        2 { return 'auto' }
+        3 { return 'demand' }
+        4 { return 'disabled' }
+        default { return 'disabled' }
+    }
+}
+
+# 采集服务备份信息: 启动类型(sc 格式/显示格式) + 运行状态 + DelayedAutoStart
+function Get-ServiceBackupInfo($srvName) {
+    $svc = Get-Service -Name $srvName -ErrorAction SilentlyContinue
+    if (-not $svc) { return $null }
+    $startType = $svc.StartType.ToString()
+    $delayed = 0
+    try {
+        $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$srvName"
+        $delayed = (Get-ItemProperty $regPath -Name DelayedAutostart -ErrorAction Stop).DelayedAutostart
+    } catch { $delayed = 0 }
+    return [pscustomobject]@{
+        start_type_sc      = Convert-StartTypeToSc $startType
+        start_type_display = $startType
+        status             = $svc.Status.ToString()
+        delayed_autostart  = $delayed
+    }
+}
+
 function Backup-RegistryKey($keyPath, $backupDir, $tag) {
     $regPath = $keyPath -replace '^HKLM:', 'HKLM' -replace '^HKCU:', 'HKCU'
     $out = Join-Path $backupDir ("$tag.reg")
@@ -432,8 +478,9 @@ function Invoke-Clean {
     }
     $pending = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
     # null 防御: $pending.actions 为空/null 时不得产生 @($null) 元素 (管道展开陷阱)
+    # v1.2 状态机: 只处理 pending(待办) 和 failed(可重试); success/skipped/manual_required 跳过
     $actions = @()
-    if ($pending.actions) { $actions = @($pending.actions | Where-Object { $_ -and -not $_.done }) }
+    if ($pending.actions) { $actions = @($pending.actions | Where-Object { $_ -and $_.status -in @('pending','failed') }) }
     $suspicious = @()
     if ($pending.suspicious) { $suspicious = @($pending.suspicious) }
 
@@ -476,22 +523,54 @@ function Invoke-Clean {
             $tag = ('{0}_{1}' -f $idx, ($p.id -replace '[^a-zA-Z0-9_-]', '_'))
             Write-Step ('处理: {0} ({1})' -f $p.name_cn, $p.action)
 
+            # v1.2 强制规则: safe=false 即使被选中/YesToAll 也拒绝执行
+            if (-not $p.safe) {
+                Write-Host '  拒绝: safe=false 条目禁止自动执行, 只做人工调查。' -ForegroundColor Red
+                $p.status = 'skipped'
+                continue
+            }
+
             switch ($p.action) {
                 'disable_service' {
                     $srvName = $p.service_name
                     if ($srvName -and $srvName -match '^[A-Za-z0-9_.]+$') {
+                        $info = Get-ServiceBackupInfo $srvName
+                        if (-not $info) {
+                            Write-Host "  服务不存在: $srvName" -ForegroundColor DarkYellow
+                            $p.status = 'skipped'
+                            continue
+                        }
                         $bak = Backup-RegistryKey "HKLM:\SYSTEM\CurrentControlSet\Services\$srvName" $backupDir $tag
-                        $before = (Get-Service -Name $srvName -ErrorAction SilentlyContinue).StartType
                         Write-Host "  [sc] config $srvName start= disabled" -ForegroundColor DarkGray
                         sc.exe config $srvName start= disabled
                         Write-Host "  [sc] stop $srvName" -ForegroundColor DarkGray
                         sc.exe stop $srvName
-                        $after = (Get-Service -Name $srvName -ErrorAction SilentlyContinue).StartType
-                        $manifest += [pscustomobject]@{ type='service'; name=$srvName; backup=$bak; before=$before; after=$after; note='restore: sc config <name> start= <before>' }
-                        Write-Host "  结果: $before -> $after" -ForegroundColor Green
-                        if ($after -ne 'Disabled') { Write-Host '  注意: 服务未变为禁用, 可能被自我保护拦截 (如 HRWSCCtrl 属正常)。' -ForegroundColor DarkYellow }
+                        # v1.2: 执行后验证 (重新读取真实状态, 不能"命令执行过=成功")
+                        $after = Get-Service -Name $srvName -ErrorAction SilentlyContinue
+                        if ($after -and $after.StartType -eq 'Disabled') {
+                            $p.status = 'success'
+                            $note = if ($after.Status -eq 'Running') { '已禁用但进程仍在运行(重启后消失)' } else { '已禁用并停止' }
+                            Write-Host "  验证通过: StartType=Disabled, $note" -ForegroundColor Green
+                            $manifest += [pscustomobject]@{
+                                type='service'; name=$srvName; backup=$bak
+                                start_type_sc=$info.start_type_sc; start_type_display=$info.start_type_display
+                                status=$info.status; delayed_autostart=$info.delayed_autostart
+                                verified=$true; note='restore: sc config <name> start= <start_type_sc>'
+                            }
+                        } else {
+                            $p.status = 'failed'
+                            $actual = if ($after) { $after.StartType.ToString() } else { '服务不存在' }
+                            Write-Host "  验证失败: 当前 StartType=$actual (可能被自我保护拦截)" -ForegroundColor Red
+                            $manifest += [pscustomobject]@{
+                                type='service'; name=$srvName; backup=$bak
+                                start_type_sc=$info.start_type_sc; start_type_display=$info.start_type_display
+                                status=$info.status; delayed_autostart=$info.delayed_autostart
+                                verified=$false; note='restore: sc config <name> start= <start_type_sc>'
+                            }
+                        }
                     } else {
                         Write-Host "  跳过: 服务名无效 ($srvName)" -ForegroundColor DarkYellow
+                        $p.status = 'skipped'
                     }
                 }
                 'remove_autostart' {
@@ -502,10 +581,21 @@ function Invoke-Clean {
                         if ($key -and ($key.PSObject.Properties | Where-Object { $_.Name -eq $nm })) {
                             $bak = Backup-RegistryKey $rp $backupDir $tag
                             Remove-ItemProperty -Path $rp -Name $nm -ErrorAction SilentlyContinue
-                            $manifest += [pscustomobject]@{ type='autostart'; key=$rp; name=$nm; backup=$bak; note='restore: reg import <backup>' }
-                            Write-Host "  已删除自启项: $nm (备份: $bak)" -ForegroundColor Green
+                            # v1.2: 执行后验证
+                            $keyAfter = Get-ItemProperty $rp -ErrorAction SilentlyContinue
+                            $stillThere = $keyAfter -and ($keyAfter.PSObject.Properties | Where-Object { $_.Name -eq $nm })
+                            if (-not $stillThere) {
+                                $p.status = 'success'
+                                Write-Host "  验证通过: 自启项已删除: $nm (备份: $bak)" -ForegroundColor Green
+                                $manifest += [pscustomobject]@{ type='autostart'; key=$rp; name=$nm; backup=$bak; verified=$true; note='restore: reg import <backup>' }
+                            } else {
+                                $p.status = 'failed'
+                                Write-Host "  验证失败: 自启项仍在 ($nm)" -ForegroundColor Red
+                                $manifest += [pscustomobject]@{ type='autostart'; key=$rp; name=$nm; backup=$bak; verified=$false; note='restore: reg import <backup>' }
+                            }
                         } else {
                             Write-Host "  跳过: 自启项已不存在 ($nm)" -ForegroundColor DarkYellow
+                            $p.status = 'skipped'
                         }
                     }
                 }
@@ -520,21 +610,32 @@ function Invoke-Clean {
                             $bak = Join-Path $backupDir "$tag.xml"
                             $xml | Out-File $bak -Encoding utf8
                             Disable-ScheduledTask -TaskName $taskName -TaskPath $taskFolder | Out-Null
-                            $manifest += [pscustomobject]@{ type='task'; name=$taskPath; backup=$bak; note='restore: Register-ScheduledTask -Xml <backup> -TaskName <name> -TaskPath <path> -Force' }
-                            Write-Host "  已禁用计划任务: $taskPath (备份: $bak)" -ForegroundColor Green
+                            # v1.2: 执行后验证
+                            $taskAfter = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
+                            if (-not $taskAfter -or $taskAfter.State -eq 'Disabled') {
+                                $p.status = 'success'
+                                Write-Host "  验证通过: 已禁用计划任务: $taskPath (备份: $bak)" -ForegroundColor Green
+                                $manifest += [pscustomobject]@{ type='task'; name=$taskPath; backup=$bak; verified=$true; note='restore: Register-ScheduledTask -Xml <backup> -TaskName <name> -TaskPath <path> -Force' }
+                            } else {
+                                $p.status = 'failed'
+                                Write-Host "  验证失败: 任务状态=$($taskAfter.State)" -ForegroundColor Red
+                                $manifest += [pscustomobject]@{ type='task'; name=$taskPath; backup=$bak; verified=$false; note='restore: Register-ScheduledTask -Xml <backup> -TaskName <name> -TaskPath <path> -Force' }
+                            }
                         } else {
                             Write-Host "  跳过: 计划任务不存在 ($taskPath)" -ForegroundColor DarkYellow
+                            $p.status = 'skipped'
                         }
                     }
                 }
                 'uninstall' {
                     Write-Host '  uninstall 动作需要人工确认, 请到 设置 -> 应用 -> 已安装的应用 手动卸载。' -ForegroundColor Yellow
+                    $p.status = 'manual_required'
                 }
                 default {
                     Write-Host "  未知动作: $($p.action), 跳过" -ForegroundColor DarkYellow
+                    $p.status = 'skipped'
                 }
             }
-            $p.done = $true
         }
 
         # -InputObject 强制数组, 空 manifest 也写 []
@@ -542,7 +643,7 @@ function Invoke-Clean {
         [System.IO.File]::WriteAllText((Join-Path $backupDir 'manifest.json'), $jsonM, (New-Object System.Text.UTF8Encoding($true)))
         Write-Step "动作处理完成。备份目录: $backupDir"
 
-        # 写回 done 状态 (C8): 重建完整 payload, 用 -InputObject 防管道展开
+        # 写回 status 状态机 (v1.2): 重建完整 payload, 用 -InputObject 防管道展开
         $suspArr2 = @()
         if ($pending.suspicious) { $suspArr2 = @($pending.suspicious) }
         $payload2 = [pscustomobject]@{
@@ -630,10 +731,44 @@ function Invoke-Restore {
     foreach ($m in $manifest) {
         switch ($m.type) {
             'service' {
-                Write-Host "  恢复服务 $($m.name): $($m.before)" -ForegroundColor Yellow
-                sc.exe config $m.name start= $m.before
-                $svc = Get-Service -Name $m.name -ErrorAction SilentlyContinue
-                if ($svc -and $svc.StartType -eq 'Disabled') { sc.exe config $m.name start= $m.before }
+                # v1.2: 启动类型映射修复 (Automatic→auto, Manual→demand, Disabled→disabled)
+                # 兼容三种 manifest 格式: 新格式 start_type_sc / 旧格式 before(字符串枚举) / 更旧 before(数字枚举)
+                $scVal = $null
+                if ($m.PSObject.Properties.Name -contains 'start_type_sc' -and $m.start_type_sc) {
+                    $scVal = $m.start_type_sc
+                } elseif ($m.before -match '^\d+$') {
+                    $scVal = Convert-NumberToSc $m.before
+                } elseif ($m.before) {
+                    $scVal = Convert-StartTypeToSc $m.before
+                } else {
+                    $scVal = 'disabled'
+                }
+                Write-Host "  恢复服务 $($m.name): sc config start= $scVal" -ForegroundColor Yellow
+                sc.exe config $m.name start= $scVal
+
+                # 恢复 DelayedAutoStart (v1.2)
+                if ($m.PSObject.Properties.Name -contains 'delayed_autostart') {
+                    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$($m.name)"
+                    $delayed = if ($m.delayed_autostart -eq 1 -or $m.delayed_autostart -eq $true) { 1 } else { 0 }
+                    try {
+                        New-ItemProperty -Path $regPath -Name DelayedAutostart -PropertyType DWord -Value $delayed -Force -ErrorAction Stop | Out-Null
+                        Write-Host "  恢复 DelayedAutoStart: $delayed" -ForegroundColor Green
+                    } catch {
+                        Write-Host "  无法写 DelayedAutoStart (可能无此键): $($_.Exception.Message)" -ForegroundColor DarkYellow
+                    }
+                }
+
+                # 原运行状态提示 (v1.2: 默认不自动启动, 保守; 记录原状态供用户决策)
+                $origStatus = if ($m.PSObject.Properties.Name -contains 'status') { $m.status } else { '未知' }
+                $restartAfter = if ($m.PSObject.Properties.Name -contains 'restart_after_restore') { $m.restart_after_restore } else { $false }
+                if ($origStatus -eq 'Running') {
+                    if ($restartAfter) {
+                        Write-Host "  原状态为 Running, 按记录重新启动服务..." -ForegroundColor DarkGray
+                        sc.exe start $m.name
+                    } else {
+                        Write-Host "  提示: 该服务原为 Running, 如需立即启动: sc start $($m.name)" -ForegroundColor DarkYellow
+                    }
+                }
             }
             'autostart' {
                 Write-Host "  恢复自启项(reg import): $($m.backup)" -ForegroundColor Yellow
@@ -701,7 +836,7 @@ switch ($Mode) {
             # HTML 报告 (C9: 简单样式)
             $esc = { param($s) ($s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;') }
             $sec1 = ''
-            $sec1 += "<h2>1. 系统概况</h2><table><tr><th>电脑</th><td>$(& $esc $SysInfo.Model)</td></tr><tr><th>CPU</th><td>$(& $esc $SysInfo.CPU)</td></tr><tr><th>核心</th><td>$($SysInfo.Cores) 核 / $($SysInfo.Threads) 线程 / 内存 $($SysInfo.RAM_GB) GB</td></tr><tr><th>当前负载</th><td><b>$($SysInfo.CPU_Load)%</b></td></tr><tr><th>开机</th><td>$($SysInfo.BootTime) (已运行 $($SysInfo.Uptime))</td></tr></table>"
+            $sec1 += "<h2>1. 系统概况</h2><table><tr><th>电脑</th><td>$(& $esc $sys.Model)</td></tr><tr><th>CPU</th><td>$(& $esc $sys.CPU)</td></tr><tr><th>核心</th><td>$($sys.Cores) 核 / $($sys.Threads) 线程 / 内存 $($sys.RAM_GB) GB</td></tr><tr><th>当前负载</th><td><b>$($sys.CPU_Load)%</b></td></tr><tr><th>开机</th><td>$($sys.BootTime) (已运行 $($sys.Uptime))</td></tr></table>"
 
             $sec2 = "<h2>2. Top CPU 进程</h2><table><tr><th>PID</th><th>进程</th><th>CPU%</th><th>内存MB</th><th>路径</th></tr>"
             foreach ($p in $procs) { $sec2 += "<tr><td>$($p.PID)</td><td>$(& $esc $p.Name)</td><td>$($p.'CPU%')</td><td>$($p.MemMB)</td><td>$(& $esc $p.Path)</td></tr>" }

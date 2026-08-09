@@ -52,7 +52,10 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 **安全设计：**
 - 默认只读：scan 不修改任何设置
 - 双重确认：clean 先显示完整清单（名字/动作/原因），输入编号或 all 才执行，可随时 q 退出
-- 自动备份：每个处理动作备份到 `backups\时间戳\`，reg 文件 / 任务 XML / manifest 一应俱全
+- **safe 强制规则：特征库标 safe=false 的条目只报告、永不进入待办队列，即使 -YesToAll 也拒绝执行**
+- **执行后验证：每个动作执行完重新读取真实状态确认（服务 StartType / 注册表值 / 任务 State），验证通过才标记 success，否则 failed**
+- **状态机：pending → success / failed / skipped / manual_required；重跑只处理 pending 和 failed，其余自动跳过（幂等）**
+- 自动备份：每个处理动作备份到 `backups\时间戳\`，服务备份含启动类型（sc 格式）/原运行状态/DelayedAutoStart，reg 文件 / 任务 XML / manifest 一应俱全
 - 智能跳过：已经 Disabled 的服务不会重复进清单（清理过的机器 clean 清单为空）
 - 卸载动作不自动执行：只提示，人工去"设置-应用"卸载（卸载是重操作，交给用户）
 
@@ -130,6 +133,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ## 版本记录
 
+- 2026-08-09 v1.2（Reliability Release）：① 修复 restore 服务启动类型映射（Automatic→auto/Manual→demand/Disabled→disabled，兼容旧数字枚举 manifest），备份记录启动类型+运行状态+DelayedAutoStart；② safe=false 强制只报告永不进执行队列（-YesToAll 也拒绝）；③ done 布尔改五态状态机 pending/success/failed/skipped/manual_required，重跑幂等；④ 修复 HTML 报告 $SysInfo 未定义变量（系统概况原本为空）；⑤ 每个 clean 动作执行后重新读取真实状态验证（服务 StartType/注册表值/任务 State），通过才标 success。新增 tests/ 单元测试 29 项全过，scan→clean→幂等→restore 集成回归通过。
 - 2026-08-09 v1.1.1：审查修复 5 处 PowerShell 陷阱——① clean 写回 JSON 用 -InputObject 防管道展开（原会把完整清单写成单对象/空文件）；② 清单读取 null 防御（$null 进管道产生 @($null) 导致空备份）；③ 数组序列化用变量构造（if/else 表达式输出空数组会变 $null 序列化成 {}）；④ 空 manifest 写 []；⑤ restore 对空/损坏备份报错退出。本机回归 scan→clean→clean 幂等全通过。
 - 2026-08-09 v1.1：重构落地——① clean 改用结构化字段（不再拆显示字符串，杜绝错位）；② 特征命中多类型同时列出（同一软件的服务+自启+任务不遗漏）；③ 新增未知高占用进程检测（可疑路径/无签名→人工调查，不进自动清单）；④ clean 可显式输入 PID 结束可疑进程（绝不自动杀）；⑤ 服务触发器提示（Manual 却 Running 的第三方服务单独列出）；⑥ 特征库扩展至 23 条（补 360/鲁大师/驱动精灵/Dell Command Update 等）；⑦ clean 打印 sc 执行结果；⑧ pending done 标记利用（重跑跳过已完成）；⑨ HTML 报告美化（CSS 表格）；⑩ 新增 -Mode update 特征库更新机制。
 - 2026-08-09 v1.0：首个版本。基于联想 AIAgent/LeMcpManager 全家桶清理实战泛化；特征库覆盖联想/华为/戴尔/惠普/华硕/小米/国产流氓；scan/clean/restore 三模式；本机实测通过。
