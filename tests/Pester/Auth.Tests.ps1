@@ -227,10 +227,10 @@ Describe '当前系统字段解析与相同 matcher 重放' {
         $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='Updater';type='exact'})
         $pending = [pscustomobject]@{
             id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
-            autostart_source='HKCU:\Software\Vendor\Run'; autostart_name='Updater'
+            autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='Updater'
             matched_pattern='Updater'; matched_type='exact'; matched_field='autostart_name'
         }
-        Mock Get-ItemProperty { [pscustomobject]@{ Updater='C:\Apps\updater.exe' } } -ParameterFilter { $Path -eq 'HKCU:\Software\Vendor\Run' }
+        Mock Get-ItemProperty { [pscustomobject]@{ Updater='C:\Apps\updater.exe' } } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
 
         Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
     }
@@ -239,10 +239,10 @@ Describe '当前系统字段解析与相同 matcher 重放' {
         $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='C:\Apps\updater.exe';type='exact'})
         $pending = [pscustomobject]@{
             id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
-            autostart_source='HKCU:\Software\Vendor\Run'; autostart_name='Updater'; autostart_value='C:\Apps\updater.exe'
+            autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='Updater'; autostart_value='C:\Apps\updater.exe'
             matched_pattern='C:\Apps\updater.exe'; matched_type='exact'; matched_field='autostart_value'
         }
-        Mock Get-ItemProperty { $script:AutostartKey } -ParameterFilter { $Path -eq 'HKCU:\Software\Vendor\Run' }
+        Mock Get-ItemProperty { $script:AutostartKey } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
 
         $script:AutostartKey = [pscustomobject]@{ Updater='C:\Apps\updater.exe' }
         Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
@@ -254,12 +254,53 @@ Describe '当前系统字段解析与相同 matcher 重放' {
         $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='C:\Apps';type='path'})
         $pending = [pscustomobject]@{
             id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
-            autostart_source='HKCU:\Software\Vendor\Run'; autostart_name='Updater'; autostart_value='C:\Apps\old.exe'
+            autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='Updater'; autostart_value='C:\Apps\old.exe'
             matched_pattern='C:\Apps'; matched_type='path'; matched_field='autostart_value'
         }
-        Mock Get-ItemProperty { [pscustomobject]@{ Updater='C:\Apps\changed.exe' } } -ParameterFilter { $Path -eq 'HKCU:\Software\Vendor\Run' }
+        Mock Get-ItemProperty { [pscustomobject]@{ Updater='C:\Apps\changed.exe' } } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
 
         Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
+    }
+
+    It '任意高权限注册表键即使同名 exact matcher 也拒绝且不读取' {
+        $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='Updater';type='exact'})
+        $pending = [pscustomobject]@{
+            id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
+            autostart_source='HKLM:\SYSTEM\CurrentControlSet\Services'; autostart_name='Updater'
+            matched_pattern='Updater'; matched_type='exact'; matched_field='autostart_name'
+        }
+        Mock Get-ItemProperty { [pscustomobject]@{ Updater='C:\Windows\System32\evil.exe' } } -ParameterFilter { $Path -eq 'HKLM:\SYSTEM\CurrentControlSet\Services' }
+
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
+        Assert-MockCalled Get-ItemProperty -Times 0 -Exactly -ParameterFilter { $Path -eq 'HKLM:\SYSTEM\CurrentControlSet\Services' }
+    }
+
+    It 'StartupFolder 和 Run 键子路径均 fail closed' -TestCases @(
+        @{ source='StartupFolder' }
+        @{ source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\Child' }
+        @{ source='HKCU:\Software\Microsoft\Windows\CurrentVersion\R*' }
+    ) {
+        param($source)
+        $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='Updater';type='exact'})
+        $pending = [pscustomobject]@{
+            id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
+            autostart_source=$source; autostart_name='Updater'
+            matched_pattern='Updater'; matched_type='exact'; matched_field='autostart_name'
+        }
+
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
+    }
+
+    It '标准 Run 键允许 OrdinalIgnoreCase 大小写变化' {
+        $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='Updater';type='exact'})
+        $pending = [pscustomobject]@{
+            id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
+            autostart_source='hkcu:\software\microsoft\windows\currentversion\run'; autostart_name='Updater'
+            matched_pattern='Updater'; matched_type='exact'; matched_field='autostart_name'
+        }
+        Mock Get-ItemProperty { [pscustomobject]@{ Updater='C:\Apps\updater.exe' } } -ParameterFilter { $Path -eq 'hkcu:\software\microsoft\windows\currentversion\run' }
+
+        Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
     }
 
     It 'task_name 从 pending 完整路径定位当前任务' {
@@ -390,6 +431,55 @@ Describe '当前系统字段解析与相同 matcher 重放' {
     }
 }
 
+Describe '执行前最终授权防 TOCTOU' {
+    It '初次授权后当前值变化时跳过且不调用备份或删除' {
+        $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='Updater';type='exact'})
+        $pending = [pscustomobject]@{
+            id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'; safe=$true
+            autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='Updater'
+            matched_pattern='Updater'; matched_type='exact'; matched_field='autostart_name'
+        }
+        $script:CurrentAutostart = [pscustomobject]@{ Updater='C:\Apps\old.exe' }
+        Mock Get-ItemProperty { $script:CurrentAutostart }
+        Mock Backup-AutostartValue { 'should-not-run' }
+        Mock Backup-RegistryKey { 'should-not-run' }
+        Mock Remove-ItemProperty {}
+        Mock Disable-ScheduledTask {}
+        Mock Stop-Process {}
+
+        Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
+        $script:CurrentAutostart = [pscustomobject]@{ Other='C:\Apps\old.exe' }
+        if (Test-SelectedPendingActionAuthorized $pending $profiles) {
+            Backup-AutostartValue $pending.autostart_source $pending.autostart_name 'backup' 'tag'
+            Backup-RegistryKey 'HKLM:\fake' 'backup' 'tag'
+            Remove-ItemProperty -Path $pending.autostart_source -Name $pending.autostart_name
+            Disable-ScheduledTask -TaskName FakeTask -TaskPath '\'
+            Stop-Process -Id 4242 -Force
+        }
+
+        $pending.status | Should -Be 'skipped'
+        Assert-MockCalled Backup-AutostartValue -Times 0 -Exactly
+        Assert-MockCalled Backup-RegistryKey -Times 0 -Exactly
+        Assert-MockCalled Remove-ItemProperty -Times 0 -Exactly
+        Assert-MockCalled Disable-ScheduledTask -Times 0 -Exactly
+        Assert-MockCalled Stop-Process -Times 0 -Exactly
+    }
+
+    It '真实 clean 选中循环在任何备份或 mutation 之前调用最终授权 helper' {
+        $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
+        $loop = $source.IndexOf('foreach ($idx in $indexes)')
+        $guard = $source.IndexOf('Test-SelectedPendingActionAuthorized', $loop)
+        $mutations = @('New-Item -ItemType Directory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Backup-AutostartValue', 'Remove-ItemProperty', 'Disable-ScheduledTask', 'Stop-Process') |
+            ForEach-Object { $source.IndexOf($_, $loop) }
+
+        $loop | Should -BeGreaterOrEqual 0
+        $guard | Should -BeGreaterThan $loop
+        foreach ($mutation in $mutations) {
+            $mutation | Should -BeGreaterThan $guard
+        }
+    }
+}
+
 Describe 'pending JSON 重复属性预检' {
     It '拒绝 envelope 或 action 对象中的重复属性 <label>' -TestCases @(
         @{ label='envelope exact'; json='{"actions":[],"actions":[]}' }
@@ -423,5 +513,24 @@ Describe 'pending JSON 重复属性预检' {
 
     It '严格入口在 ConvertFrom-Json 前拒绝重复键' {
         { ConvertFrom-StrictPendingJson '{"actions":[],"Actions":[]}' } | Should -Throw '*重复*'
+    }
+
+    It '容器深度按根容器为 1 计数，64 合法而 65 拒绝' {
+        $depth64 = (('[' * 64) -join '') + '0' + ((']' * 64) -join '')
+        $depth65 = (('[' * 65) -join '') + '0' + ((']' * 65) -join '')
+
+        Test-JsonPropertyNamesUnique $depth64 | Should -BeTrue
+        Test-JsonPropertyNamesUnique $depth65 | Should -BeFalse
+    }
+
+    It 'pending 文件超过 5 MiB 时在 Get-Content 和解析之前关闭' {
+        $path = 'C:\fake\oversized-pending.json'
+        Mock Get-Item { [pscustomobject]@{ Length = (5MB + 1); PSIsContainer = $false } }
+        Mock Get-Content { throw 'Get-Content must not run' }
+        Mock ConvertFrom-StrictPendingJson { throw 'parser must not run' }
+
+        { Read-StrictPendingJsonFile $path } | Should -Throw '*过大*'
+        Assert-MockCalled Get-Content -Times 0 -Exactly
+        Assert-MockCalled ConvertFrom-StrictPendingJson -Times 0 -Exactly
     }
 }

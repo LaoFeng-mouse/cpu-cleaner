@@ -1,4 +1,12 @@
 ﻿# 动作引擎 (v1.7.0 拆分): 待办清单/授权验证/clean/restore/update
+$script:AllowedAutostartRegistrySources = @(
+    'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run',
+    'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run',
+    'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+)
+$script:MaxPendingJsonBytes = 5MB
+$script:MaxPendingJsonDepth = 64
+
 # ---------- 9. 待办清单 (v1.2: safe 强制规则 + status 状态机; v1.3: 同 id 去重) ----------
 function Test-HitMatcherEvidenceShape {
     param($Hit, [string[]]$AllowedMatchTypes = @('exact','path'))
@@ -44,6 +52,14 @@ function Test-PositiveScalarProcessId($Value) {
     }
     if (-not $isInteger) { return $false }
     return ([int64]$Value -gt 0 -and [int64]$Value -le [int32]::MaxValue)
+}
+
+function Test-AllowedAutostartRegistrySource($Source) {
+    if ($Source -isnot [string] -or [string]::IsNullOrWhiteSpace($Source)) { return $false }
+    foreach ($allowedSource in $script:AllowedAutostartRegistrySources) {
+        if ([string]::Equals($Source, $allowedSource, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
 }
 
 function Skip-JsonWhitespace([string]$Json, [ref]$Index) {
@@ -120,11 +136,13 @@ function Read-JsonNumberToken([string]$Json, [ref]$Index) {
     }
 }
 
-function Read-JsonValueAndValidatePropertyNames([string]$Json, [ref]$Index) {
+function Read-JsonValueAndValidatePropertyNames([string]$Json, [ref]$Index, [int]$Depth) {
     Skip-JsonWhitespace $Json $Index
     if ($Index.Value -ge $Json.Length) { throw 'JSON 值缺失' }
     $token = $Json[$Index.Value]
     if ($token -eq '{') {
+        $containerDepth = $Depth + 1
+        if ($containerDepth -gt $script:MaxPendingJsonDepth) { throw "JSON 容器深度超过上限 $script:MaxPendingJsonDepth" }
         $Index.Value++
         $propertyNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         Skip-JsonWhitespace $Json $Index
@@ -136,7 +154,7 @@ function Read-JsonValueAndValidatePropertyNames([string]$Json, [ref]$Index) {
             Skip-JsonWhitespace $Json $Index
             if ($Index.Value -ge $Json.Length -or $Json[$Index.Value] -ne ':') { throw 'JSON 属性缺少冒号' }
             $Index.Value++
-            Read-JsonValueAndValidatePropertyNames $Json $Index
+            Read-JsonValueAndValidatePropertyNames -Json $Json -Index $Index -Depth $containerDepth
             Skip-JsonWhitespace $Json $Index
             if ($Index.Value -ge $Json.Length) { throw 'JSON 对象未闭合' }
             if ($Json[$Index.Value] -eq '}') { $Index.Value++; return }
@@ -145,11 +163,13 @@ function Read-JsonValueAndValidatePropertyNames([string]$Json, [ref]$Index) {
         }
     }
     if ($token -eq '[') {
+        $containerDepth = $Depth + 1
+        if ($containerDepth -gt $script:MaxPendingJsonDepth) { throw "JSON 容器深度超过上限 $script:MaxPendingJsonDepth" }
         $Index.Value++
         Skip-JsonWhitespace $Json $Index
         if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -eq ']') { $Index.Value++; return }
         while ($true) {
-            Read-JsonValueAndValidatePropertyNames $Json $Index
+            Read-JsonValueAndValidatePropertyNames -Json $Json -Index $Index -Depth $containerDepth
             Skip-JsonWhitespace $Json $Index
             if ($Index.Value -ge $Json.Length) { throw 'JSON 数组未闭合' }
             if ($Json[$Index.Value] -eq ']') { $Index.Value++; return }
@@ -171,7 +191,7 @@ function Read-JsonValueAndValidatePropertyNames([string]$Json, [ref]$Index) {
 function Assert-JsonPropertyNamesUnique([string]$Json) {
     if ([string]::IsNullOrWhiteSpace($Json)) { throw 'JSON 文本为空' }
     $index = 0
-    Read-JsonValueAndValidatePropertyNames $Json ([ref]$index)
+    Read-JsonValueAndValidatePropertyNames -Json $Json -Index ([ref]$index) -Depth 0
     Skip-JsonWhitespace $Json ([ref]$index)
     if ($index -ne $Json.Length) { throw 'JSON 根值之后存在多余 token' }
 }
@@ -190,6 +210,26 @@ function ConvertFrom-StrictPendingJson($Json) {
     if ($Json -isnot [string]) { throw 'pending JSON 必须是字符串' }
     Assert-JsonPropertyNamesUnique $Json
     return $Json | ConvertFrom-Json -ErrorAction Stop
+}
+
+function Test-PendingJsonFileLength($Length) {
+    $integerTypes = @([byte],[uint16],[uint32],[int16],[int32],[int64])
+    $isInteger = $false
+    foreach ($integerType in $integerTypes) {
+        if ($Length -is $integerType) { $isInteger = $true; break }
+    }
+    if (-not $isInteger) { return $false }
+    return ([int64]$Length -ge 0 -and [int64]$Length -le [int64]$script:MaxPendingJsonBytes)
+}
+
+function Read-StrictPendingJsonFile($Path) {
+    if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path)) { throw 'pending 文件路径无效' }
+    $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($null -eq $file -or $file.PSIsContainer -eq $true -or -not (Test-PendingJsonFileLength $file.Length)) {
+        throw "pending 文件过大或长度无效 (上限 $script:MaxPendingJsonBytes 字节)"
+    }
+    $json = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
+    return ConvertFrom-StrictPendingJson $json
 }
 
 function Get-CurrentPendingMatchValue($Pending) {
@@ -212,7 +252,7 @@ function Get-CurrentPendingMatchValue($Pending) {
         'autostart' {
             $source = Get-StrictNonBlankStringProperty $Pending 'autostart_source'
             $name = Get-StrictNonBlankStringProperty $Pending 'autostart_name'
-            if ($null -eq $source -or $null -eq $name) { return $null }
+            if ($null -eq $source -or $null -eq $name -or -not (Test-AllowedAutostartRegistrySource $source)) { return $null }
             try { $keys = @(Get-ItemProperty -Path $source -ErrorAction SilentlyContinue) } catch { return $null }
             if ($keys.Count -ne 1 -or $null -eq $keys[0]) { return $null }
             $properties = @($keys[0].PSObject.Properties | Where-Object {
@@ -480,6 +520,13 @@ function Test-PendingActionAuthorized($p, $profiles) {
     return [bool](Test-DetectMatch $currentValue $savedMatcher)
 }
 
+function Test-SelectedPendingActionAuthorized($Pending, $Profiles) {
+    if (Test-PendingActionAuthorized $Pending $Profiles) { return $true }
+    if ($null -ne $Pending) { $Pending.status = 'skipped' }
+    Write-Host '  跳过: 执行前最终授权失败，当前系统状态或特征证据已变化。' -ForegroundColor Red
+    return $false
+}
+
 # v1.2: 服务启动类型映射 (sc.exe 参数 vs StartType 枚举)
 function Convert-StartTypeToSc($startType) {
     switch ($startType.ToString()) {
@@ -531,8 +578,7 @@ function Invoke-Clean {
         Write-Host '未找到 pending_actions.json, 请先运行 scan 模式生成清单。' -ForegroundColor Red
         exit 1
     }
-    $pendingRaw = Get-Content $script:PendingFile -Raw -Encoding UTF8
-    $pending = ConvertFrom-StrictPendingJson $pendingRaw
+    $pending = Read-StrictPendingJsonFile $script:PendingFile
     # null 防御: $pending.actions 为空/null 时不得产生 @($null) 元素 (管道展开陷阱)
     # v1.2 状态机: 只处理 pending(待办) 和 failed(可重试); success/skipped/manual_required 跳过
     $actions = @()
@@ -591,7 +637,7 @@ function Invoke-Clean {
 
         $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
         $backupDir = Join-Path $script:BackupRoot $stamp
-        New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+        $backupDirReady = $false
         $manifest = @()
 
         foreach ($idx in $indexes) {
@@ -604,6 +650,13 @@ function Invoke-Clean {
                 Write-Host '  拒绝: safe=false 条目禁止自动执行, 只做人工调查。' -ForegroundColor Red
                 $p.status = 'skipped'
                 continue
+            }
+
+            # 用户作出最终选择后，在任何备份或系统变更前完整重读并重放保存的 matcher。
+            if (-not (Test-SelectedPendingActionAuthorized $p $profiles)) { continue }
+            if (-not $backupDirReady) {
+                New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+                $backupDirReady = $true
             }
 
             switch ($p.action) {
@@ -715,10 +768,14 @@ function Invoke-Clean {
             }
         }
 
-        # -InputObject 强制数组, 空 manifest 也写 []
-        $jsonM = ConvertTo-Json -InputObject @($manifest) -Depth 5
-        [System.IO.File]::WriteAllText((Join-Path $backupDir 'manifest.json'), $jsonM, (New-Object System.Text.UTF8Encoding($true)))
-        Write-Step "动作处理完成。备份目录: $backupDir"
+        if ($backupDirReady) {
+            # -InputObject 强制数组, 空 manifest 也写 []
+            $jsonM = ConvertTo-Json -InputObject @($manifest) -Depth 5
+            [System.IO.File]::WriteAllText((Join-Path $backupDir 'manifest.json'), $jsonM, (New-Object System.Text.UTF8Encoding($true)))
+            Write-Step "动作处理完成。备份目录: $backupDir"
+        } else {
+            Write-Step '动作处理完成。没有已授权动作进入执行阶段，未创建备份目录。'
+        }
 
         # 写回 status 状态机 (v1.2): 重建完整 payload, 用 -InputObject 防管道展开
         $suspArr2 = @()
