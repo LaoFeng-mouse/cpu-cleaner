@@ -6,9 +6,19 @@ function Save-PendingActions($Hits, $Suspicious) {
     $seenActionIds = @{}
     foreach ($h in $Hits) {
         # v1.5.6 数据模型: actions(可执行) / observations(仅观察) 分流
-        # 可执行 = 危险动作 + safe + tested (证据纪律); 其余一律进 observations:
-        #   investigate/none、safe=false、tested=false —— 不丢弃, 保留给 GUI 展示(disabled)
-        $executable = ($h.action -in $script:DangerousActions) -and $h.safe -and ($h.evidence -and $h.evidence.tested)
+        # 可执行 = 危险动作 + Boolean true safe/tested + 窄匹配证据; 其余一律进 observations
+        $safeAllowed = ($h.safe -is [bool]) -and ($h.safe -eq $true)
+        $testedAllowed = $h.evidence -and
+            ($h.evidence.PSObject.Properties.Name -contains 'tested') -and
+            ($h.evidence.tested -is [bool]) -and
+            ($h.evidence.tested -eq $true)
+        $hasNarrowEvidence = $h.matched_pattern -and
+            ($h.matched_type -in @('exact','path')) -and
+            $h.matched_field
+        $executable = ($h.action -in $script:DangerousActions) -and
+            $safeAllowed -and
+            $testedAllowed -and
+            $hasNarrowEvidence
 
         # v1.3 去重: 同一 id+类型+目标 只保留一条 (不丢同一软件的不同动作)
         $dedupeKey = "$($h.id)|$($h.hit_type)|$($h.service_name)|$($h.autostart_name)|$($h.task_path)|$($h.process_name)"
@@ -18,8 +28,10 @@ function Save-PendingActions($Hits, $Suspicious) {
         if (-not $executable) {
             # v1.5.6: 观察条目 — 记录为什么不能自动处理 (GUI 展示为 disabled checkbox)
             $obsReason = if ($h.action -eq 'none' -or $h.action -eq 'investigate') { '动作仅观察/不处理' }
-                elseif (-not $h.safe) { 'safe=false 不允许自动处理' }
-                else { '未实测 (tested=false), 仅观察' }
+                elseif (-not $safeAllowed) { 'safe=false 或类型无效, 不允许自动处理' }
+                elseif (-not $testedAllowed) { '未实测 (tested=false 或类型无效), 仅观察' }
+                elseif (($h.action -in $script:DangerousActions) -and -not $hasNarrowEvidence) { '实际命中不是 exact/path，禁止自动处理' }
+                else { '动作不允许自动处理, 仅观察' }
             $observations += [pscustomobject]@{
                 id        = $h.id
                 vendor    = $h.vendor
@@ -33,6 +45,11 @@ function Save-PendingActions($Hits, $Suspicious) {
                 autostart_name    = $h.autostart_name
                 task_path         = $h.task_path
                 process_name      = $h.process_name
+                process_id        = $h.process_id
+                process_path      = $h.process_path
+                matched_pattern   = $h.matched_pattern
+                matched_type      = $h.matched_type
+                matched_field     = $h.matched_field
                 safe      = $h.safe
                 obs_reason = $obsReason
             }
@@ -70,6 +87,11 @@ function Save-PendingActions($Hits, $Suspicious) {
             autostart_name    = $h.autostart_name
             task_path         = $h.task_path
             process_name      = $h.process_name
+            process_id        = $h.process_id
+            process_path      = $h.process_path
+            matched_pattern   = $h.matched_pattern
+            matched_type      = $h.matched_type
+            matched_field     = $h.matched_field
             safe      = $h.safe
             # v1.2 状态机: pending / success / failed / skipped / manual_required
             status    = 'pending'
@@ -84,6 +106,7 @@ function Save-PendingActions($Hits, $Suspicious) {
         })
     }
     $payload = [pscustomobject]@{
+        pending_schema_version = 2
         generated     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         actions       = $actions
         observations  = $observations
