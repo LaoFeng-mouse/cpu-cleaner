@@ -46,7 +46,7 @@ $script:I18N = @{
 function Get-Text($key) { return $script:I18N[$script:Lang][$key] }
 
 function Apply-Language {
-    $t = Get-Text
+    $t = $script:I18N[$script:Lang]
     $w = $window
     $w.Title = $t['AppName']
     $w.FindName('TitleMain').Text = $t['AppName']
@@ -221,10 +221,16 @@ $reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
 
 # 鼠鼠页面形象图: 用绝对路径 (Image Source 相对路径按工作目录解析, 不可靠)
-foreach ($imgName in 'ImgScan','ImgPending','ImgExec','ImgResult') {
+$script:ImgMap = @{
+    'ImgScan'   = 'assets/rat_scan.jpg'
+    'ImgPending'= 'assets/rat_pending.jpg'
+    'ImgExec'   = 'assets/rat_exec.jpg'
+    'ImgResult' = 'assets/rat_result.jpg'
+}
+foreach ($imgName in $script:ImgMap.Keys) {
     $imgCtrl = $window.FindName($imgName)
     if ($imgCtrl) {
-        $imgFile = Join-Path $script:Root ("assets/" + $imgName.Substring(3) + ".jpg")
+        $imgFile = Join-Path $script:Root $script:ImgMap[$imgName]
         if (Test-Path $imgFile) {
             $bi = New-Object System.Windows.Media.Imaging.BitmapImage
             $bi.BeginInit(); $bi.UriSource = ([uri]$imgFile); $bi.CacheOption = 'OnLoad'; $bi.EndInit()
