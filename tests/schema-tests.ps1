@@ -61,8 +61,8 @@ $tmp2 = Join-Path $env:TEMP ("profile_test_" + [guid]::NewGuid().ToString('N') +
 [System.IO.File]::WriteAllText($tmp2, '{"profiles": [{"id":"old-rule","vendor":"Old","name":"Old Rule","name_cn":"旧规则","type":"service","match":["OldService"],"risk":"medium","action":"disable_service","safe":true,"reason_cn":"旧"}]}', (New-Object System.Text.UTF8Encoding($false)))
 $converted = Load-Profiles -Path $tmp2
 Remove-Item $tmp2 -ErrorAction SilentlyContinue
-Assert-Equal 'v1 转换: schema_version=2' $converted.schema_version 2
-Assert-Equal 'v1 转换: detect.services[0]=OldService' @($converted.profiles[0].detect.services)[0] 'OldService'
+Assert-Equal 'v1 转换: schema_version=3' $converted.schema_version 3
+Assert-Equal 'v1 转换: detect.services[0].match=OldService' @($converted.profiles[0].detect.services)[0].match 'OldService'
 Assert-Equal 'v1 转换: actions.service=investigate(降级)' $converted.profiles[0].actions.service 'investigate'
 
 Write-Host "`n结果: $pass 通过, $fail 失败" -ForegroundColor Cyan

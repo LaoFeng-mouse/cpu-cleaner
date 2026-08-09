@@ -223,6 +223,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ## 版本记录
 
+- 2026-08-09 v1.6.0（Schema 3.0 match_type）：detect 从字符串子串升级为显式 match_type（exact/contains/regex/path/publisher/sha256），**执行闸门**——危险动作必须是窄匹配（exact/path）才能自动执行，contains/regex 宽匹配默认降级 investigate（识别保留、执行收紧），实机验证过的规则可显式 execution.allow_auto=true 豁免；旧特征库加载自动迁移 v3（11 条联想实测规则保留自动资格）；测试 85+14 项。
 - 2026-08-09 v1.5.7（CPU 采样升级）：2 秒单次采样 → 5×3 秒多次采样（平均/峰值/持续占用/子进程数），区分「瞬间吃一下」vs「持续后台发疯」；评分新增 +10 持续占用；文本/HTML 报告 Top CPU 表加 平均%/峰值%/持续/子进程 列。
 - 2026-08-09 v1.5.6（数据模型 P0）：pending_actions.json 拆 actions/observations/suspicious——investigate/safe=false/tested=false 不再静默丢弃，进 observations 且 GUI 以 disabled checkbox 展示（「证据不足，不让我动」）；全选跳过观察项；单值恢复补 Binary/MultiString 类型修复；测试 63+14 项。
 - 2026-08-09 v1.5.5（GUI 勾选式）：处理建议页逐项勾选（风险级/实测/建议动作/可恢复），未实测默认不勾选，全选/清空；「处理已勾选项目」→ CLI `-PendingFileArg` 只处理勾选子集（授权验证照跑），结果合并回主清单；GUI 无窗口测试 13 项。

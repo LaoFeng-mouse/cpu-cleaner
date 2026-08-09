@@ -17,7 +17,8 @@ Describe 'Profile 加载' {
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":2,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":["S1"],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         $p = Load-Profiles -Path $tmp
         Remove-Item $tmp -ErrorAction SilentlyContinue
-        $p.schema_version | Should -Be 2
+        # v1.6.0: 加载后统一为 v3
+        $p.schema_version | Should -Be 3
     }
     It '空 profile 不报错' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
@@ -50,7 +51,8 @@ Describe 'Profile 加载' {
         [System.IO.File]::WriteAllText($tmp, '{"profiles":[{"id":"old","vendor":"O","name":"Old","name_cn":"旧","type":"service","match":["OldSvc"],"risk":"medium","action":"disable_service","safe":true,"reason_cn":"r"}]}', (New-Object System.Text.UTF8Encoding($false)))
         $p = Load-Profiles -Path $tmp
         Remove-Item $tmp -ErrorAction SilentlyContinue
-        $p.schema_version | Should -Be 2
-        @($p.profiles[0].detect.services)[0] | Should -Be 'OldSvc'
+        # v1.6.0: 加载后统一为 v3
+        $p.schema_version | Should -Be 3
+        @($p.profiles[0].detect.services)[0].match | Should -Be 'OldSvc'
     }
 }

@@ -7,10 +7,22 @@
 ### 计划
 - 特征库数字签名验证（profiles.json.sig + 内置公钥）：SHA256 只能防下载损坏/镜像不一致/单文件篡改，攻击者同时控制 JSON 与 SHA256 下载地址时可整体替换——真正身份验证需要签名
 - 多品牌规则实测积累：当前 23 条规则中 Lenovo 11 条全实测，非联想规则大多 tested=false→investigate（正确但价值有限）。10 分方向是逐台实机积累 Dell/HP/ASUS/Xiaomi/Acer/MSI/Huawei 规则（每台机器扫描→人工确认→测试禁用/恢复→补 evidence 实测字段）。技术框架已跑在数据前面，**找机器实测的价值 > 继续加功能**
-- Schema 3.0 match_type：detect 匹配从 -like 子串升级为显式 match_type（exact / contains / regex / path / publisher / sha256）。架构原则：**识别规则可以宽，执行规则必须窄**——自动危险操作只允许 exact / publisher+exact / path+exact；contains 默认不能执行、regex 需额外审查
 - 特征库 impact 字段（规则级"影响"说明，如"AI 助手不可用"）：GUI 勾选视图已预留展示位，内容随各品牌实测积累补充（不编造）
-- 模块化拆分：cpu-cleaner.ps1 已 ~65KB、gui-cleaner.ps1 ~25KB，下一阶段拆 src/Core/{Scanner,RiskEngine,ProfileEngine,ActionEngine,BackupManager}.psm1 + src/UI/{MainWindow.xaml,GuiController.ps1}，不再往单文件塞功能
+- 模块化拆分：cpu-cleaner.ps1 已 ~80KB、gui-cleaner.ps1 ~25KB，下一阶段拆 src/Core/{Scanner,RiskEngine,ProfileEngine,ActionEngine,BackupManager}.psm1 + src/UI/{MainWindow.xaml,GuiController.ps1}，不再往单文件塞功能
 - v2.0 GUI（鼠鼠风格 WPF 壳，进行中）
+
+## [1.6.0] - 2026-08-09
+
+### Schema 3.0：match_type（识别可以宽，执行必须窄）
+- **detect 匹配升级**：字符串子串匹配升级为显式 match_type——`{ "match": "...", "type": "exact" }`（纯字符串自动视为 contains，v2 兼容）。支持 exact / contains / regex / path / publisher / sha256 六种类型（publisher/sha256 匹配签名主体/文件哈希，预留签名检测链路）
+- **执行闸门（P0 级安全原则落地）**：危险动作（disable_service/remove_autostart/disable_task/uninstall）对应的 detect 必须是窄匹配（exact/path）才可自动执行；contains/regex 宽匹配默认**降级 investigate**（识别保留、执行收紧）。规则可显式 `execution.allow_auto=true` + review_note 声明「实机审查过」恢复自动资格
+- **v2 → v3 自动迁移**：旧特征库加载时 detect 字符串自动对象化；tested=true 规则（实机验证过）自动获得 allow_auto=true 保留自动资格，tested=false 不设（本就降级）——23 条规则迁移后 11 条联想实测规则保留自动执行，其余不变
+- Load-Profiles 新增校验：detect 项格式（match 非空 + type 合法）、execution.allow_auto 布尔类型；schema_version=4+ 拒绝加载
+
+### 工程
+- 新增 Schema3.Tests.ps1 18 项：六种 match_type 分发 / 执行闸门（exact 保留、contains 降级、allow_auto 豁免）/ 格式校验拒绝 / v2 自动迁移 / 真实特征库集成（Match-Profiles + 授权五重验证 target 兼容 match_type）——Pester 67 → 85
+- CI schema 校验升级到 v3（match_type 合法 + allow_auto 布尔）；修 hashtable 键名不走 PSObject.Properties 的坑（Normalize-DetectItem 需 IDictionary 分支）、'yes' -in @($true,$false) 字符串强转布尔恒真的坑（改 -isnot [bool]）
+- 特征库升级 v3（bloatware-profiles.json，备份 .bak.v2）
 
 ## [1.5.7] - 2026-08-09
 

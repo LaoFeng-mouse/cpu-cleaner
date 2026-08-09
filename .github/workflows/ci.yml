@@ -63,19 +63,29 @@ jobs:
           foreach ($f in @('cpu-cleaner.ps1','gui-cleaner.ps1')) { $all += @(Invoke-ScriptAnalyzer -Path $f -Severity Error) }
           if ($all) { $all | Format-Table; throw "PSScriptAnalyzer found $($all.Count) error(s)" }
 
-      # 5. 特征库 schema 校验
+      # 5. 特征库 schema 校验 (v1.6.0: v3 + match_type 合法)
       - name: Profile schema validation
         shell: pwsh
         run: |
           $p = Get-Content bloatware-profiles.json -Raw -Encoding UTF8 | ConvertFrom-Json
-          if ($p.schema_version -ne 2) { throw "schema_version must be 2, got $($p.schema_version)" }
+          if ($p.schema_version -ne 3) { throw "schema_version must be 3, got $($p.schema_version)" }
           $ids = @($p.profiles | ForEach-Object { $_.id })
           $dup = $ids | Group-Object | Where-Object { $_.Count -gt 1 }
           if ($dup) { throw "duplicate ids: $($dup.Name -join ', ')" }
           $validActions = @('disable_service','remove_autostart','disable_task','uninstall','investigate','none')
+          $validTypes = @('exact','contains','regex','path','publisher','sha256')
           foreach ($rule in $p.profiles) {
             foreach ($ak in $rule.actions.PSObject.Properties.Name) {
               if ($validActions -notcontains $rule.actions.$ak) { throw "rule $($rule.id) has invalid action: $($rule.actions.$ak)" }
             }
+            foreach ($dk in @('services','processes','autostarts','tasks')) {
+              foreach ($item in @($rule.detect.$dk)) {
+                $t = if ($item -is [string]) { 'contains' } elseif ($item.type) { [string]$item.type } else { 'contains' }
+                if ($validTypes -notcontains $t) { throw "rule $($rule.id) detect.$dk invalid match_type: $t" }
+                $m = if ($item -is [string]) { $item } elseif ($item.match) { [string]$item.match } else { '' }
+                if (-not $m) { throw "rule $($rule.id) detect.$dk empty match" }
+              }
+            }
+            if ($rule.execution -and $rule.execution.allow_auto -isnot [bool]) { throw "rule $($rule.id) execution.allow_auto must be boolean" }
           }
-          Write-Output "Schema validation OK: $($p.profiles.Count) rules"
+          Write-Output "Schema validation OK: $($p.profiles.Count) rules (v3)"
