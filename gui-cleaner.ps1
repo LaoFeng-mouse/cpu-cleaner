@@ -14,41 +14,61 @@ $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="CPU 后台整理工具 - 鼠鼠版" Width="860" Height="620"
-        WindowStartupLocation="CenterScreen" Background="#FFF8EC"
+        WindowStartupLocation="CenterScreen" Background="#FFF6DC"
         FontFamily="Microsoft YaHei UI" FontSize="13">
+  <Window.Resources>
+    <!-- 鼠鼠头部几何 (viewBox 240, 与乐不思鼠 MascotRat.tsx 同参数) -->
+    <StreamGeometry x:Key="RatHeadGeo">M45 58 C58 46 182 46 195 58 C220 72 236 98 238 128 C240 156 198 180 120 180 C42 180 0 156 2 128 C4 98 20 72 45 58 Z</StreamGeometry>
+  </Window.Resources>
   <Grid Margin="12">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
     </Grid.RowDefinitions>
 
-    <!-- 头部: 鼠鼠 + 标题 -->
-    <Border Grid.Row="0" Background="#FF2C2C2C" CornerRadius="14" Margin="0,0,0,10" Padding="0">
+    <!-- 头部: 鼠鼠 + 标题 (鼠鼠风格指南配色: 墨黑底 + 蛋黄字) -->
+    <Border Grid.Row="0" Background="#211D16" CornerRadius="14" Margin="0,0,0,10" Padding="0">
     <Grid>
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="Auto"/>
         <ColumnDefinition Width="*"/>
       </Grid.ColumnDefinitions>
-      <Canvas Width="110" Height="96" Margin="14,6,6,6">
-        <!-- 耳朵 -->
-        <Ellipse Canvas.Left="8"  Canvas.Top="2" Width="42" Height="42" Fill="#1A1A1A"/>
-        <Ellipse Canvas.Left="62" Canvas.Top="2" Width="42" Height="42" Fill="#1A1A1A"/>
-        <Ellipse Canvas.Left="16" Canvas.Top="14" Width="22" Height="22" Fill="#F5A623"/>
-        <Ellipse Canvas.Left="70" Canvas.Top="14" Width="22" Height="22" Fill="#F5A623"/>
-        <!-- 大圆脸 -->
-        <Ellipse Canvas.Left="12" Canvas.Top="18" Width="88" Height="74" Fill="#1A1A1A"/>
-        <!-- 白眼睛 -->
-        <Ellipse Canvas.Left="32" Canvas.Top="44" Width="13" Height="17" Fill="#FFFFFF"/>
-        <Ellipse Canvas.Left="68" Canvas.Top="44" Width="13" Height="17" Fill="#FFFFFF"/>
-        <Ellipse Canvas.Left="36" Canvas.Top="49" Width="5" Height="8" Fill="#1A1A1A"/>
-        <Ellipse Canvas.Left="72" Canvas.Top="49" Width="5" Height="8" Fill="#1A1A1A"/>
-        <!-- 小嘴 -->
-        <Ellipse Canvas.Left="49" Canvas.Top="70" Width="12" Height="7" Fill="#F5A623"/>
-      </Canvas>
+
+      <!-- 鼠鼠吉祥物 (镜像大脸鼠: 奶白柿饼脸+暖灰褐头盔+死黑豆眼+龇牙) -->
+      <Viewbox Width="150" Height="113" Margin="14,4,4,2">
+        <Canvas Width="240" Height="180">
+          <!-- 耳朵 (压头下层, 外灰内粉) -->
+          <Ellipse Canvas.Left="28"  Canvas.Top="33" Width="36" Height="30" Fill="#8D8478" Stroke="#211D16" StrokeThickness="3.5"/>
+          <Ellipse Canvas.Left="35"  Canvas.Top="39" Width="18" Height="14" Fill="#D9A8A0"/>
+          <Ellipse Canvas.Left="176" Canvas.Top="33" Width="36" Height="30" Fill="#8D8478" Stroke="#211D16" StrokeThickness="3.5"/>
+          <Ellipse Canvas.Left="183" Canvas.Top="39" Width="18" Height="14" Fill="#D9A8A0"/>
+          <!-- 头: 柿饼脸 -->
+          <Path Data="M45 58 C58 46 182 46 195 58 C220 72 236 98 238 128 C240 156 198 180 120 180 C42 180 0 156 2 128 C4 98 20 72 45 58 Z" Fill="#F1EBE1" Stroke="#211D16" StrokeThickness="4.5"/>
+          <!-- 头盔 (裁进头形) + 额斑 -->
+          <Path Data="M4 100 C40 92 70 96 95 96 C108 96 114 102 120 110 C126 102 132 96 145 96 C170 96 200 92 236 100 L236 240 L4 240 Z" Fill="#8D8478" Clip="{StaticResource RatHeadGeo}"/>
+          <Ellipse Canvas.Left="54" Canvas.Top="57" Width="40" Height="22" Fill="#6F675C" Opacity="0.28"/>
+          <Ellipse Canvas.Left="146" Canvas.Top="57" Width="40" Height="22" Fill="#6F675C" Opacity="0.28"/>
+          <!-- 眼睛: 死黑豆眼, 微外八 4度, 无高光 -->
+          <Ellipse Canvas.Left="53" Canvas.Top="82.5" Width="30" Height="27" Fill="#231E1B">
+            <Ellipse.RenderTransform><RotateTransform Angle="-4" CenterX="68" CenterY="96"/></Ellipse.RenderTransform>
+          </Ellipse>
+          <Ellipse Canvas.Left="157" Canvas.Top="82.5" Width="30" Height="27" Fill="#231E1B">
+            <Ellipse.RenderTransform><RotateTransform Angle="4" CenterX="172" CenterY="96"/></Ellipse.RenderTransform>
+          </Ellipse>
+          <!-- 脏粉鼻 + 人中线 -->
+          <Path Data="M114 110 Q120 107 126 110 Q128 115 120 120 Q112 115 114 110 Z" Fill="#D89C96" Stroke="#211D16" StrokeThickness="2"/>
+          <Line X1="120" Y1="116" X2="120" Y2="124" Stroke="#C08880" StrokeThickness="2.5"/>
+          <!-- 嘴: 黑嘴 + 两大白方牙 + 中缝 (happy 龇牙) -->
+          <Path Data="M74 116 L166 116 C166 138 148 150 120 150 C92 150 74 138 74 116 Z" Fill="#171210"/>
+          <Rectangle Canvas.Left="86" Canvas.Top="114" Width="68" Height="24" RadiusX="6" RadiusY="6" Fill="#FFFFFF" Stroke="#211D16" StrokeThickness="2.5"/>
+          <Line X1="120" Y1="114" X2="120" Y2="138" Stroke="#211D16" StrokeThickness="2.5"/>
+        </Canvas>
+      </Viewbox>
+
       <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="6,0,10,0">
-        <TextBlock Text="CPU 后台整理工具" FontSize="24" FontWeight="Bold" Foreground="#F5A623"/>
-        <TextBlock Text="扫描 · 清理 · 恢复 —— 全程自动备份，后悔可还原" FontSize="12" Foreground="#FFD9C9"/>
-        <TextBlock Text="鼠鼠版 v1.5.1（图形界面只是壳，核心逻辑与命令行版完全一致）" FontSize="10" Foreground="#AAA"/>
+        <TextBlock Text="CPU 后台整理工具" FontSize="24" FontWeight="Bold" Foreground="#FFD21F"/>
+        <TextBlock Text="扫描 · 清理 · 恢复 —— 全程自动备份，后悔可还原" FontSize="12" Foreground="#FFF6DC"/>
+        <TextBlock Text="鼠鼠版 v1.5.1（图形界面只是壳，核心逻辑与命令行版完全一致）" FontSize="10" Foreground="#8D8478"/>
       </StackPanel>
     </Grid>
     </Border>
