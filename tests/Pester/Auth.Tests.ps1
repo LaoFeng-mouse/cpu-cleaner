@@ -239,7 +239,7 @@ Describe '当前系统字段解析与相同 matcher 重放' {
         $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='C:\Apps\updater.exe';type='exact'})
         $pending = [pscustomobject]@{
             id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
-            autostart_source='HKCU:\Software\Vendor\Run'; autostart_name='Updater'
+            autostart_source='HKCU:\Software\Vendor\Run'; autostart_name='Updater'; autostart_value='C:\Apps\updater.exe'
             matched_pattern='C:\Apps\updater.exe'; matched_type='exact'; matched_field='autostart_value'
         }
         Mock Get-ItemProperty { $script:AutostartKey } -ParameterFilter { $Path -eq 'HKCU:\Software\Vendor\Run' }
@@ -247,6 +247,18 @@ Describe '当前系统字段解析与相同 matcher 重放' {
         $script:AutostartKey = [pscustomobject]@{ Updater='C:\Apps\updater.exe' }
         Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
         $script:AutostartKey = [pscustomobject]@{ Other='C:\Apps\updater.exe' }
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
+    }
+
+    It 'autostart_value 在相同 path 前缀内变化仍拒绝授权' {
+        $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='C:\Apps';type='path'})
+        $pending = [pscustomobject]@{
+            id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
+            autostart_source='HKCU:\Software\Vendor\Run'; autostart_name='Updater'; autostart_value='C:\Apps\old.exe'
+            matched_pattern='C:\Apps'; matched_type='path'; matched_field='autostart_value'
+        }
+        Mock Get-ItemProperty { [pscustomobject]@{ Updater='C:\Apps\changed.exe' } } -ParameterFilter { $Path -eq 'HKCU:\Software\Vendor\Run' }
+
         Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
     }
 
@@ -297,6 +309,30 @@ Describe '当前系统字段解析与相同 matcher 重放' {
         Mock Get-Process { [pscustomobject]@{ Id=4242; Name='Agent'; Path='C:\Apps\agent.exe' } } -ParameterFilter { $Id -eq 4242 }
 
         Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
+    }
+
+    It '当前进程对象缺少 Id 时拒绝授权' {
+        $profiles = New-AuthProfiles -HitType process -Action uninstall -Matchers @([pscustomobject]@{match='agent';type='exact'})
+        $pending = [pscustomobject]@{
+            id='rule'; hit_type='process'; action='uninstall'; status='pending'; process_id=4242
+            process_name='Agent'; process_path='C:\Apps\agent.exe'
+            matched_pattern='agent'; matched_type='exact'; matched_field='process_name'
+        }
+        Mock Get-Process { [pscustomobject]@{ Name='Agent'; Path='C:\Apps\agent.exe' } } -ParameterFilter { $Id -eq 4242 }
+
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
+    }
+
+    It 'PID 复用为同名但不同路径进程时拒绝名称授权' {
+        $profiles = New-AuthProfiles -HitType process -Action uninstall -Matchers @([pscustomobject]@{match='agent';type='exact'})
+        $pending = [pscustomobject]@{
+            id='rule'; hit_type='process'; action='uninstall'; status='pending'; process_id=4242
+            process_name='Agent'; process_path='C:\Apps\agent.exe'
+            matched_pattern='agent'; matched_type='exact'; matched_field='process_name'
+        }
+        Mock Get-Process { [pscustomobject]@{ Id=4242; Name='Agent'; Path='C:\Other\agent.exe' } } -ParameterFilter { $Id -eq 4242 }
+
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
     }
 
     It '进程 PID 名称 路径 或存活状态变化均拒绝' -TestCases @(
@@ -351,5 +387,41 @@ Describe '当前系统字段解析与相同 matcher 重放' {
         Mock Get-Process { $proc } -ParameterFilter { $Id -eq 4242 }
 
         Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
+    }
+}
+
+Describe 'pending JSON 重复属性预检' {
+    It '拒绝 envelope 或 action 对象中的重复属性 <label>' -TestCases @(
+        @{ label='envelope exact'; json='{"actions":[],"actions":[]}' }
+        @{ label='envelope case'; json='{"actions":[],"Actions":[]}' }
+        @{ label='id exact'; json='{"actions":[{"id":"a","id":"b"}]}' }
+        @{ label='id case'; json='{"actions":[{"id":"a","ID":"b"}]}' }
+        @{ label='action exact'; json='{"actions":[{"action":"a","action":"b"}]}' }
+        @{ label='action case'; json='{"actions":[{"action":"a","Action":"b"}]}' }
+        @{ label='status exact'; json='{"actions":[{"status":"a","status":"b"}]}' }
+        @{ label='status case'; json='{"actions":[{"status":"a","STATUS":"b"}]}' }
+        @{ label='pattern exact'; json='{"actions":[{"matched_pattern":"a","matched_pattern":"b"}]}' }
+        @{ label='pattern case'; json='{"actions":[{"matched_pattern":"a","MATCHED_PATTERN":"b"}]}' }
+        @{ label='type exact'; json='{"actions":[{"matched_type":"a","matched_type":"b"}]}' }
+        @{ label='type case'; json='{"actions":[{"matched_type":"a","Matched_Type":"b"}]}' }
+        @{ label='field exact'; json='{"actions":[{"matched_field":"a","matched_field":"b"}]}' }
+        @{ label='field case'; json='{"actions":[{"matched_field":"a","MATCHED_FIELD":"b"}]}' }
+    ) {
+        param($label, $json)
+        Test-JsonPropertyNamesUnique $json | Should -BeFalse
+    }
+
+    It '按解码后的属性名拒绝 Unicode escape 重复键' {
+        Test-JsonPropertyNamesUnique '{"actions":[{"id":"a","\u0069d":"b"}]}' | Should -BeFalse
+    }
+
+    It '接受合法嵌套 JSON 并由严格入口转换' {
+        $json = '{"pending_schema_version":2,"actions":[{"id":"a","status":"pending"}],"observations":[]}'
+        Test-JsonPropertyNamesUnique $json | Should -BeTrue
+        (ConvertFrom-StrictPendingJson $json).pending_schema_version | Should -Be 2
+    }
+
+    It '严格入口在 ConvertFrom-Json 前拒绝重复键' {
+        { ConvertFrom-StrictPendingJson '{"actions":[],"Actions":[]}' } | Should -Throw '*重复*'
     }
 }

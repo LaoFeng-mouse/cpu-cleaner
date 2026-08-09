@@ -121,6 +121,28 @@ Describe '进程标准化匹配保持字面语义' {
 }
 
 Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
+    It '可执行 autostart_value 命中把原始值保存到 pending' {
+        $oldPendingFile = $script:PendingFile
+        try {
+            $script:PendingFile = Join-Path $TestDrive 'autostart-value-pending.json'
+            Mock Get-ItemProperty { [pscustomobject]@{ Updater='C:\Apps\old.exe' } } -ParameterFilter { $Path -eq 'HKCU:\Software\Vendor\Run' }
+            $hit = [pscustomobject]@{
+                id='autostart-value'; vendor='T'; name_cn='Auto'; action='remove_autostart'; hit_type='autostart'; detail='Updater'; reason_cn='r'
+                service_name=''; autostart_source='HKCU:\Software\Vendor\Run'; autostart_name='Updater'; autostart_value='C:\Apps\old.exe'
+                task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{tested=$true}
+                matched_pattern='C:\Apps'; matched_type='path'; matched_field='autostart_value'
+            }
+
+            Save-PendingActions -Hits @($hit) -Suspicious @()
+
+            $saved = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            @($saved.actions).Count | Should -Be 1
+            $saved.actions[0].autostart_value | Should -Be 'C:\Apps\old.exe'
+        } finally {
+            $script:PendingFile = $oldPendingFile
+        }
+    }
+
     It 'path 证据只允许真实路径字段且语义无效命中只保存为 observation' {
         $validFields = @(
             [pscustomobject]@{ hit_type='autostart'; matched_pattern='C:\Apps'; matched_type='path'; matched_field='autostart_value' },

@@ -46,6 +46,152 @@ function Test-PositiveScalarProcessId($Value) {
     return ([int64]$Value -gt 0 -and [int64]$Value -le [int32]::MaxValue)
 }
 
+function Skip-JsonWhitespace([string]$Json, [ref]$Index) {
+    while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @([char]0x20,[char]0x09,[char]0x0A,[char]0x0D)) {
+        $Index.Value++
+    }
+}
+
+function Read-JsonStringToken([string]$Json, [ref]$Index) {
+    if ($Index.Value -ge $Json.Length -or $Json[$Index.Value] -ne '"') { throw 'JSON 字符串缺少开引号' }
+    $Index.Value++
+    $builder = New-Object System.Text.StringBuilder
+    while ($Index.Value -lt $Json.Length) {
+        $character = $Json[$Index.Value]
+        $Index.Value++
+        if ($character -eq '"') { return $builder.ToString() }
+        if ([int]$character -lt 0x20) { throw 'JSON 字符串包含未转义控制字符' }
+        if ($character -ne '\') {
+            $null = $builder.Append($character)
+            continue
+        }
+        if ($Index.Value -ge $Json.Length) { throw 'JSON 字符串转义不完整' }
+        $escaped = $Json[$Index.Value]
+        $Index.Value++
+        switch ($escaped) {
+            '"' { $null = $builder.Append('"') }
+            '\' { $null = $builder.Append('\') }
+            '/' { $null = $builder.Append('/') }
+            'b' { $null = $builder.Append([char]0x08) }
+            'f' { $null = $builder.Append([char]0x0C) }
+            'n' { $null = $builder.Append([char]0x0A) }
+            'r' { $null = $builder.Append([char]0x0D) }
+            't' { $null = $builder.Append([char]0x09) }
+            'u' {
+                if (($Index.Value + 4) -gt $Json.Length) { throw 'JSON Unicode 转义不完整' }
+                $hex = $Json.Substring($Index.Value, 4)
+                foreach ($hexCharacter in $hex.ToCharArray()) {
+                    if ('0123456789abcdefABCDEF'.IndexOf($hexCharacter) -lt 0) { throw 'JSON Unicode 转义无效' }
+                }
+                $null = $builder.Append([char][Convert]::ToInt32($hex, 16))
+                $Index.Value += 4
+            }
+            default { throw 'JSON 字符串包含未知转义' }
+        }
+    }
+    throw 'JSON 字符串缺少闭引号'
+}
+
+function Read-JsonNumberToken([string]$Json, [ref]$Index) {
+    if ($Json[$Index.Value] -eq '-') {
+        $Index.Value++
+        if ($Index.Value -ge $Json.Length) { throw 'JSON 数字不完整' }
+    }
+    if ($Json[$Index.Value] -eq '0') {
+        $Index.Value++
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { throw 'JSON 数字包含前导零' }
+    } elseif ($Json[$Index.Value] -ge '1' -and $Json[$Index.Value] -le '9') {
+        while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { $Index.Value++ }
+    } else {
+        throw 'JSON 数字无效'
+    }
+    if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -eq '.') {
+        $Index.Value++
+        $fractionStart = $Index.Value
+        while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { $Index.Value++ }
+        if ($Index.Value -eq $fractionStart) { throw 'JSON 小数部分无效' }
+    }
+    if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @('e','E')) {
+        $Index.Value++
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @('+','-')) { $Index.Value++ }
+        $exponentStart = $Index.Value
+        while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { $Index.Value++ }
+        if ($Index.Value -eq $exponentStart) { throw 'JSON 指数部分无效' }
+    }
+}
+
+function Read-JsonValueAndValidatePropertyNames([string]$Json, [ref]$Index) {
+    Skip-JsonWhitespace $Json $Index
+    if ($Index.Value -ge $Json.Length) { throw 'JSON 值缺失' }
+    $token = $Json[$Index.Value]
+    if ($token -eq '{') {
+        $Index.Value++
+        $propertyNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        Skip-JsonWhitespace $Json $Index
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -eq '}') { $Index.Value++; return }
+        while ($true) {
+            Skip-JsonWhitespace $Json $Index
+            $propertyName = Read-JsonStringToken $Json $Index
+            if (-not $propertyNames.Add($propertyName)) { throw "JSON 对象包含重复属性: $propertyName" }
+            Skip-JsonWhitespace $Json $Index
+            if ($Index.Value -ge $Json.Length -or $Json[$Index.Value] -ne ':') { throw 'JSON 属性缺少冒号' }
+            $Index.Value++
+            Read-JsonValueAndValidatePropertyNames $Json $Index
+            Skip-JsonWhitespace $Json $Index
+            if ($Index.Value -ge $Json.Length) { throw 'JSON 对象未闭合' }
+            if ($Json[$Index.Value] -eq '}') { $Index.Value++; return }
+            if ($Json[$Index.Value] -ne ',') { throw 'JSON 对象属性之间缺少逗号' }
+            $Index.Value++
+        }
+    }
+    if ($token -eq '[') {
+        $Index.Value++
+        Skip-JsonWhitespace $Json $Index
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -eq ']') { $Index.Value++; return }
+        while ($true) {
+            Read-JsonValueAndValidatePropertyNames $Json $Index
+            Skip-JsonWhitespace $Json $Index
+            if ($Index.Value -ge $Json.Length) { throw 'JSON 数组未闭合' }
+            if ($Json[$Index.Value] -eq ']') { $Index.Value++; return }
+            if ($Json[$Index.Value] -ne ',') { throw 'JSON 数组元素之间缺少逗号' }
+            $Index.Value++
+        }
+    }
+    if ($token -eq '"') { $null = Read-JsonStringToken $Json $Index; return }
+    if ($token -eq '-' -or ($token -ge '0' -and $token -le '9')) { Read-JsonNumberToken $Json $Index; return }
+    foreach ($literal in @('true','false','null')) {
+        if (($Index.Value + $literal.Length) -le $Json.Length -and $Json.Substring($Index.Value, $literal.Length) -ceq $literal) {
+            $Index.Value += $literal.Length
+            return
+        }
+    }
+    throw 'JSON 值 token 无效'
+}
+
+function Assert-JsonPropertyNamesUnique([string]$Json) {
+    if ([string]::IsNullOrWhiteSpace($Json)) { throw 'JSON 文本为空' }
+    $index = 0
+    Read-JsonValueAndValidatePropertyNames $Json ([ref]$index)
+    Skip-JsonWhitespace $Json ([ref]$index)
+    if ($index -ne $Json.Length) { throw 'JSON 根值之后存在多余 token' }
+}
+
+function Test-JsonPropertyNamesUnique($Json) {
+    if ($Json -isnot [string]) { return $false }
+    try {
+        Assert-JsonPropertyNamesUnique $Json
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function ConvertFrom-StrictPendingJson($Json) {
+    if ($Json -isnot [string]) { throw 'pending JSON 必须是字符串' }
+    Assert-JsonPropertyNamesUnique $Json
+    return $Json | ConvertFrom-Json -ErrorAction Stop
+}
+
 function Get-CurrentPendingMatchValue($Pending) {
     $hitType = Get-StrictNonBlankStringProperty $Pending 'hit_type'
     $matchedField = Get-StrictNonBlankStringProperty $Pending 'matched_field'
@@ -76,8 +222,11 @@ function Get-CurrentPendingMatchValue($Pending) {
             $currentName = [string]$properties[0].Name
             if ($matchedField -eq 'autostart_name') { return $currentName }
             if ($matchedField -eq 'autostart_value') {
+                $storedValue = Get-StrictNonBlankStringProperty $Pending 'autostart_value'
+                if ($null -eq $storedValue) { return $null }
                 try { $currentValue = $properties[0].Value } catch { return $null }
                 if ($currentValue -isnot [string] -or [string]::IsNullOrWhiteSpace($currentValue)) { return $null }
+                if (-not [string]::Equals($currentValue, $storedValue, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
                 return $currentValue
             }
             return $null
@@ -106,9 +255,14 @@ function Get-CurrentPendingMatchValue($Pending) {
             $processId = [int]$Pending.process_id
             try { $processes = @(Get-Process -Id $processId -ErrorAction SilentlyContinue) } catch { return $null }
             if ($processes.Count -ne 1 -or $null -eq $processes[0]) { return $null }
-            if ($processes[0].PSObject.Properties.Name -contains 'Id') {
-                if (-not (Test-PositiveScalarProcessId $processes[0].Id) -or [int]$processes[0].Id -ne $processId) { return $null }
-            }
+            if ($processes[0].PSObject.Properties.Name -notcontains 'Id' -or
+                -not (Test-PositiveScalarProcessId $processes[0].Id) -or
+                [int]$processes[0].Id -ne $processId) { return $null }
+            $storedPath = Get-StrictNonBlankStringProperty $Pending 'process_path'
+            if ($null -eq $storedPath) { return $null }
+            try { $currentPath = $processes[0].Path } catch { return $null }
+            if ($currentPath -isnot [string] -or [string]::IsNullOrWhiteSpace($currentPath)) { return $null }
+            if (-not [string]::Equals($currentPath, $storedPath, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
             if ($matchedField -eq 'process_name') {
                 $storedName = Get-StrictNonBlankStringProperty $Pending 'process_name'
                 $currentName = Get-StrictNonBlankStringProperty $processes[0] 'Name'
@@ -117,11 +271,6 @@ function Get-CurrentPendingMatchValue($Pending) {
                 return $currentName
             }
             if ($matchedField -eq 'process_path') {
-                $storedPath = Get-StrictNonBlankStringProperty $Pending 'process_path'
-                if ($null -eq $storedPath) { return $null }
-                try { $currentPath = $processes[0].Path } catch { return $null }
-                if ($currentPath -isnot [string] -or [string]::IsNullOrWhiteSpace($currentPath)) { return $null }
-                if (-not [string]::Equals($currentPath, $storedPath, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
                 return $currentPath
             }
             return $null
@@ -201,6 +350,7 @@ function Save-PendingActions($Hits, $Suspicious) {
                 service_name      = $h.service_name
                 autostart_source  = $h.autostart_source
                 autostart_name    = $h.autostart_name
+                autostart_value   = $h.autostart_value
                 task_path         = $h.task_path
                 process_name      = $h.process_name
                 process_id        = $h.process_id
@@ -243,6 +393,7 @@ function Save-PendingActions($Hits, $Suspicious) {
             service_name      = $h.service_name
             autostart_source  = $h.autostart_source
             autostart_name    = $h.autostart_name
+            autostart_value   = $h.autostart_value
             task_path         = $h.task_path
             process_name      = $h.process_name
             process_id        = $h.process_id
@@ -380,7 +531,8 @@ function Invoke-Clean {
         Write-Host '未找到 pending_actions.json, 请先运行 scan 模式生成清单。' -ForegroundColor Red
         exit 1
     }
-    $pending = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    $pendingRaw = Get-Content $script:PendingFile -Raw -Encoding UTF8
+    $pending = ConvertFrom-StrictPendingJson $pendingRaw
     # null 防御: $pending.actions 为空/null 时不得产生 @($null) 元素 (管道展开陷阱)
     # v1.2 状态机: 只处理 pending(待办) 和 failed(可重试); success/skipped/manual_required 跳过
     $actions = @()
