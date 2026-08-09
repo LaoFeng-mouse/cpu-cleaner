@@ -1,4 +1,4 @@
-# v1.3 单元测试: 特征库 Schema 2.0 校验 (Load-Profiles)
+﻿# v1.3 单元测试: 特征库 Schema 2.0 校验 (Load-Profiles)
 $ErrorActionPreference = 'Stop'
 $pass = 0; $fail = 0
 function Assert-Equal($name, $actual, $expected) {

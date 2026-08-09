@@ -6,31 +6,40 @@ on:
   pull_request:
     branches: [ master ]
 
+env:
+  # v1.5.2 P0: 测试环境必须确定 — Pester 固定 5.9.0 (不装 latest, 防止 6.x/未来大版本漂移)
+  PESTER_VERSION: '5.9.0'
+
 jobs:
   test:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 既有单元测试 (PS 5.1)
+      # 1. 既有单元测试 (PS 5.1, 自研 Assert-Equal, 不依赖 Pester)
       - name: Unit tests (PS 5.1)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-unit.ps1
 
-      # 2. Pester (PS 5.1)
-      - name: Pester (Windows PowerShell 5.1)
+      # 2. Pester 5 (Windows PowerShell 5.1)
+      - name: Pester 5 (Windows PowerShell 5.1)
         shell: powershell
         run: |
-          Import-Module Pester
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          Install-Module Pester -RequiredVersion $env:PESTER_VERSION -Scope CurrentUser -Force -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion $env:PESTER_VERSION
           $r = Invoke-Pester tests\Pester -PassThru
           if ($r.FailedCount -gt 0) { throw "Pester PS5.1 failed: $($r.FailedCount)" }
 
-      # 3. Pester (PowerShell 7)
-      - name: Pester (PowerShell 7)
+      # 3. Pester 5 (PowerShell 7)
+      - name: Pester 5 (PowerShell 7)
         shell: pwsh
         run: |
-          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction SilentlyContinue
-          Import-Module Pester
+          $ErrorActionPreference = 'Stop'
+          Install-Module Pester -RequiredVersion $env:PESTER_VERSION -Scope CurrentUser -Force -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion $env:PESTER_VERSION
           $r = Invoke-Pester tests/Pester -PassThru
           if ($r.FailedCount -gt 0) { throw "Pester PS7 failed: $($r.FailedCount)" }
 

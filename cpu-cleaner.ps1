@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 v1.4 (cpu-cleaner.ps1) — 多维检测与风险评分
+#  CPU 后台整理工具 v1.5.2 (cpu-cleaner.ps1) — 多维检测与风险评分
 #  适用: Windows 10/11, PowerShell 5.1+
 #
 #  用法:
@@ -29,6 +29,8 @@ $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:ProfileFile = Join-Path $script:Root 'bloatware-profiles.json'
 $script:PendingFile = Join-Path $script:Root 'pending_actions.json'
 $script:BackupRoot = Join-Path $script:Root 'backups'
+# v1.5.2: 版本号全局唯一 (文本报告/HTML 页脚统一引用, 不再手改多处)
+$script:Version = '1.5.2'
 # 特征库更新地址(可选): 填入指向 bloatware-profiles.json 的 URL 后可用 -Mode update
 $script:ProfileUrl = ''
 # v1.5.1 供应链安全: 特征库 SHA256 校验文件地址 (与 ProfileUrl 配套发布, 可选但强烈建议)
@@ -487,7 +489,7 @@ function Write-ScanReport {
 
     $lines = @()
     $lines += '=' * 60
-    $lines += '  CPU 后台整理工具 - 诊断报告 v1.4'
+    $lines += ('  CPU 后台整理工具 - 诊断报告 v{0}' -f $script:Version)
     $lines += '  生成时间: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     $lines += '=' * 60
     $lines += ''
@@ -592,6 +594,96 @@ function Write-ScanReport {
     $lines += ''
 
     return ($lines -join "`r`n")
+}
+
+# ---------- 8b. HTML 报告 (v1.5.2: 与文本报告对齐 — Top CPU 含风险评分/依据, 新增风险分级汇总/计划任务/evidence) ----------
+function Write-HtmlReport {
+    param($SysInfo, $TopProcs, $Suspicious, $AutoStarts, $Tasks, $Hits, $AutoStartNames)
+
+    $esc = { param($s) ($s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;') }
+
+    $sec1 = "<h2>1. 系统概况</h2><table><tr><th>电脑</th><td>$(& $esc $SysInfo.Model)</td></tr><tr><th>CPU</th><td>$(& $esc $SysInfo.CPU)</td></tr><tr><th>核心</th><td>$($SysInfo.Cores) 核 / $($SysInfo.Threads) 线程 / 内存 $($SysInfo.RAM_GB) GB</td></tr><tr><th>当前负载</th><td><b>$($SysInfo.CPU_Load)%</b></td></tr><tr><th>开机</th><td>$($SysInfo.BootTime) (已运行 $($SysInfo.Uptime))</td></tr></table>"
+
+    # v1.4 风险评分 (与文本报告同源)
+    $procScores = @{}
+    foreach ($p in $TopProcs) {
+        $procScores[$p.PID] = Get-ProcessRiskScore -proc $p -ProfileHits $Hits -AutoStartNames $AutoStartNames -TopProcs $TopProcs
+    }
+
+    $sec2 = "<h2>2. Top CPU 进程 (含风险评分)</h2><table><tr><th>PID</th><th>进程</th><th>CPU%</th><th>内存MB</th><th>风险分</th><th>级别</th><th>评分依据</th></tr>"
+    foreach ($p in $TopProcs) {
+        $s = $procScores[$p.PID]
+        $lvlClass = switch ($s.Level) { '高度建议处理' { 'high' } '可优化' { 'medium' } default { '' } }
+        $sec2 += "<tr><td>$($p.PID)</td><td>$(& $esc $p.Name)</td><td>$($p.'CPU%')</td><td>$($p.MemMB)</td><td>$($s.Score)</td><td class=`"$lvlClass`">$(& $esc $s.Level)</td><td>$(& $esc $s.Reasons)</td></tr>"
+    }
+    $sec2 += '</table>'
+
+    $sec3 = '<h2>3. 风险分级汇总</h2><table><tr><th>级别</th><th>数量</th></tr>'
+    $summary = @{ '正常' = 0; '建议观察' = 0; '可优化' = 0; '高度建议处理' = 0 }
+    foreach ($p in $TopProcs) { $summary[$procScores[$p.PID].Level]++ }
+    foreach ($k in '正常','建议观察','可优化','高度建议处理') {
+        $sec3 += "<tr><td>$k</td><td>$($summary[$k])</td></tr>"
+    }
+    $sec3 += '</table><p class="note">(评分说明: +30特征库 +20非系统目录 +15开机自启 +15高CPU +10无签名/同目录多进程; -40微软签名 -30System32 -25驱动)</p>'
+
+    $sec4 = '<h2>4. 未知高占用进程</h2>'
+    if ($Suspicious.Count -eq 0) { $sec4 += '<p>无 - 高占用进程均正常</p>' }
+    else {
+        $sec4 += '<table><tr><th>PID</th><th>进程</th><th>CPU%</th><th>原因</th></tr>'
+        foreach ($s in $Suspicious) { $sec4 += "<tr><td>$($s.PID)</td><td>$(& $esc $s.Name)</td><td>$($s.'CPU%')</td><td>$(& $esc $s.Reason)</td></tr>" }
+        $sec4 += '</table>'
+    }
+
+    $sec5 = '<h2>5. 开机自启动项</h2><table><tr><th>来源</th><th>名称</th><th>命令</th></tr>'
+    foreach ($a in $AutoStarts) { $sec5 += "<tr><td>$(& $esc $a.Source)</td><td>$(& $esc $a.Name)</td><td>$(& $esc $a.Value)</td></tr>" }
+    $sec5 += '</table>'
+
+    $sec6 = '<h2>6. 登录/开机触发的计划任务</h2>'
+    $loginTasks = @($Tasks | Where-Object { $_.LoginTrigger })
+    if ($loginTasks.Count -eq 0) { $sec6 += '<p>无</p>' }
+    else {
+        $sec6 += '<table><tr><th>路径</th><th>名称</th><th>状态</th></tr>'
+        foreach ($t in $loginTasks) { $sec6 += "<tr><td>$(& $esc $t.TaskPath)</td><td>$(& $esc $t.TaskName)</td><td>$($t.State)</td></tr>" }
+        $sec6 += '</table>'
+    }
+
+    $sec7 = '<h2>7. 特征库命中 (预装全家桶/可疑后台)</h2>'
+    if ($Hits.Count -eq 0) { $sec7 += '<p>未命中特征库</p>' }
+    else {
+        $sec7 += '<table><tr><th>风险</th><th>厂商</th><th>名称</th><th>命中</th><th>建议</th><th>实测</th><th>原因</th></tr>'
+        foreach ($h in $Hits) {
+            $rm = switch ($h.risk) { 'high' { '高' } 'medium' { '中' } default { '低' } }
+            $ev = if ($h.evidence -and $h.evidence.tested) { ('是 ({0} 台)' -f $h.evidence.tested_count) } elseif ($h.evidence) { '否 (参考规则)' } else { '—' }
+            $sec7 += "<tr><td>$rm</td><td>$($h.vendor)</td><td>$(& $esc $h.name_cn)</td><td>$($h.hit_type)</td><td>$($h.action)</td><td>$ev</td><td>$(& $esc $h.reason_cn)</td></tr>"
+        }
+        $sec7 += '</table>'
+    }
+
+    $notes = (Load-Profiles).keep_notes_cn
+    $sec8 = '<h2>8. 处理原则</h2><ul>'
+    foreach ($n in $notes) { $sec8 += "<li>$(& $esc $n)</li>" }
+    $sec8 += '</ul>'
+
+    $html = @"
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>CPU 后台诊断报告</title>
+<style>
+body{font-family:'Microsoft YaHei',sans-serif;max-width:1100px;margin:20px auto;padding:0 20px;color:#222;background:#f7f7f7}
+h1{color:#1a5276}h2{color:#1a5276;border-left:4px solid #1a5276;padding-left:8px;margin-top:28px}
+table{border-collapse:collapse;width:100%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+th{background:#1a5276;color:#fff;padding:8px 10px;text-align:left;font-size:13px}
+td{padding:6px 10px;border-bottom:1px solid #eee;font-size:13px;word-break:break-all}
+tr:hover td{background:#eaf2f8}
+.meta{color:#666;font-size:12px;margin-bottom:16px}
+.note{color:#666;font-size:12px}
+.high{color:#c0392b;font-weight:bold}.medium{color:#b9770e}
+</style></head><body>
+<h1>CPU 后台诊断报告</h1>
+<div class="meta">生成时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') &nbsp;|&nbsp; CPU 后台整理工具 v$($script:Version)</div>
+$sec1$sec2$sec3$sec4$sec5$sec6$sec7$sec8
+</body></html>
+"@
+    return $html
 }
 
 # ---------- 9. 待办清单 (v1.2: safe 强制规则 + status 状态机; v1.3: 同 id 去重) ----------
@@ -1097,61 +1189,8 @@ switch ($Mode) {
         Save-PendingActions $hits $susp
 
         if ($ReportPath) {
-            # HTML 报告 (C9: 简单样式)
-            $esc = { param($s) ($s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;') }
-            $sec1 = ''
-            $sec1 += "<h2>1. 系统概况</h2><table><tr><th>电脑</th><td>$(& $esc $sys.Model)</td></tr><tr><th>CPU</th><td>$(& $esc $sys.CPU)</td></tr><tr><th>核心</th><td>$($sys.Cores) 核 / $($sys.Threads) 线程 / 内存 $($sys.RAM_GB) GB</td></tr><tr><th>当前负载</th><td><b>$($sys.CPU_Load)%</b></td></tr><tr><th>开机</th><td>$($sys.BootTime) (已运行 $($sys.Uptime))</td></tr></table>"
-
-            $sec2 = "<h2>2. Top CPU 进程</h2><table><tr><th>PID</th><th>进程</th><th>CPU%</th><th>内存MB</th><th>路径</th></tr>"
-            foreach ($p in $procs) { $sec2 += "<tr><td>$($p.PID)</td><td>$(& $esc $p.Name)</td><td>$($p.'CPU%')</td><td>$($p.MemMB)</td><td>$(& $esc $p.Path)</td></tr>" }
-            $sec2 += '</table>'
-
-            $sec3 = "<h2>3. 未知高占用进程</h2>"
-            if ($susp.Count -eq 0) { $sec3 += '<p>无 - 高占用进程均正常</p>' }
-            else {
-                $sec3 += '<table><tr><th>PID</th><th>进程</th><th>CPU%</th><th>原因</th></tr>'
-                foreach ($s in $susp) { $sec3 += "<tr><td>$($s.PID)</td><td>$(& $esc $s.Name)</td><td>$($s.'CPU%')</td><td>$(& $esc $s.Reason)</td></tr>" }
-                $sec3 += '</table>'
-            }
-
-            $sec4 = "<h2>4. 开机自启动项</h2><table><tr><th>来源</th><th>名称</th><th>命令</th></tr>"
-            foreach ($a in $autos) { $sec4 += "<tr><td>$(& $esc $a.Source)</td><td>$(& $esc $a.Name)</td><td>$(& $esc $a.Value)</td></tr>" }
-            $sec4 += '</table>'
-
-            $sec5 = "<h2>5. 特征库命中</h2>"
-            if ($hits.Count -eq 0) { $sec5 += '<p>未命中特征库</p>' }
-            else {
-                $sec5 += '<table><tr><th>风险</th><th>厂商</th><th>名称</th><th>命中</th><th>建议</th><th>原因</th></tr>'
-                foreach ($h in $hits) {
-                    $rm = switch ($h.risk) { 'high' { '高' } 'medium' { '中' } default { '低' } }
-                    $sec5 += "<tr><td>$rm</td><td>$($h.vendor)</td><td>$(& $esc $h.name_cn)</td><td>$($h.hit_type)</td><td>$($h.action)</td><td>$(& $esc $h.reason_cn)</td></tr>"
-                }
-                $sec5 += '</table>'
-            }
-
-            $notes = (Load-Profiles).keep_notes_cn
-            $sec6 = "<h2>6. 处理原则</h2><ul>"
-            foreach ($n in $notes) { $sec6 += "<li>$(& $esc $n)</li>" }
-            $sec6 += '</ul>'
-
-            $html = @"
-<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
-<title>CPU 后台诊断报告</title>
-<style>
-body{font-family:'Microsoft YaHei',sans-serif;max-width:1100px;margin:20px auto;padding:0 20px;color:#222;background:#f7f7f7}
-h1{color:#1a5276}h2{color:#1a5276;border-left:4px solid #1a5276;padding-left:8px;margin-top:28px}
-table{border-collapse:collapse;width:100%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.1)}
-th{background:#1a5276;color:#fff;padding:8px 10px;text-align:left;font-size:13px}
-td{padding:6px 10px;border-bottom:1px solid #eee;font-size:13px;word-break:break-all}
-tr:hover td{background:#eaf2f8}
-.meta{color:#666;font-size:12px;margin-bottom:16px}
-.high{color:#c0392b;font-weight:bold}.medium{color:#b9770e}
-</style></head><body>
-<h1>CPU 后台诊断报告</h1>
-<div class="meta">生成时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') &nbsp;|&nbsp; CPU 后台整理工具 v1.1</div>
-$sec1$sec2$sec3$sec4$sec5$sec6
-</body></html>
-"@
+            # HTML 报告 (v1.5.2: 统一到 Write-HtmlReport, 与文本报告同源)
+            $html = Write-HtmlReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames
             [System.IO.File]::WriteAllText($ReportPath, $html, [System.Text.Encoding]::UTF8)
             Write-Host "报告已保存: $ReportPath" -ForegroundColor Green
         }

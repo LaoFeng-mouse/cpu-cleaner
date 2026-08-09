@@ -5,8 +5,21 @@
 ## [Unreleased]
 
 ### 计划
+- 特征库数字签名验证（profiles.json.sig + 内置公钥）：SHA256 只能防下载损坏/镜像不一致/单文件篡改，攻击者同时控制 JSON 与 SHA256 下载地址时可整体替换——真正身份验证需要签名
 - v2.0 GUI（鼠鼠风格 WPF 壳，进行中）
-- 特征库数字签名验证（.sig）
+
+## [1.5.2] - 2026-08-09
+
+### 修复（P0）
+- **CI 假绿根治**：移除 Pester 3.4/5.x 断言兼容包装 `Should-Be`/`Should-Throw`——`X | Should-Be Y` 时位置参数先占住 `$actual`、管道值无处可绑，每次断言都报 `InputObjectNotBound` 但从未真正执行（39 项测试全部空转，两个 CI 步骤输出 52 处绑定错误仍绿）。全部改为原生 `Should -Be` / `Should -Throw`
+- CI 固定 Pester 5.9.0（`-RequiredVersion`），不再 `Install-Module Pester -Force` 装 latest（latest 已是 6.x，测试环境必须确定）；PS5.1 与 PS7 两步骤统一版本变量
+- Pending 测试 Mock Windows 状态（`Get-Service`/`Get-ItemProperty`/`Get-ScheduledTask`）：`Save-PendingActions` 会查真实系统、跳过已达目标状态的条目，不 Mock 时测试结果取决于跑测试的机器（CI 上 S1/X/T1 不存在，「同一 id 不同动作都保留」实际 1 期望 2 直接暴露）
+- 修复过期断言：`自启进程名提取` 仍断言 v1.5.1 之前的带扩展名格式，改为标准化契约（无扩展名小写）
+
+### 工程
+- 版本号全局化：`$script:Version = '1.5.2'` 单点定义，文本报告/HTML 页脚统一引用（此前三处手改漂移：脚本头 v1.4、文本报告 v1.4、HTML 页脚 v1.1）
+- HTML 报告与文本报告统一：Top CPU 表新增 风险分/级别/评分依据 列；新增 风险分级汇总、登录触发计划任务、特征库命中实测(evidence) 章节；内联 HTML 生成抽为 `Write-HtmlReport` 函数并补测试
+- schema-tests.ps1 补 UTF-8 BOM（对齐 .ps1 编码纪律，防直接运行被 GBK 误读）
 
 ## [1.5.1] - 2026-08-09
 
