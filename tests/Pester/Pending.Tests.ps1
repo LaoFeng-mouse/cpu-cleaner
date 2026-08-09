@@ -249,6 +249,26 @@ Describe '待办清单规则' {
         @($p.actions.process_id) | Should -Contain 101
         @($p.actions.process_id) | Should -Contain 202
     }
+    It '数组、非字符串、null 或空 hit_type 不能进入执行队列' {
+        $cases = @(
+            [pscustomobject]@{ label='array bypass'; hit_type=@('bogus','service') },
+            [pscustomobject]@{ label='number'; hit_type=1 },
+            [pscustomobject]@{ label='null'; hit_type=$null },
+            [pscustomobject]@{ label='empty'; hit_type='' }
+        )
+        foreach ($case in $cases) {
+            $hit = [pscustomobject]@{
+                id=$case.label; vendor='T'; name_cn='HitType'; action='disable_service'; hit_type=$case.hit_type; detail='S1'; reason_cn='r'
+                service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
+                safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'
+            }
+            Save-PendingActions -Hits @($hit) -Suspicious @()
+            $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            @($p.actions).Count | Should -Be 0 -Because $case.label
+            @($p.observations).Count | Should -Be 1 -Because $case.label
+            $p.observations[0].obs_reason | Should -Match '匹配来源缺失或无效' -Because $case.label
+        }
+    }
     It 'pending JSON 对 0/1 条 action 和 observation 始终使用数组 token' {
         Save-PendingActions -Hits @() -Suspicious @()
         $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8

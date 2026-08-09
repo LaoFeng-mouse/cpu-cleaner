@@ -3,6 +3,12 @@
 function Test-HitMatcherEvidenceShape {
     param($Hit, [string[]]$AllowedMatchTypes = @('exact','path'))
     if (-not $Hit) { return $false }
+    if ($Hit.PSObject.Properties.Name -notcontains 'hit_type' -or
+        $Hit.hit_type -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($Hit.hit_type) -or
+        $Hit.hit_type -notin @('service','autostart','task','process')) {
+        return $false
+    }
     foreach ($propertyName in @('matched_pattern','matched_type','matched_field')) {
         if ($Hit.PSObject.Properties.Name -notcontains $propertyName) { return $false }
         $value = $Hit.$propertyName
