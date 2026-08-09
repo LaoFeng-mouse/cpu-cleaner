@@ -2,13 +2,13 @@
 # 运行: Import-Module Pester -RequiredVersion 5.9.0; Invoke-Pester tests\Pester\Schema3.Tests.ps1
 BeforeAll {
     $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $src = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
-    $idx = $src.IndexOf("switch (`$Mode)")
-    if ($idx -lt 0) { throw '未找到主流程 switch, 无法截取' }
-    $defs = $src.Substring(0, $idx)
-    $defs = $defs -replace "(?s)# ---------- v1\.7\.0 模块化.*?\n\}", ''
-    $defs = $defs.Replace('$script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path', '$script:Root = $projectRoot')
-    Invoke-Expression $defs
+    $script:Root = $projectRoot
+    $script:ProfileFile = Join-Path $script:Root 'bloatware-profiles.json'
+    $script:PendingFile = Join-Path $script:Root 'pending_actions.json'
+    $script:BackupRoot = Join-Path $script:Root 'backups'
+    $script:Version = '1.7.0'
+    $script:ProfileUrl = ''
+    $script:ProfileSha256Url = ''
     foreach ($f in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
         . (Join-Path $projectRoot ('src\Core\' + $f + '.ps1'))
     }
@@ -53,6 +53,41 @@ Describe 'Test-DetectMatch (match_type 分发)' {
     }
     It '未知 type 返回 false' {
         Test-DetectMatch 'abc123' @{ match = '123'; type = 'fuzzy' } | Should -BeFalse
+    }
+}
+
+Describe '进程标准化匹配保持字面语义' {
+    It 'Match-Profiles 不把 contains 通配符解释为模式' {
+        $tmp = Join-Path $env:TEMP ("s3_process_" + [guid]::NewGuid().ToString('N') + ".json")
+        $originalProfileFile = $script:ProfileFile
+        try {
+            [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"process-wildcard","vendor":"T","name_cn":"进程字面匹配","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"execution":{"allow_auto":true},"detect":{"services":[],"processes":[{"match":"foo*bar","type":"contains"}],"autostarts":[],"tasks":[]},"actions":{"process":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
+            $script:ProfileFile = $tmp
+
+            $wildcardHit = Match-Profiles -Services @() -AutoStarts @() -Tasks @() -TopProcs @([pscustomobject]@{ Name = 'fooXbar.exe'; PID = 1; 'CPU%' = 1; Path = 'C:\fooXbar.exe' })
+            $literalHit = Match-Profiles -Services @() -AutoStarts @() -Tasks @() -TopProcs @([pscustomobject]@{ Name = 'foo*bar.exe'; PID = 2; 'CPU%' = 1; Path = 'C:\foo*bar.exe' })
+
+            @($wildcardHit).Count | Should -Be 0
+            @($literalHit).Count | Should -Be 1
+        } finally {
+            $script:ProfileFile = $originalProfileFile
+            Remove-Item $tmp -ErrorAction SilentlyContinue
+        }
+    }
+
+    It '授权校验不把 contains 通配符解释为模式' {
+        $rule = [pscustomobject]@{
+            id = 'process-wildcard'; safe = $true
+            evidence = [pscustomobject]@{ tested = $true }
+            detect = [pscustomobject]@{ services = @(); processes = @([pscustomobject]@{ match = 'foo*bar'; type = 'contains' }); autostarts = @(); tasks = @() }
+            actions = [pscustomobject]@{ process = 'investigate' }
+        }
+        $profiles = [pscustomobject]@{ profiles = @($rule) }
+        $pending = [pscustomobject]@{ id = 'process-wildcard'; hit_type = 'process'; action = 'investigate'; process_name = 'fooXbar.exe' }
+
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
+        $pending.process_name = 'foo*bar.exe'
+        Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
     }
 }
 

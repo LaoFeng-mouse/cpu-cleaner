@@ -115,12 +115,7 @@ function Test-PendingActionAuthorized($p, $profiles) {
         'service'   { $targetOk = $p.service_name -and (@($det.services | Where-Object { Test-DetectMatch $p.service_name $_ }).Count -gt 0) }
         'autostart' { $targetOk = $p.autostart_name -and (@($det.autostarts | Where-Object { Test-DetectMatch $p.autostart_name $_ }).Count -gt 0) }
         'task'      { $targetOk = $p.task_path -and (@($det.tasks | Where-Object { Test-DetectMatch $p.task_path $_ }).Count -gt 0) }
-        'process'   { $targetOk = $p.process_name -and (@($det.processes | Where-Object {
-                        $n = Normalize-DetectItem $_
-                        if ($n.type -eq 'exact') { (Normalize-ProcessName $p.process_name) -ieq (Normalize-ProcessName $n.match) }
-                        elseif ($n.type -eq 'contains') { (Normalize-ProcessName $p.process_name) -like "*$(Normalize-ProcessName $n.match)*" }
-                        else { Test-DetectMatch (Normalize-ProcessName $p.process_name) $n }
-                     }).Count -gt 0) }
+        'process'   { $targetOk = $p.process_name -and (@($det.processes | Where-Object { Test-ProcessDetectMatch $p.process_name $_ }).Count -gt 0) }
     }
     return $targetOk
 }

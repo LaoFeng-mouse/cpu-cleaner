@@ -86,6 +86,15 @@ function Test-DetectMatch($target, $pattern, $Context = $null) {
     }
 }
 
+function Test-ProcessDetectMatch($target, $pattern, $Context = $null) {
+    $n = Normalize-DetectItem $pattern
+    if ($n.type -in @('exact','contains')) {
+        $normalizedPattern = [pscustomobject]@{ match = Normalize-ProcessName $n.match; type = $n.type }
+        return Test-DetectMatch (Normalize-ProcessName $target) $normalizedPattern -Context $Context
+    }
+    return Test-DetectMatch $target $n -Context $Context
+}
+
 # 规则某命中类型对应的 detect 匹配类型集合 (用于执行闸门)
 function Get-DetectTypesFor($rule, $hitType) {
     if (-not $rule -or -not $rule.detect) { return @() }
@@ -313,13 +322,7 @@ function Match-Profiles {
         # 进程命中 (Top CPU 进程, 动作按 actions.process; v1.5.1: 进程名标准化匹配; v1.6.0: exact/contains 走标准化, 其余按类型)
         if (-not $nullDet -and @($det.processes).Count -gt 0) {
             foreach ($tp in $TopProcs) {
-                $normProc = Normalize-ProcessName $tp.Name
-                $m = @($det.processes | Where-Object {
-                    $n = Normalize-DetectItem $_
-                    if ($n.type -eq 'exact') { $normProc -ieq (Normalize-ProcessName $n.match) }
-                    elseif ($n.type -eq 'contains') { $normProc -like "*$(Normalize-ProcessName $n.match)*" }
-                    else { Test-DetectMatch $normProc $n -Context ([pscustomobject]@{ Path = $tp.Path }) }
-                }) | Select-Object -First 1
+                $m = @($det.processes | Where-Object { Test-ProcessDetectMatch $tp.Name $_ -Context ([pscustomobject]@{ Path = $tp.Path }) }) | Select-Object -First 1
                 if ($m) {
                     $action = Get-ActionFor $act 'process'
                     $hits += New-Hit $p 'process' "$($tp.Name) PID=$($tp.PID) CPU=$($tp.'CPU%')%" '' '' '' '' $tp.Name $action
