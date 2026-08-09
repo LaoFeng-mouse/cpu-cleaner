@@ -523,14 +523,82 @@ Describe 'pending JSON 重复属性预检' {
         Test-JsonPropertyNamesUnique $depth65 | Should -BeFalse
     }
 
-    It 'pending 文件超过 5 MiB 时在 Get-Content 和解析之前关闭' {
-        $path = 'C:\fake\oversized-pending.json'
-        Mock Get-Item { [pscustomobject]@{ Length = (5MB + 1); PSIsContainer = $false } }
+    It 'pending 读取入口不再使用 Get-Item 与 Get-Content 分离检查和读取' {
+        $path = Join-Path $TestDrive 'single-stream.json'
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        Mock Get-Item { throw 'Get-Item must not run' }
         Mock Get-Content { throw 'Get-Content must not run' }
-        Mock ConvertFrom-StrictPendingJson { throw 'parser must not run' }
 
-        { Read-StrictPendingJsonFile $path } | Should -Throw '*过大*'
+        (Read-StrictPendingJsonFile $path).pending_schema_version | Should -Be 2
+        Assert-MockCalled Get-Item -Times 0 -Exactly
         Assert-MockCalled Get-Content -Times 0 -Exactly
-        Assert-MockCalled ConvertFrom-StrictPendingJson -Times 0 -Exactly
+    }
+
+    It '同一 FileStream 上先检查 Length 再创建 reader 且源码无分离入口' {
+        $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
+        $start = $source.IndexOf('function Read-LimitedPendingJsonFile')
+        $start | Should -BeGreaterOrEqual 0
+        if ($start -lt 0) { return }
+        $end = $source.IndexOf('function Read-StrictPendingJsonFile', $start)
+        $body = $source.Substring($start, $end - $start)
+
+        $body | Should -Not -Match '\bGet-Item\b|\bGet-Content\b'
+        $body.IndexOf('.Length') | Should -BeGreaterOrEqual 0
+        $body.IndexOf('StreamReader') | Should -BeGreaterThan $body.IndexOf('.Length')
+        $body.IndexOf('ReadToEnd') | Should -BeGreaterThan $body.IndexOf('StreamReader')
+    }
+
+    It '静态超限文件在读取全部内容前拒绝' {
+        $path = Join-Path $TestDrive 'oversized-pending.json'
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try { $stream.SetLength(5MB + 1) } finally { $stream.Dispose() }
+
+        { Read-LimitedPendingJsonFile $path } | Should -Throw '*过大*'
+    }
+
+    It '精确 5 MiB 的合法 JSON 位于允许边界' {
+        $path = Join-Path $TestDrive 'max-pending.json'
+        $prefix = '{"pending_schema_version":2,"actions":[]}'
+        $prefixBytes = [System.Text.Encoding]::UTF8.GetBytes($prefix)
+        $json = $prefix + [string]::new([char]' ', (5MB - $prefixBytes.Length))
+        [System.IO.File]::WriteAllBytes($path, [System.Text.Encoding]::UTF8.GetBytes($json))
+
+        $text = Read-LimitedPendingJsonFile $path
+        [System.Text.Encoding]::UTF8.GetByteCount($text) | Should -Be 5MB
+        $text.StartsWith($prefix) | Should -BeTrue
+    }
+
+    It '合法 UTF-8 pending 在有无 BOM 时均可读取' -TestCases @(
+        @{ label='without BOM'; bom=$false }
+        @{ label='with BOM'; bom=$true }
+    ) {
+        param($label, $bom)
+        $path = Join-Path $TestDrive ("utf8-$label.json")
+        $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes('{"pending_schema_version":2,"name":"测试","actions":[]}')
+        $bytes = if ($bom) { [byte[]]([System.Text.Encoding]::UTF8.GetPreamble() + $jsonBytes) } else { $jsonBytes }
+        [System.IO.File]::WriteAllBytes($path, $bytes)
+
+        $pending = Read-StrictPendingJsonFile $path
+        $pending.pending_schema_version | Should -Be 2
+        $pending.name | Should -Be '测试'
+    }
+
+    It 'pending 句柄打开后拒绝写入和替换并在 finally 后释放' {
+        $path = Join-Path $TestDrive 'locked-pending.json'
+        $replacement = Join-Path $TestDrive 'replacement.json'
+        $backup = Join-Path $TestDrive 'replace-backup.json'
+        [System.IO.File]::WriteAllText($path, '{"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($replacement, '{"actions":[1]}', [System.Text.UTF8Encoding]::new($false))
+        $locked = $null
+        try {
+            $locked = Open-PendingJsonReadStream $path
+            { [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite).Dispose() } | Should -Throw
+            { [System.IO.File]::Replace($replacement, $path, $backup) } | Should -Throw
+        } finally {
+            if ($null -ne $locked) { $locked.Dispose() }
+        }
+
+        $probe = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $probe.Dispose()
     }
 }

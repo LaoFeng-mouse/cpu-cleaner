@@ -222,14 +222,56 @@ function Test-PendingJsonFileLength($Length) {
     return ([int64]$Length -ge 0 -and [int64]$Length -le [int64]$script:MaxPendingJsonBytes)
 }
 
-function Read-StrictPendingJsonFile($Path) {
+function Open-PendingJsonReadStream($Path) {
     if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path)) { throw 'pending 文件路径无效' }
-    $file = Get-Item -LiteralPath $Path -ErrorAction Stop
-    if ($null -eq $file -or $file.PSIsContainer -eq $true -or -not (Test-PendingJsonFileLength $file.Length)) {
-        throw "pending 文件过大或长度无效 (上限 $script:MaxPendingJsonBytes 字节)"
+    return [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read
+    )
+}
+
+function Read-LimitedPendingJsonFile($Path) {
+    $stream = $null
+    $reader = $null
+    try {
+        $stream = Open-PendingJsonReadStream $Path
+        $initialLength = $stream.Length
+        if (-not (Test-PendingJsonFileLength $initialLength)) {
+            throw "pending 文件过大或长度无效 (上限 $script:MaxPendingJsonBytes 字节)"
+        }
+
+        $bomLength = 0
+        if ($initialLength -ge 3) {
+            $prefix = New-Object byte[] 3
+            $prefixRead = $stream.Read($prefix, 0, 3)
+            if ($prefixRead -eq 3 -and $prefix[0] -eq 0xEF -and $prefix[1] -eq 0xBB -and $prefix[2] -eq 0xBF) {
+                $bomLength = 3
+            } else {
+                $stream.Position = 0
+            }
+        }
+
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $reader = [System.IO.StreamReader]::new($stream, $utf8, $false, 4096, $true)
+        $json = $reader.ReadToEnd()
+        $reader.Dispose()
+        $reader = $null
+
+        if ($stream.Length -ne $initialLength -or
+            ([System.Text.Encoding]::UTF8.GetByteCount($json) + $bomLength) -ne $initialLength) {
+            throw 'pending 文件读取期间长度或内容不一致'
+        }
+        return $json
+    } finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
     }
-    $json = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop
-    return ConvertFrom-StrictPendingJson $json
+}
+
+function Read-StrictPendingJsonFile($Path) {
+    return ConvertFrom-StrictPendingJson (Read-LimitedPendingJsonFile $Path)
 }
 
 function Get-CurrentPendingMatchValue($Pending) {
@@ -578,7 +620,8 @@ function Invoke-Clean {
         Write-Host '未找到 pending_actions.json, 请先运行 scan 模式生成清单。' -ForegroundColor Red
         exit 1
     }
-    $pending = Read-StrictPendingJsonFile $script:PendingFile
+    $pendingRaw = Read-LimitedPendingJsonFile $script:PendingFile
+    $pending = ConvertFrom-StrictPendingJson $pendingRaw
     # null 防御: $pending.actions 为空/null 时不得产生 @($null) 元素 (管道展开陷阱)
     # v1.2 状态机: 只处理 pending(待办) 和 failed(可重试); success/skipped/manual_required 跳过
     $actions = @()
