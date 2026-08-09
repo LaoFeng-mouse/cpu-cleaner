@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 v1.5.6 (cpu-cleaner.ps1) — 多维检测与风险评分
+#  CPU 后台整理工具 v1.5.7 (cpu-cleaner.ps1) — 多维检测与风险评分
 #  适用: Windows 10/11, PowerShell 5.1+
 #
 #  用法:
@@ -34,7 +34,7 @@ $script:ProfileFile = Join-Path $script:Root 'bloatware-profiles.json'
 $script:PendingFile = Join-Path $script:Root 'pending_actions.json'
 $script:BackupRoot = Join-Path $script:Root 'backups'
 # v1.5.2: 版本号全局唯一 (文本报告/HTML 页脚统一引用, 不再手改多处)
-$script:Version = '1.5.6'
+$script:Version = '1.5.7'
 # 特征库更新地址(可选): 填入指向 bloatware-profiles.json 的 URL 后可用 -Mode update
 $script:ProfileUrl = ''
 # v1.5.1 供应链安全: 特征库 SHA256 校验文件地址 (与 ProfileUrl 配套发布, 可选但强烈建议)
@@ -229,27 +229,56 @@ function Get-SystemInfo {
 }
 
 # ---------- 2. Top CPU 进程 (两次采样) ----------
-function Get-TopProcesses([int]$TopN = 12) {
-    $p1 = @{}
-    Get-Process | ForEach-Object { $p1[$_.Id] = $_.CPU }
-    Start-Sleep -Seconds 2
-    $samples = @()
-    Get-Process | ForEach-Object {
-        $id = $_.Id
-        if ($p1.ContainsKey($id)) {
-            $delta = $_.CPU - $p1[$id]
-            if ($delta -lt 0) { $delta = 0 }
-            $cpuPct = [math]::Round($delta / 2 * 100 / [Environment]::ProcessorCount, 2)
-            $samples += [pscustomobject]@{
-                PID   = $id
-                Name  = $_.ProcessName
-                'CPU%' = $cpuPct
-                MemMB = [math]::Round($_.WorkingSet64 / 1MB, 0)
-                Path  = $_.Path
+# v1.5.7: 多次采样 Top 进程 — 平均 CPU / 峰值 / 持续占用 / 子进程数
+# 旧版 2 秒单次采样只看瞬间; 现在默认 5 次 × 3 秒 ≈ 15 秒, 区分"瞬间吃一下"vs"持续后台发疯"
+function Get-TopProcesses([int]$TopN = 12, [int]$Samples = 5, [int]$IntervalSec = 3) {
+    $prev = @{}
+    Get-Process | ForEach-Object { $prev[$_.Id] = $_.CPU }
+    $acc = @{}
+    for ($i = 0; $i -lt $Samples; $i++) {
+        Start-Sleep -Seconds $IntervalSec
+        Get-Process | ForEach-Object {
+            $id = $_.Id
+            if ($prev.ContainsKey($id)) {
+                $delta = $_.CPU - $prev[$id]
+                if ($delta -lt 0) { $delta = 0 }
+                $cpuPct = [math]::Round($delta / $IntervalSec * 100 / [Environment]::ProcessorCount, 2)
+                if (-not $acc.ContainsKey($id)) { $acc[$id] = @{ sum=0; peak=0; high=0; name=$_.ProcessName; path=$_.Path; mem=0 } }
+                $e = $acc[$id]
+                $e.sum += $cpuPct
+                if ($cpuPct -gt $e.peak) { $e.peak = $cpuPct }
+                if ($cpuPct -ge 5) { $e.high++ }
+                $e.mem = $_.WorkingSet64
             }
+            $prev[$id] = $_.CPU
         }
     }
-    return ($samples | Sort-Object 'CPU%' -Descending | Select-Object -First $TopN)
+    # 子进程数: 一次 CIM 查询构建 parent→children 映射 (普通权限可见范围内)
+    $children = @{}
+    try {
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object {
+            $ppid = [int]$_.ParentProcessId
+            if ($ppid -gt 0) {
+                if ($children.ContainsKey($ppid)) { $children[$ppid]++ } else { $children[$ppid] = 1 }
+            }
+        }
+    } catch {}
+    $result = @()
+    foreach ($id in $acc.Keys) {
+        $e = $acc[$id]
+        $result += [pscustomobject]@{
+            PID         = $id
+            Name        = $e.name
+            'CPU%'      = [math]::Round($e.sum / $Samples, 2)   # 平均 CPU (兼容旧字段)
+            CPUPeak     = $e.peak                               # 峰值 CPU
+            SamplesHigh = $e.high                               # 持续占用: 采样中 CPU≥5% 的次数
+            Samples     = $Samples
+            ChildCount  = if ($children.ContainsKey($id)) { $children[$id] } else { 0 }
+            MemMB       = [math]::Round($e.mem / 1MB, 0)
+            Path        = $e.path
+        }
+    }
+    return ($result | Sort-Object 'CPU%' -Descending | Select-Object -First $TopN)
 }
 
 # ---------- 3. 未知高占用进程检测 (B3) ----------
@@ -313,8 +342,13 @@ function Get-ProcessRiskScore {
     # +15 开机自启 (v1.5.1: 双方标准化后比较)
     if ($AutoStartNames -contains (Normalize-ProcessName $proc.Name)) { $score += 15; $reasons += '开机自启' }
 
-    # +15 高 CPU (瞬时采样 >5%, 报告标注为瞬时值)
+    # +15 高 CPU (平均采样 >5%; v1.5.7: 'CPU%' 已是多次采样平均)
     if ($proc.'CPU%' -gt 5) { $score += 15; $reasons += "CPU$($proc.'CPU%')%" }
+
+    # v1.5.7: +10 持续占用 — 一半以上采样 CPU≥5% (updater.exe 持续后台发疯型, 平均可能不高但一直占)
+    if ($proc.SamplesHigh -and $proc.Samples -and ($proc.SamplesHigh / $proc.Samples) -ge 0.5) {
+        $score += 10; $reasons += "持续占用$($proc.SamplesHigh)/$($proc.Samples)"
+    }
 
     # 签名 (v1.5.1 P1: Microsoft 分支必须同时满足 Status -eq Valid, 防止"主题像微软但签名无效"吃到 -40)
     if ($proc.Path) {
@@ -511,12 +545,13 @@ function Write-ScanReport {
         $procScores[$p.PID] = Get-ProcessRiskScore -proc $p -ProfileHits $Hits -AutoStartNames $AutoStartNames -TopProcs $TopProcs
     }
 
-    $lines += '【2. 当前占用 CPU 最高的进程 (含 v1.4 风险评分)】'
-    $lines += ('  {0,-6} {1,-22} {2,7} {3,7} {4,6} {5,-12} {6}' -f 'PID','进程名','CPU%','内存MB','风险分','级别','评分依据')
+    $lines += '【2. 当前占用 CPU 最高的进程 (v1.5.7: 多次采样 — 平均/峰值/持续占用/子进程)】'
+    $lines += ('  {0,-6} {1,-20} {2,7} {3,7} {4,7} {5,5} {6,6} {7,-12} {8}' -f 'PID','进程名','平均%','峰值%','持续','子进程','风险分','级别','评分依据')
     foreach ($p in $TopProcs) {
         $s = $procScores[$p.PID]
-        $lines += ('  {0,-6} {1,-22} {2,7} {3,7} {4,6} {5,-12} {6}' -f $p.PID, $p.Name, $p.'CPU%', $p.MemMB, $s.Score, $s.Level, $s.Reasons)
+        $lines += ('  {0,-6} {1,-20} {2,7} {3,7} {4,7} {5,5} {6,6} {7,-12} {8}' -f $p.PID, $p.Name, $p.'CPU%', $p.CPUPeak, ("{0}/{1}" -f $p.SamplesHigh, $p.Samples), $p.ChildCount, $s.Score, $s.Level, $s.Reasons)
     }
+    $lines += '  (持续 = 采样中 CPU≥5% 的次数/总采样数; 持续占用识别"一直占着不放"的后台)'
     $lines += ''
 
     # v1.4: 风险分级汇总
@@ -614,11 +649,11 @@ function Write-HtmlReport {
         $procScores[$p.PID] = Get-ProcessRiskScore -proc $p -ProfileHits $Hits -AutoStartNames $AutoStartNames -TopProcs $TopProcs
     }
 
-    $sec2 = "<h2>2. Top CPU 进程 (含风险评分)</h2><table><tr><th>PID</th><th>进程</th><th>CPU%</th><th>内存MB</th><th>风险分</th><th>级别</th><th>评分依据</th></tr>"
+    $sec2 = '<h2>2. Top CPU 进程 (v1.5.7 多次采样)</h2><table><tr><th>PID</th><th>进程</th><th>平均%</th><th>峰值%</th><th>持续</th><th>子进程</th><th>内存MB</th><th>风险分</th><th>级别</th><th>评分依据</th></tr>'
     foreach ($p in $TopProcs) {
         $s = $procScores[$p.PID]
         $lvlClass = switch ($s.Level) { '高度建议处理' { 'high' } '可优化' { 'medium' } default { '' } }
-        $sec2 += "<tr><td>$($p.PID)</td><td>$(& $esc $p.Name)</td><td>$($p.'CPU%')</td><td>$($p.MemMB)</td><td>$($s.Score)</td><td class=`"$lvlClass`">$(& $esc $s.Level)</td><td>$(& $esc $s.Reasons)</td></tr>"
+        $sec2 += "<tr><td>$($p.PID)</td><td>$(& $esc $p.Name)</td><td>$($p.'CPU%')</td><td>$($p.CPUPeak)</td><td>$($p.SamplesHigh)/$($p.Samples)</td><td>$($p.ChildCount)</td><td>$($p.MemMB)</td><td>$($s.Score)</td><td class=`"$lvlClass`">$(& $esc $s.Level)</td><td>$(& $esc $s.Reasons)</td></tr>"
     }
     $sec2 += '</table>'
 

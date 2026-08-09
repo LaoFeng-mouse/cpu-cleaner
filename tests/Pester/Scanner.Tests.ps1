@@ -58,4 +58,19 @@ Describe '扫描器与评分' {
         $susp = Get-SuspiciousProcesses @()
         @($susp).Count | Should -Be 0
     }
+    It '持续占用加分 (v1.5.7): 5 次采样中 3 次 ≥5%' {
+        $top = @([pscustomobject]@{ PID=9; Name='updater'; 'CPU%'=4.2; CPUPeak=38.2; SamplesHigh=3; Samples=5; ChildCount=17; MemMB=428; Path='C:\Program Files\X\updater.exe' })
+        $r = Get-ProcessRiskScore -proc $top[0] -ProfileHits @() -AutoStartNames @() -TopProcs $top
+        ($r.Reasons -match '持续占用3/5') | Should -Be $true
+    }
+    It '持续占用不足不加分: 5 次采样中 2 次 (阈值一半)' {
+        $top = @([pscustomobject]@{ PID=9; Name='updater'; 'CPU%'=2.1; CPUPeak=9.0; SamplesHigh=2; Samples=5; ChildCount=0; MemMB=50; Path='C:\Program Files\X\updater.exe' })
+        $r = Get-ProcessRiskScore -proc $top[0] -ProfileHits @() -AutoStartNames @() -TopProcs $top
+        ($r.Reasons -match '持续占用') | Should -Be $false
+    }
+    It '旧字段兼容: proc 无 SamplesHigh/Samples 不加持续分' {
+        $top = @([pscustomobject]@{ PID=1; Name='svchost'; 'CPU%'=0.5; MemMB=10; Path='C:\Windows\System32\svchost.exe' })
+        $r = Get-ProcessRiskScore -proc $top[0] -ProfileHits @() -AutoStartNames @() -TopProcs $top
+        ($r.Reasons -match '持续占用') | Should -Be $false
+    }
 }

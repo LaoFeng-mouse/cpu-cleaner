@@ -7,11 +7,20 @@
 ### 计划
 - 特征库数字签名验证（profiles.json.sig + 内置公钥）：SHA256 只能防下载损坏/镜像不一致/单文件篡改，攻击者同时控制 JSON 与 SHA256 下载地址时可整体替换——真正身份验证需要签名
 - 多品牌规则实测积累：当前 23 条规则中 Lenovo 11 条全实测，非联想规则大多 tested=false→investigate（正确但价值有限）。10 分方向是逐台实机积累 Dell/HP/ASUS/Xiaomi/Acer/MSI/Huawei 规则（每台机器扫描→人工确认→测试禁用/恢复→补 evidence 实测字段）。技术框架已跑在数据前面，**找机器实测的价值 > 继续加功能**
-- CPU 采样增强：当前 2 秒单次采样偏轻量，改为 10~15 秒 3~5 次采样，输出 平均 CPU / 峰值 CPU / 持续占用 / 内存 / 子进程数 等维度，区分「瞬间吃一下」vs「持续后台发疯」（如 updater.exe）——下一步真正该做的功能升级
 - Schema 3.0 match_type：detect 匹配从 -like 子串升级为显式 match_type（exact / contains / regex / path / publisher / sha256）。架构原则：**识别规则可以宽，执行规则必须窄**——自动危险操作只允许 exact / publisher+exact / path+exact；contains 默认不能执行、regex 需额外审查
 - 特征库 impact 字段（规则级"影响"说明，如"AI 助手不可用"）：GUI 勾选视图已预留展示位，内容随各品牌实测积累补充（不编造）
 - 模块化拆分：cpu-cleaner.ps1 已 ~65KB、gui-cleaner.ps1 ~25KB，下一阶段拆 src/Core/{Scanner,RiskEngine,ProfileEngine,ActionEngine,BackupManager}.psm1 + src/UI/{MainWindow.xaml,GuiController.ps1}，不再往单文件塞功能
 - v2.0 GUI（鼠鼠风格 WPF 壳，进行中）
+
+## [1.5.7] - 2026-08-09
+
+### 功能
+- **CPU 采样升级**：从 2 秒单次采样改为 5 次 × 3 秒 ≈ 15 秒多次采样，输出 平均 CPU / 峰值 CPU / 持续占用（采样中 CPU≥5% 的次数/总数）/ 子进程数——区分「瞬间吃一下」vs「持续后台发疯」（updater.exe 型）
+- 风险评分新增 **+10 持续占用**：一半以上采样 CPU≥5% 加分（平均可能不高但一直占着不放）；'CPU%' 字段语义升级为多次采样平均（旧引用兼容）
+- 文本/HTML 报告 Top CPU 表新增 平均%/峰值%/持续/子进程 列
+
+### 工程
+- 测试 +4 项：持续占用加分/阈值不加分/旧字段兼容（无 SamplesHigh 不报错）/报告多采样列（文本+HTML）；真实 scan 实测多采样输出
 
 ## [1.5.6] - 2026-08-09
 

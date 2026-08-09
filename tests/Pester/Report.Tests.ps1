@@ -26,8 +26,8 @@ Describe '报告输出' {
     It 'HTML 报告含风险评分/分级汇总/版本页脚(v1.5.2 文本-HTML 统一)' {
         $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores=4; Threads=8; RAM_GB=16; CPU_Load=5; BootTime='2026-01-01 00:00:00'; Uptime='1天 0小时' }
         $procs = @(
-            [pscustomobject]@{ PID=1; Name='svchost'; 'CPU%'=0.5; MemMB=10; Path='C:\Windows\System32\svchost.exe' },
-            [pscustomobject]@{ PID=2; Name='mcpman'; 'CPU%'=8; MemMB=50; Path='C:\ProgramData\Lenovo\LeMcpManager\mcpman.exe' }
+            [pscustomobject]@{ PID=1; Name='svchost'; 'CPU%'=0.5; CPUPeak=1.2; SamplesHigh=0; Samples=5; ChildCount=0; MemMB=10; Path='C:\Windows\System32\svchost.exe' },
+            [pscustomobject]@{ PID=2; Name='mcpman'; 'CPU%'=8; CPUPeak=15.5; SamplesHigh=4; Samples=5; ChildCount=2; MemMB=50; Path='C:\ProgramData\Lenovo\LeMcpManager\mcpman.exe' }
         )
         $hits = @([pscustomobject]@{ hit_type='process'; process_name='mcpman'; id='lenovo-lemcp' })
         $html = Write-HtmlReport -SysInfo $sys -TopProcs $procs -Suspicious @() -AutoStarts @() -Tasks @() -Hits $hits -AutoStartNames @('mcpman.exe')
@@ -36,6 +36,20 @@ Describe '报告输出' {
         ($html -match '风险分级汇总') | Should -Be $true
         ($html -match '可优化') | Should -Be $true
         ($html -match ('CPU 后台整理工具 v' + $script:Version)) | Should -Be $true
+        # v1.5.7: 多采样列
+        ($html -match '平均%') | Should -Be $true
+        ($html -match '峰值%') | Should -Be $true
+        ($html -match '持续') | Should -Be $true
+        ($html -match '子进程') | Should -Be $true
+    }
+    It '文本报告 Top CPU 表含多采样列 (v1.5.7)' {
+        $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores=4; Threads=8; RAM_GB=16; CPU_Load=5; BootTime='2026-01-01 00:00:00'; Uptime='1天 0小时' }
+        $procs = @([pscustomobject]@{ PID=1; Name='svchost'; 'CPU%'=0.5; CPUPeak=1.2; SamplesHigh=0; Samples=5; ChildCount=0; MemMB=10; Path='C:\Windows\System32\svchost.exe' })
+        $report = Write-ScanReport -SysInfo $sys -TopProcs $procs -Suspicious @() -Services @() -AutoStarts @() -Tasks @() -Hits @() -AutoStartNames @()
+        ($report -match '平均%') | Should -Be $true
+        ($report -match '峰值%') | Should -Be $true
+        ($report -match '持续') | Should -Be $true
+        ($report -match '子进程') | Should -Be $true
     }
     It 'UTF-8 中文特征库原因可读' {
         $profiles = Load-Profiles
