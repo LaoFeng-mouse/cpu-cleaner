@@ -1,5 +1,5 @@
 ﻿# Pester 测试: 清理动作 (映射 / safe 防御 / 验证逻辑)
-$projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$projectRoot = if (\$PSScriptRoot) { Split-Path (Split-Path \$PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
 $src = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
 $idx = $src.IndexOf("switch (`$Mode)")
 $defs = $src.Substring(0, $idx)
