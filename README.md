@@ -1,5 +1,9 @@
 # CPU 后台整理工具
 
+[![CI](https://github.com/LaoFeng-mouse/cpu-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/LaoFeng-mouse/cpu-cleaner/actions/workflows/ci.yml)
+[![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1%2B-blue)]()
+[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078d6)]()
+
 一键扫描 Windows 电脑的后台 CPU 占用，揪出预装软件全家桶和可疑后台，安全清理（自动备份、可恢复）。
 
 本工具诞生于一次真实案例：一台联想笔记本深夜被 AI 助手全家桶一次性拉起 30+ 进程，CPU 满载 69~93%，表现为"突然卡顿"。本次经验被泛化成这个通用工具——任何品牌的 Windows 电脑都能用它排查同类问题。
@@ -202,6 +206,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ## 版本记录
 
+- 2026-08-09 v1.5（Pester + CI）：新增 Pester 测试套件 tests/Pester/（6 个文件 37 项：特征库加载/待办清单/清理动作/恢复兼容/扫描评分/报告输出，覆盖空 profile/错误 JSON/去重/safe 规则/映射/中文输出）；GitHub Actions CI（PS 5.1 单元测试 + PS5.1/PS7 双跑 Pester + PSScriptAnalyzer + schema 校验），README 加 CI 徽章。修复自启进程名提取对带参数路径的解析。本机 Pester 37 项全过。
 - 2026-08-09 v1.4（多维检测与风险评分）：新增进程综合评分体系（进程名+路径+签名+自启+CPU+特征库 六维信号，评分分级 正常/建议观察/可优化/高度建议处理，只报告不自动执行）；报告第 2 节加风险分列、新增风险分级汇总节；特征库命中显示风险分数；校准 Git/msys 工具目录避免同目录误加分；联想 Appvant 入特征库。新增双击启动器（1-扫描.bat/2-清理.bat/3-恢复.bat，纯 ASCII 规避 cmd 中文解析坑）+ 零基础操作指南.md；评分单元测试 13 项（合计 54 项全过）。
 - 2026-08-09 v1.3（Schema 2.0）：特征库重构为 detect/actions 分离结构 + schema_version + evidence 证据字段；新增 Load-Profiles 启动校验（id 唯一/risk 合法/action 合法/detect 非空/safe=false 禁危险动作，错误规则拒绝加载）；v1 旧格式自动转换；同 id 去重避免重复待办；报告显示实测证据；update 下载后先完整校验再替换。新增 schema 单元测试 12 项（合计 41 项全过）。修复 v1 转换后 actions 为 hashtable 导致 PSObject.Properties 遍历到元属性的 bug（新增 Get-ActionKeys/Get-ActionFor 统一处理）。
 - 2026-08-09 v1.2（Reliability Release）：① 修复 restore 服务启动类型映射（Automatic→auto/Manual→demand/Disabled→disabled，兼容旧数字枚举 manifest），备份记录启动类型+运行状态+DelayedAutoStart；② safe=false 强制只报告永不进执行队列（-YesToAll 也拒绝）；③ done 布尔改五态状态机 pending/success/failed/skipped/manual_required，重跑幂等；④ 修复 HTML 报告 $SysInfo 未定义变量（系统概况原本为空）；⑤ 每个 clean 动作执行后重新读取真实状态验证（服务 StartType/注册表值/任务 State），通过才标 success。新增 tests/ 单元测试 29 项全过，scan→clean→幂等→restore 集成回归通过。

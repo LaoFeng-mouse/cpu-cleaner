@@ -323,10 +323,7 @@ function Get-AutoStartProcessNames($AutoStarts) {
     $names = @()
     foreach ($a in $AutoStarts) {
         $v = $a.Value -replace '"', ''
-        if ($v) {
-            $last = ($v -split '\\')[-1]
-            if ($last -match '\.exe$') { $names += $last }
-        }
+        if ($v -match '([^\s"\\/]+\.exe)') { $names += $matches[1] }
         $names += $a.Name
     }
     return @($names | Where-Object { $_ } | Select-Object -Unique)

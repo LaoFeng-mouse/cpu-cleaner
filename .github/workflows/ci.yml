@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1. 既有单元测试 (PS 5.1)
+      - name: Unit tests (PS 5.1)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/run-unit.ps1
+
+      # 2. Pester (PS 5.1)
+      - name: Pester (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          Import-Module Pester
+          $r = Invoke-Pester tests\Pester -PassThru
+          if ($r.FailedCount -gt 0) { throw "Pester PS5.1 failed: $($r.FailedCount)" }
+
+      # 3. Pester (PowerShell 7)
+      - name: Pester (PowerShell 7)
+        shell: pwsh
+        run: |
+          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck -ErrorAction SilentlyContinue
+          Import-Module Pester
+          $r = Invoke-Pester tests/Pester -PassThru
+          if ($r.FailedCount -gt 0) { throw "Pester PS7 failed: $($r.FailedCount)" }
+
+      # 4. PSScriptAnalyzer (静态分析, 报 Error 级问题即失败)
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction SilentlyContinue
+          Import-Module PSScriptAnalyzer
+          $issues = Invoke-ScriptAnalyzer -Path cpu-cleaner.ps1 -Severity Error
+          if ($issues) { $issues | Format-Table; throw "PSScriptAnalyzer found $($issues.Count) error(s)" }
+
+      # 5. 特征库 schema 校验
+      - name: Profile schema validation
+        shell: pwsh
+        run: |
+          $p = Get-Content bloatware-profiles.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($p.schema_version -ne 2) { throw "schema_version must be 2, got $($p.schema_version)" }
+          $ids = @($p.profiles | ForEach-Object { $_.id })
+          $dup = $ids | Group-Object | Where-Object { $_.Count -gt 1 }
+          if ($dup) { throw "duplicate ids: $($dup.Name -join ', ')" }
+          $validActions = @('disable_service','remove_autostart','disable_task','uninstall','investigate','none')
+          foreach ($rule in $p.profiles) {
+            foreach ($ak in $rule.actions.PSObject.Properties.Name) {
+              if ($validActions -notcontains $rule.actions.$ak) { throw "rule $($rule.id) has invalid action: $($rule.actions.$ak)" }
+            }
+          }
+          Write-Output "Schema validation OK: $($p.profiles.Count) rules"
