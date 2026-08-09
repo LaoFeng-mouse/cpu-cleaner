@@ -639,7 +639,7 @@ function Invoke-Clean {
     $pending = ConvertFrom-StrictPendingJson $pendingRaw
     if (-not (Test-PendingSchemaSupported $pending)) {
         Write-Host '错误: pending 清单版本旧或不兼容。请重新运行 scan 生成新清单。' -ForegroundColor Red
-        return
+        exit 1
     }
     # null 防御: $pending.actions 为空/null 时不得产生 @($null) 元素 (管道展开陷阱)
     # v1.2 状态机: 只处理 pending(待办) 和 failed(可重试); success/skipped/manual_required 跳过

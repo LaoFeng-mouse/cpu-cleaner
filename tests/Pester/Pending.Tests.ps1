@@ -69,9 +69,56 @@ Describe '待办清单规则' {
         $gateIndex | Should -BeGreaterThan $convertIndex
         $gateIndex | Should -BeLessThan $actionsIndex
         $gateIndex | Should -BeLessThan $profilesIndex
-        $body.Substring($gateIndex, $actionsIndex - $gateIndex) | Should -Match '\breturn\b'
+        $body.Substring($gateIndex, $actionsIndex - $gateIndex) | Should -Match '\bexit\s+1\b'
         $body | Should -Match '旧|不兼容'
         $body | Should -Match 'scan'
+    }
+
+    It '旧 envelope 在隔离子进程中输出错误且不加载特征库或读取系统并以非零退出' {
+        $pendingPath = Join-Path $TestDrive 'legacy-pending.json'
+        $markerPath = Join-Path $TestDrive 'forbidden-calls.txt'
+        $fixturePath = Join-Path $TestDrive 'invoke-clean-fixture.ps1'
+        [System.IO.File]::WriteAllText($pendingPath, '{"pending_schema_version":1,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $actionEnginePath = Join-Path $projectRoot 'src\Core\ActionEngine.ps1'
+        $fixture = @'
+param([string]$PendingPath, [string]$MarkerPath, [string]$ActionEnginePath)
+$ErrorActionPreference = 'Stop'
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+$script:PendingFile = $PendingPath
+$script:ProfileFile = 'must-not-load.json'
+$script:BackupRoot = 'must-not-create'
+function Is-Admin { return $true }
+function Add-ForbiddenCall([string]$Name) { [System.IO.File]::AppendAllText($MarkerPath, ($Name + [Environment]::NewLine)) }
+function Load-Profiles { Add-ForbiddenCall 'Load-Profiles'; throw 'Load-Profiles must not run' }
+function Get-Service { Add-ForbiddenCall 'Get-Service'; throw 'Get-Service must not run' }
+function Get-ItemProperty { Add-ForbiddenCall 'Get-ItemProperty'; throw 'Get-ItemProperty must not run' }
+function Get-ScheduledTask { Add-ForbiddenCall 'Get-ScheduledTask'; throw 'Get-ScheduledTask must not run' }
+function Get-Process { Add-ForbiddenCall 'Get-Process'; throw 'Get-Process must not run' }
+. $ActionEnginePath
+Invoke-Clean
+exit 0
+'@
+        [System.IO.File]::WriteAllText($fixturePath, $fixture, [System.Text.UTF8Encoding]::new($false))
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
+        $psi.Arguments = ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -PendingPath "{1}" -MarkerPath "{2}" -ActionEnginePath "{3}"' -f $fixturePath, $pendingPath, $markerPath, $actionEnginePath)
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        if ($psi.PSObject.Properties.Name -contains 'StandardOutputEncoding') {
+            $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+            $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+        }
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+
+        $process.ExitCode | Should -Not -Be 0
+        ($stdout + $stderr) | Should -Match 'pending'
+        ($stdout + $stderr) | Should -Match 'scan'
+        Test-Path -LiteralPath $markerPath | Should -BeFalse
     }
 
     It '同一 id 不同动作都保留(不丢 autostart)' {

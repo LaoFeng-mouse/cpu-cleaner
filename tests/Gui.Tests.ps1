@@ -256,10 +256,117 @@ Describe '勾选视图 (v1.5.5)' {
         $json | Should -Match '"observations"\s*:\s*\[\s*\]'
     }
 
-    It '已接受的当前扫描对象缺少 marker 时勾选子集仍标记为 v2' {
+    It '缺失 pending schema marker 时拒绝生成勾选子集并要求重新 scan' {
         $raw = [pscustomobject]@{ id='service-v2'; action='disable_service'; hit_type='service'; status='pending'; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'; process_id=0; process_path='' }
-        $payload = New-PendingSubsetPayload -Checked @([pscustomobject]@{ _raw=$raw }) -SourcePending ([pscustomobject]@{ suspicious=@() })
+        { New-PendingSubsetPayload -Checked @([pscustomobject]@{ _raw=$raw }) -SourcePending ([pscustomobject]@{ suspicious=@() }) } |
+            Should -Throw '*重新运行 scan*'
+    }
+
+    It '缺失、旧版及非整数标量 pending schema 均失败关闭' {
+        $raw = [pscustomobject]@{ id='service-v2'; action='disable_service'; hit_type='service'; status='pending' }
+        $invalidSources = @(
+            [pscustomobject]@{ suspicious=@() },
+            [pscustomobject]@{ pending_schema_version=[int32]1; suspicious=@() },
+            [pscustomobject]@{ pending_schema_version='2'; suspicious=@() },
+            [pscustomobject]@{ pending_schema_version=@([int32]2); suspicious=@() },
+            [pscustomobject]@{ pending_schema_version=[double]2.0; suspicious=@() }
+        )
+
+        foreach ($source in $invalidSources) {
+            { New-PendingSubsetPayload -Checked @([pscustomobject]@{ _raw=$raw }) -SourcePending $source } |
+                Should -Throw '*重新运行 scan*'
+        }
+    }
+
+    It '合法 Int64 pending schema v2 原样保留' {
+        $raw = [pscustomobject]@{ id='service-v2'; action='disable_service'; hit_type='service'; status='pending' }
+        $payload = New-PendingSubsetPayload -Checked @([pscustomobject]@{ _raw=$raw }) -SourcePending ([pscustomobject]@{ pending_schema_version=[int64]2; suspicious=@() })
+
         $payload.pending_schema_version | Should -Be 2
+        $payload.pending_schema_version.GetType() | Should -Be ([int64])
+    }
+
+    It '非法 schema 的执行调用链不启动管理员 clean 且不写临时 subset' {
+        $oldRoot = $script:Root
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('invalid-chain-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $script:Root = $tempRoot
+        $env:TEMP = $tempRoot
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $tempRoot 'pending_actions.json'), '{"pending_schema_version":1,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+            $list = $script:Win.FindName('PendingList')
+            $list.ItemsSource = $null
+            $list.Items.Clear()
+            [void]$list.Items.Add([pscustomobject]@{ IsChecked=$true; CanExecute=$true; _raw=[pscustomobject]@{ id='x'; status='pending' } })
+            Mock Start-Process { throw 'Start-Process must not run' }
+
+            $script:Win.FindName('BtnExec').RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
+            $script:Win.FindName('ExecHint').Text | Should -Match 'scan'
+        } finally {
+            $script:Root = $oldRoot
+            $env:TEMP = $oldTemp
+            if ([System.IO.Directory]::Exists($tempRoot)) { [System.IO.Directory]::Delete($tempRoot, $true) }
+        }
+    }
+
+    It '管理员启动异常后仅清理本次临时 subset' {
+        $oldRoot = $script:Root
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('cleanup-chain-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $script:Root = $tempRoot
+        $env:TEMP = $tempRoot
+        $sentinel = Join-Path $tempRoot 'shushu_pending_keep.json'
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $tempRoot 'pending_actions.json'), '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText($sentinel, 'keep', [System.Text.UTF8Encoding]::new($false))
+            $list = $script:Win.FindName('PendingList')
+            $list.ItemsSource = $null
+            $list.Items.Clear()
+            [void]$list.Items.Add([pscustomobject]@{ IsChecked=$true; CanExecute=$true; _raw=[pscustomobject]@{ id='x'; status='pending' } })
+            Mock Start-Process { throw 'simulated UAC failure' }
+
+            $script:Win.FindName('BtnExec').RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+
+            Assert-MockCalled Start-Process -Times 1 -Exactly
+            Test-Path -LiteralPath $sentinel | Should -BeTrue
+            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json' | Where-Object { $_.FullName -ne $sentinel }).Count | Should -Be 0
+        } finally {
+            $script:Root = $oldRoot
+            $env:TEMP = $oldTemp
+            if ([System.IO.Directory]::Exists($tempRoot)) { [System.IO.Directory]::Delete($tempRoot, $true) }
+        }
+    }
+
+    It 'subset payload helper 返回 false 时不启动管理员 clean 且不写临时文件' {
+        $oldRoot = $script:Root
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('false-payload-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $script:Root = $tempRoot
+        $env:TEMP = $tempRoot
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $tempRoot 'pending_actions.json'), '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+            $list = $script:Win.FindName('PendingList')
+            $list.ItemsSource = $null
+            $list.Items.Clear()
+            [void]$list.Items.Add([pscustomobject]@{ IsChecked=$true; CanExecute=$true; _raw=[pscustomobject]@{ id='x'; status='pending' } })
+            Mock New-PendingSubsetPayload { return $false }
+            Mock Start-Process { throw 'Start-Process must not run' }
+
+            $script:Win.FindName('BtnExec').RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
+        } finally {
+            $script:Root = $oldRoot
+            $env:TEMP = $oldTemp
+            if ([System.IO.Directory]::Exists($tempRoot)) { [System.IO.Directory]::Delete($tempRoot, $true) }
+        }
     }
 
     It 'pending identity 区分 action、PID/path 和 matcher provenance' {

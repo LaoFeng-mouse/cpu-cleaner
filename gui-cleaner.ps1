@@ -301,8 +301,27 @@ function Copy-PendingActionForSubset($RawAction) {
     return [pscustomobject]$properties
 }
 
+function Get-GuiPendingSchemaVersion($Pending) {
+    $schemaProperty = $null
+    if ($null -ne $Pending) {
+        foreach ($property in $Pending.PSObject.Properties) {
+            if ([string]::Equals($property.Name, 'pending_schema_version', [System.StringComparison]::Ordinal)) {
+                $schemaProperty = $property
+                break
+            }
+        }
+    }
+    if ($null -eq $schemaProperty -or
+        ($schemaProperty.Value -isnot [int32] -and $schemaProperty.Value -isnot [int64]) -or
+        -not ([int64]2).Equals([int64]$schemaProperty.Value)) {
+        throw 'pending 清单版本旧或不兼容。请重新运行 scan 生成新清单。'
+    }
+    return $schemaProperty.Value
+}
+
 function New-PendingSubsetPayload {
     param($Checked, $SourcePending)
+    $pendingVersion = Get-GuiPendingSchemaVersion $SourcePending
     $actions = @()
     foreach ($checkedItem in @($Checked)) {
         if ($checkedItem -and $checkedItem._raw) {
@@ -311,14 +330,6 @@ function New-PendingSubsetPayload {
     }
     $suspicious = @()
     if ($SourcePending -and $SourcePending.suspicious) { $suspicious = @($SourcePending.suspicious) }
-    # Task5 将在进入此流程前拒绝旧格式; 当前已接受的扫描对象统一输出 pending v2
-    $pendingVersion = 2
-    if ($SourcePending -and
-        ($SourcePending.PSObject.Properties.Name -contains 'pending_schema_version') -and
-        ($SourcePending.pending_schema_version -is [int]) -and
-        ($SourcePending.pending_schema_version -eq 2)) {
-        $pendingVersion = $SourcePending.pending_schema_version
-    }
     return [pscustomobject]@{
         pending_schema_version = $pendingVersion
         generated = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
@@ -539,15 +550,17 @@ $window.FindName('BtnExec').Add_Click({
         return
     }
     $hint.Text = ((Get-Text 'ExecStart') -f $checked.Count)
+    $tmpPending = $null
     try {
         # 构造勾选子集临时清单 (完整 payload 结构, 只含勾选条目; suspicious 原样带上)
-        $tmpPending = Join-Path $env:TEMP ("shushu_pending_" + [guid]::NewGuid().ToString('N') + ".json")
         $srcPendingPath = Join-Path $script:Root 'pending_actions.json'
-        $src = [pscustomobject]@{ pending_schema_version=2; suspicious=@() }
+        $src = $null
         if (Test-Path $srcPendingPath) {
             $src = Get-Content $srcPendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
         }
         $payload = New-PendingSubsetPayload -Checked $checked -SourcePending $src
+        if (-not $payload) { throw '无法生成 pending 子集。请重新运行 scan 生成新清单。' }
+        $tmpPending = Join-Path $env:TEMP ("shushu_pending_" + [guid]::NewGuid().ToString('N') + ".json")
         $json = ConvertTo-Json -InputObject $payload -Depth 6
         [System.IO.File]::WriteAllText($tmpPending, $json, (New-Object System.Text.UTF8Encoding($true)))
 
@@ -578,7 +591,13 @@ $window.FindName('BtnExec').Add_Click({
         $hint.Text = ((Get-Text 'ExecDoneSum') -f $sum.success, $sum.failed, $sum.skipped)
         $out.Text = ($lines -join "`r`n")
     } catch {
-        $hint.Text = "ERR: $($_.Exception.Message)"
+        $message = "ERR: $($_.Exception.Message)"
+        $hint.Text = $message
+        $out.Text = $message
+    } finally {
+        if ($tmpPending -and (Test-Path -LiteralPath $tmpPending)) {
+            Remove-Item -LiteralPath $tmpPending -Force -ErrorAction SilentlyContinue
+        }
     }
 })
 
