@@ -59,11 +59,11 @@
       "reason_cn": "联想应用商店后台服务，从商店装的软件可能需要它，纯用户软件可禁用",
       "detect": {
         "services": ["LenovoServiceAS"],
-        "processes": [],
-        "autostarts": [],
+        "processes": ["Appvant", "LenovoAppStore"],
+        "autostarts": ["LenovoAppStore"],
         "tasks": []
       },
-      "actions": { "service": "disable_service" },
+      "actions": { "service": "disable_service", "process": "investigate", "autostart": "remove_autostart" },
       "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {

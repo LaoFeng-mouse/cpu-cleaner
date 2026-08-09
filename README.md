@@ -5,10 +5,13 @@
 本工具诞生于一次真实案例：一台联想笔记本深夜被 AI 助手全家桶一次性拉起 30+ 进程，CPU 满载 69~93%，表现为"突然卡顿"。本次经验被泛化成这个通用工具——任何品牌的 Windows 电脑都能用它排查同类问题。
 
 ```
-├── cpu-cleaner.ps1        主程序（scan / clean / restore 三模式）
-├── bloatware-profiles.json  预装软件特征库（可自行扩展）
+├── cpu-cleaner.ps1        主程序（scan / clean / restore / update 四模式）
+├── bloatware-profiles.json  预装软件特征库（Schema 2.0，可自行扩展）
+├── 1-扫描.bat / 2-清理.bat / 3-恢复.bat   双击启动器（不会命令行的人用）
+├── 零基础操作指南.md       给完全不会命令行的人的图文步骤
 ├── 手动整理方案.md          不用脚本的手动操作指南
 ├── README.md               本文档
+├── tests\                  单元测试（映射/状态机/schema/风险评分）
 ├── pending_actions.json    扫描生成的待处理清单（clean 模式的输入）
 ├── backups\                处理备份（restore 一键恢复）
 └── report_*.html          扫描报告（可选生成）
@@ -18,18 +21,23 @@
 
 ## 使用方式总览
 
-这台工具提供**两条路**，按你适合的选：
+这台工具提供**三条路**，按你适合的选：
 
 | 方案 | 适合谁 | 入口 |
 |---|---|---|
+| **0. 零基础双击** | 完全不会命令行 / 帮别人弄 | 双击 `1-扫描.bat` → `2-清理.bat` → `3-恢复.bat`，指引见 `零基础操作指南.md` |
 | **A. 工具自动**（推荐） | 会用命令行，想要"扫描→确认→处理→可恢复"闭环 | 本 README「快速开始」，三条命令搞定 |
-| **B. 手动整理** | 不想碰命令行 / 给别人用 / 想逐项亲手操作 | `手动整理方案.md`，纯 Windows 自带功能 |
+| **B. 手动整理** | 不想装工具 / 想逐项亲手操作 | `手动整理方案.md`，纯 Windows 自带功能 |
 
-> 工具自动处理前会自动备份、可一键恢复；手动方案胜在每一步都看得见。两者结论互通——工具扫描报告里的"建议禁用项"，就是手动方案里要手动禁的服务/自启/任务。
+> 三条路结论互通：工具扫描报告里的"建议禁用项"，就是手动方案里要手动禁的服务/自启/任务；双击 .bat 和敲命令效果完全一样。
 
 ---
 
 ## 快速开始
+
+**不会命令行？** 直接双击 `1-扫描.bat` → `2-清理.bat` → `3-恢复.bat`，详细指引看 `零基础操作指南.md`。
+
+**会用命令行？** 往下看：
 
 ```powershell
 # 1. 扫描（只读，不改任何东西）——普通权限即可
@@ -101,6 +109,24 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 - `medium`：可禁但看情况（应用商店、游戏 AI、更新器）→ 进清单但提示权衡
 - `low / investigate`：拿不准（华为服务、游戏外设、通用更新器）→ **不进清单**，只报告提示人工调查
 - `none`：明确别动（电脑管家安全组件、设备管理主程序）→ 只展示说明，绝不自动处理
+
+---
+
+## 风险评分（v1.4）
+
+不只看关键词，综合多维信号给每个进程打分（0~100+，负数归零）：
+
+| 加分项 | 分值 | 减分项 | 分值 |
+|---|---|---|---|
+| 已知特征库命中 | +30 | Microsoft 签名 | -40 |
+| 非系统目录 | +20 | Windows\System32 | -30 |
+| 开机自启 | +15 | 已知驱动组件 | -25 |
+| CPU 采样 > 5% | +15 | | |
+| 无有效签名 | +10 | | |
+| 同目录多进程（≥3，疑似全家桶） | +10 | | |
+
+分级：**0-29 正常 / 30-49 建议观察 / 50-69 可优化 / 70+ 高度建议处理**。
+评分只用于"提高判断质量"，不会自动执行任何操作——报告里显示分数和依据，是否处理仍由你决定。
 
 ---
 
@@ -176,6 +202,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ## 版本记录
 
+- 2026-08-09 v1.4（多维检测与风险评分）：新增进程综合评分体系（进程名+路径+签名+自启+CPU+特征库 六维信号，评分分级 正常/建议观察/可优化/高度建议处理，只报告不自动执行）；报告第 2 节加风险分列、新增风险分级汇总节；特征库命中显示风险分数；校准 Git/msys 工具目录避免同目录误加分；联想 Appvant 入特征库。新增双击启动器（1-扫描.bat/2-清理.bat/3-恢复.bat，纯 ASCII 规避 cmd 中文解析坑）+ 零基础操作指南.md；评分单元测试 13 项（合计 54 项全过）。
 - 2026-08-09 v1.3（Schema 2.0）：特征库重构为 detect/actions 分离结构 + schema_version + evidence 证据字段；新增 Load-Profiles 启动校验（id 唯一/risk 合法/action 合法/detect 非空/safe=false 禁危险动作，错误规则拒绝加载）；v1 旧格式自动转换；同 id 去重避免重复待办；报告显示实测证据；update 下载后先完整校验再替换。新增 schema 单元测试 12 项（合计 41 项全过）。修复 v1 转换后 actions 为 hashtable 导致 PSObject.Properties 遍历到元属性的 bug（新增 Get-ActionKeys/Get-ActionFor 统一处理）。
 - 2026-08-09 v1.2（Reliability Release）：① 修复 restore 服务启动类型映射（Automatic→auto/Manual→demand/Disabled→disabled，兼容旧数字枚举 manifest），备份记录启动类型+运行状态+DelayedAutoStart；② safe=false 强制只报告永不进执行队列（-YesToAll 也拒绝）；③ done 布尔改五态状态机 pending/success/failed/skipped/manual_required，重跑幂等；④ 修复 HTML 报告 $SysInfo 未定义变量（系统概况原本为空）；⑤ 每个 clean 动作执行后重新读取真实状态验证（服务 StartType/注册表值/任务 State），通过才标 success。新增 tests/ 单元测试 29 项全过，scan→clean→幂等→restore 集成回归通过。
 - 2026-08-09 v1.1.1：审查修复 5 处 PowerShell 陷阱——① clean 写回 JSON 用 -InputObject 防管道展开（原会把完整清单写成单对象/空文件）；② 清单读取 null 防御（$null 进管道产生 @($null) 导致空备份）；③ 数组序列化用变量构造（if/else 表达式输出空数组会变 $null 序列化成 {}）；④ 空 manifest 写 []；⑤ restore 对空/损坏备份报错退出。本机回归 scan→clean→clean 幂等全通过。

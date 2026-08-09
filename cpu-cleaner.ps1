@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 v1.3 (cpu-cleaner.ps1) — Schema 2.0
+#  CPU 后台整理工具 v1.4 (cpu-cleaner.ps1) — 多维检测与风险评分
 #  适用: Windows 10/11, PowerShell 5.1+
 #
 #  用法:
@@ -258,6 +258,80 @@ function Get-SuspiciousProcesses($TopProcs) {
     return $susp
 }
 
+# ---------- 3.5 v1.4: 风险评分体系 (多维判断, 不只看关键词) ----------
+function Get-RiskLevel($score) {
+    if ($score -ge 70) { return '高度建议处理' }
+    if ($score -ge 50) { return '可优化' }
+    if ($score -ge 30) { return '建议观察' }
+    return '正常'
+}
+
+function Convert-RiskToScore($risk) {
+    switch ($risk) { 'high' { return 80 } 'medium' { return 55 } default { return 30 } }
+}
+
+# 对单个进程综合评分: 进程名+路径+签名+自启+CPU+特征库 多维判断
+function Get-ProcessRiskScore {
+    param($proc, $ProfileHits, $AutoStartNames, $TopProcs)
+    $score = 0
+    $reasons = @()
+
+    # +30 已知特征库命中
+    $hit = @($ProfileHits | Where-Object { $_.hit_type -eq 'process' -and $_.process_name -eq $proc.Name }) | Select-Object -First 1
+    if ($hit) { $score += 30; $reasons += '已知特征库命中' }
+
+    # +20 非系统目录
+    if ($proc.Path -and $proc.Path -notmatch '^C:\\Windows\\') { $score += 20; $reasons += '非系统目录' }
+
+    # +15 开机自启
+    if ($AutoStartNames -contains $proc.Name) { $score += 15; $reasons += '开机自启' }
+
+    # +15 高 CPU (瞬时采样 >5%, 报告标注为瞬时值)
+    if ($proc.'CPU%' -gt 5) { $score += 15; $reasons += "CPU$($proc.'CPU%')%" }
+
+    # 签名: +10 无有效签名 / -40 Microsoft 签名
+    if ($proc.Path) {
+        try {
+            $sig = Get-AuthenticodeSignature $proc.Path -ErrorAction SilentlyContinue
+            if ($sig -and $sig.SignerCertificate -and $sig.SignerCertificate.Subject -match 'Microsoft') {
+                $score -= 40; $reasons += 'Microsoft签名'
+            } elseif ($sig -and $sig.Status -ne 'Valid') {
+                $score += 10; $reasons += '无有效签名'
+            }
+        } catch {}
+    } else { $score += 10; $reasons += '无路径(服务或已退出)' }
+
+    # -30 System32 / -25 驱动组件
+    if ($proc.Path -and $proc.Path -match '\\Windows\\System32\\') { $score -= 30; $reasons += 'System32' }
+    if ($proc.Path -and $proc.Path -match 'DriverStore|\\drivers\\') { $score -= 25; $reasons += '驱动组件' }
+
+    # +10 同目录多进程 (≥3 个同目录进程, 疑似全家桶; 排除 Git/msys 工具目录)
+    if ($proc.Path) {
+        $dir = Split-Path $proc.Path -Parent
+        if ($dir -notmatch 'Program Files\\Git|\\usr\\bin') {
+            $sameDir = @($TopProcs | Where-Object { $_.Path -and (Split-Path $_.Path -Parent) -eq $dir })
+            if ($sameDir.Count -ge 3) { $score += 10; $reasons += "同目录x$($sameDir.Count)" }
+        }
+    }
+
+    if ($score -lt 0) { $score = 0 }
+    return [pscustomobject]@{ Score = $score; Level = (Get-RiskLevel $score); Reasons = ($reasons -join ',') }
+}
+
+# 从自启列表提取进程名集合 (用于评分 +15 开机自启)
+function Get-AutoStartProcessNames($AutoStarts) {
+    $names = @()
+    foreach ($a in $AutoStarts) {
+        $v = $a.Value -replace '"', ''
+        if ($v) {
+            $last = ($v -split '\\')[-1]
+            if ($last -match '\.exe$') { $names += $last }
+        }
+        $names += $a.Name
+    }
+    return @($names | Where-Object { $_ } | Select-Object -Unique)
+}
+
 # ---------- 4. 服务列表 ----------
 function Get-ServicesInfo {
     $svcs = Get-CimInstance Win32_Service | Select-Object Name, DisplayName, State, StartMode, PathName, ProcessId
@@ -390,11 +464,11 @@ function Match-Profiles {
 
 # ---------- 8. 报告输出 ----------
 function Write-ScanReport {
-    param($SysInfo, $TopProcs, $Suspicious, $Services, $AutoStarts, $Tasks, $Hits)
+    param($SysInfo, $TopProcs, $Suspicious, $Services, $AutoStarts, $Tasks, $Hits, $AutoStartNames)
 
     $lines = @()
     $lines += '=' * 60
-    $lines += '  CPU 后台整理工具 - 诊断报告 v1.3'
+    $lines += '  CPU 后台整理工具 - 诊断报告 v1.4'
     $lines += '  生成时间: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     $lines += '=' * 60
     $lines += ''
@@ -406,14 +480,31 @@ function Write-ScanReport {
     $lines += ('  开机时间: {0}  (已运行 {1})' -f $SysInfo.BootTime, $SysInfo.Uptime)
     $lines += ''
 
-    $lines += '【2. 当前占用 CPU 最高的进程】'
-    $lines += ('  {0,-6} {1,-24} {2,8} {3,8}  {4}' -f 'PID','进程名','CPU%','内存MB','路径')
+    # v1.4: 对 Top CPU 进程逐一评分
+    $procScores = @{}
     foreach ($p in $TopProcs) {
-        $lines += ('  {0,-6} {1,-24} {2,8} {3,8}  {4}' -f $p.PID, $p.Name, $p.'CPU%', $p.MemMB, $p.Path)
+        $procScores[$p.PID] = Get-ProcessRiskScore -proc $p -ProfileHits $Hits -AutoStartNames $AutoStartNames -TopProcs $TopProcs
+    }
+
+    $lines += '【2. 当前占用 CPU 最高的进程 (含 v1.4 风险评分)】'
+    $lines += ('  {0,-6} {1,-22} {2,7} {3,7} {4,6} {5,-12} {6}' -f 'PID','进程名','CPU%','内存MB','风险分','级别','评分依据')
+    foreach ($p in $TopProcs) {
+        $s = $procScores[$p.PID]
+        $lines += ('  {0,-6} {1,-22} {2,7} {3,7} {4,6} {5,-12} {6}' -f $p.PID, $p.Name, $p.'CPU%', $p.MemMB, $s.Score, $s.Level, $s.Reasons)
     }
     $lines += ''
 
-    $lines += '【3. 未知高占用进程 (路径可疑或无签名, 建议人工调查)】'
+    # v1.4: 风险分级汇总
+    $lines += '【3. 风险分级汇总】'
+    $summary = @{ '正常' = 0; '建议观察' = 0; '可优化' = 0; '高度建议处理' = 0 }
+    foreach ($p in $TopProcs) { $summary[$procScores[$p.PID].Level]++ }
+    foreach ($k in '正常','建议观察','可优化','高度建议处理') {
+        $lines += ('  {0,-10} {1} 个' -f $k, $summary[$k])
+    }
+    $lines += '  (评分说明: +30特征库 +20非系统目录 +15开机自启 +15高CPU +10无签名/同目录多进程; -40微软签名 -30System32 -25驱动)'
+    $lines += ''
+
+    $lines += '【4. 未知高占用进程 (路径可疑或无签名, 建议人工调查)】'
     if ($Suspicious.Count -eq 0) {
         $lines += '  (无 - 高占用进程均正常)'
     } else {
@@ -425,14 +516,14 @@ function Write-ScanReport {
     }
     $lines += ''
 
-    $lines += '【4. 开机自启动项】'
+    $lines += '【5. 开机自启动项】'
     if ($AutoStarts.Count -eq 0) { $lines += '  (无)' }
     foreach ($a in $AutoStarts) {
         $lines += ('  [{0}] {1} => {2}' -f $a.Source, $a.Name, $a.Value)
     }
     $lines += ''
 
-    $lines += '【5. 登录/开机触发的计划任务】'
+    $lines += '【6. 登录/开机触发的计划任务】'
     $loginTasks = @($Tasks | Where-Object { $_.LoginTrigger })
     if ($loginTasks.Count -eq 0) { $lines += '  (无)' }
     foreach ($t in $loginTasks) {
@@ -440,14 +531,14 @@ function Write-ScanReport {
     }
     $lines += ''
 
-    $lines += '【6. 特征库命中 (预装全家桶/可疑后台)】'
+    $lines += '【7. 特征库命中 (预装全家桶/可疑后台)】'
     if ($Hits.Count -eq 0) {
         $lines += '  (未命中特征库, 这台机器比较干净)'
     } else {
         foreach ($h in $Hits) {
             $riskMark = switch ($h.risk) { 'high' { '!!' } 'medium' { '! ' } default { '  ' } }
             $nameSuffix = if ($h.name) { " ($($h.name))" } else { '' }
-            $lines += ('  {0} [{1}] {2}{3}' -f $riskMark, $h.vendor, $h.name_cn, $nameSuffix)
+            $lines += ('  {0} [{1}] {2}{3}  [风险 {4}]' -f $riskMark, $h.vendor, $h.name_cn, $nameSuffix, (Convert-RiskToScore $h.risk))
             $lines += ('      命中: {0}  |  {1}' -f $h.hit_type, $h.detail)
             $lines += ('      建议: {0}  |  安全: {1}' -f $h.action, $(if ($h.safe) { '是' } else { '否-谨慎' }))
             # v1.3: evidence 显示
@@ -462,7 +553,7 @@ function Write-ScanReport {
     }
     $lines += ''
 
-    $lines += '【7. 手动启动却正在运行的服务 (可能被其他组件拉起, 禁用不一定立即停止)】'
+    $lines += '【8. 手动启动却正在运行的服务 (可能被其他组件拉起, 禁用不一定立即停止)】'
     $trig = @($Services | Where-Object { $_.TriggerHint })
     if ($trig.Count -eq 0) {
         $lines += '  (无)'
@@ -473,7 +564,7 @@ function Write-ScanReport {
     }
     $lines += ''
 
-    $lines += '【8. 处理原则 (别乱动)】'
+    $lines += '【9. 处理原则 (别乱动)】'
     $notes = (Load-Profiles).keep_notes_cn
     foreach ($n in $notes) { $lines += ('  - ' + $n) }
     $lines += ''
@@ -959,8 +1050,9 @@ switch ($Mode) {
         $autos = Get-AutoStart
         $tasks = Get-TasksInfo
         $hits = Match-Profiles -Services $svcs -AutoStarts $autos -Tasks $tasks -TopProcs $procs
+        $autoStartNames = Get-AutoStartProcessNames $autos
 
-        $report = Write-ScanReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -Services $svcs -AutoStarts $autos -Tasks $tasks -Hits $hits
+        $report = Write-ScanReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -Services $svcs -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames
         Write-Host $report
 
         Save-PendingActions $hits $susp
