@@ -60,9 +60,13 @@ function Save-PendingActions($Hits, $Suspicious) {
             ($h.evidence.PSObject.Properties.Name -contains 'tested') -and
             ($h.evidence.tested -is [bool]) -and
             ($h.evidence.tested -eq $true)
+        $actionAllowed = ($h.PSObject.Properties.Name -contains 'action') -and
+            ($h.action -is [string]) -and
+            (-not [string]::IsNullOrWhiteSpace($h.action)) -and
+            ($h.action -in $script:DangerousActions)
         $hasNarrowEvidence = Test-HitMatcherEvidenceShape $h
         $hasBroadEvidence = Test-HitMatcherEvidenceShape $h -AllowedMatchTypes @('contains','regex')
-        $executable = ($h.action -in $script:DangerousActions) -and
+        $executable = $actionAllowed -and
             $safeAllowed -and
             $testedAllowed -and
             $hasNarrowEvidence
@@ -78,8 +82,8 @@ function Save-PendingActions($Hits, $Suspicious) {
             $obsReason = if ($h.action -eq 'none' -or $h.action -eq 'investigate') { '动作仅观察/不处理' }
                 elseif (-not $safeAllowed) { 'safe=false 或类型无效, 不允许自动处理' }
                 elseif (-not $testedAllowed) { '未实测 (tested=false 或类型无效), 仅观察' }
-                elseif (($h.action -in $script:DangerousActions) -and $hasBroadEvidence) { '实际命中为宽匹配 (contains/regex)，禁止自动处理' }
-                elseif (($h.action -in $script:DangerousActions) -and -not $hasNarrowEvidence) { '匹配来源缺失或无效，禁止自动处理' }
+                elseif ($actionAllowed -and $hasBroadEvidence) { '实际命中为宽匹配 (contains/regex)，禁止自动处理' }
+                elseif ($actionAllowed -and -not $hasNarrowEvidence) { '匹配来源缺失或无效，禁止自动处理' }
                 else { '动作不允许自动处理, 仅观察' }
             $observations += [pscustomobject]@{
                 id        = $h.id

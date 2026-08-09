@@ -269,6 +269,33 @@ Describe '待办清单规则' {
             $p.observations[0].obs_reason | Should -Match '匹配来源缺失或无效' -Because $case.label
         }
     }
+    It '数组、非字符串、null、空或缺失 action 不能进入执行队列且保留审计证据' {
+        $cases = @(
+            [pscustomobject]@{ label='one-element array'; has_action=$true; action=@('uninstall') },
+            [pscustomobject]@{ label='multi-element array'; has_action=$true; action=@('uninstall','disable_service') },
+            [pscustomobject]@{ label='number'; has_action=$true; action=1 },
+            [pscustomobject]@{ label='null'; has_action=$true; action=$null },
+            [pscustomobject]@{ label='blank'; has_action=$true; action='  ' },
+            [pscustomobject]@{ label='missing'; has_action=$false; action=$null }
+        )
+        foreach ($case in $cases) {
+            $hit = [pscustomobject]@{
+                id=$case.label; vendor='T'; name_cn='Action'; hit_type='process'; detail='P1 PID=101'; reason_cn='r'
+                service_name=''; autostart_source=''; autostart_name=''; task_path=''; process_name='P1'; process_id=101; process_path='C:\Apps\P1.exe'
+                safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='P1'; matched_type='exact'; matched_field='process_name'
+            }
+            if ($case.has_action) { $hit | Add-Member -NotePropertyName action -NotePropertyValue $case.action }
+            Save-PendingActions -Hits @($hit) -Suspicious @()
+            $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            @($p.actions).Count | Should -Be 0 -Because $case.label
+            @($p.observations).Count | Should -Be 1 -Because $case.label
+            $p.observations[0].matched_pattern | Should -Be 'P1' -Because $case.label
+            $p.observations[0].matched_type | Should -Be 'exact' -Because $case.label
+            $p.observations[0].matched_field | Should -Be 'process_name' -Because $case.label
+            $p.observations[0].process_id | Should -Be 101 -Because $case.label
+            $p.observations[0].process_path | Should -Be 'C:\Apps\P1.exe' -Because $case.label
+        }
+    }
     It 'pending JSON 对 0/1 条 action 和 observation 始终使用数组 token' {
         Save-PendingActions -Hits @() -Suspicious @()
         $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8
