@@ -13,8 +13,11 @@ Describe '待办清单规则' {
         # v1.5.2: Mock Windows 状态, 模拟"服务/自启/任务存在但未达目标状态"
         # (Save-PendingActions 会查真实系统: Get-Service / Get-ItemProperty / Get-ScheduledTask,
         #  不 Mock 的话测试结果取决于跑测试的机器, CI 上 S1/X/T1 不存在导致行为漂移)
+        Mock Get-Service { throw "Unexpected Get-Service read: $Name" }
         Mock Get-Service { [pscustomobject]@{ Name='S1'; StartType='Automatic'; Status='Running' } } -ParameterFilter { $Name -eq 'S1' }
+        Mock Get-ScheduledTask { throw "Unexpected Get-ScheduledTask read: $TaskName $TaskPath" }
         Mock Get-ScheduledTask { [pscustomobject]@{ TaskName='T1'; TaskPath='\X\'; State='Running' } } -ParameterFilter { $TaskName -eq 'T1' -and $TaskPath -eq '\X\' }
+        Mock Get-ItemProperty { throw "Unexpected Get-ItemProperty read: $Path" }
         Mock Get-ItemProperty { [pscustomobject]@{ X = 'C:\fake\X.exe' } } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
     }
 
@@ -122,7 +125,7 @@ Describe '待办清单规则' {
         $p.observations[0].matched_field | Should -Be 'service_name'
         $p.observations[0].process_id | Should -Be 0
         $p.observations[0].process_path | Should -Be ''
-        $p.observations[0].obs_reason | Should -Match '实际命中不是 exact/path.*禁止'
+        $p.observations[0].obs_reason | Should -Match '宽匹配.*禁止'
     }
     It '缺失或空匹配来源不能进入执行队列' {
         $cases = @(
@@ -136,7 +139,7 @@ Describe '待办清单规则' {
             $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
             @($p.actions).Count | Should -Be 0 -Because $case.label
             @($p.observations).Count | Should -Be 1 -Because $case.label
-            $p.observations[0].obs_reason | Should -Match '实际命中不是 exact/path.*禁止' -Because $case.label
+            $p.observations[0].obs_reason | Should -Match '匹配来源缺失或无效' -Because $case.label
         }
     }
     It '非 Boolean 的 safe 或 tested 不能进入执行队列' {
@@ -175,6 +178,102 @@ Describe '待办清单规则' {
         $p.actions[0].matched_field | Should -Be 'process_path'
         $p.actions[0].process_id | Should -Be 4242
         $p.actions[0].process_path | Should -Be 'C:\Apps\P1.exe'
+    }
+    It '不支持或跨类型 matched_field 不能进入执行队列' {
+        $fields = @('unsupported_field', 'process_name')
+        foreach ($field in $fields) {
+            $hit = [pscustomobject]@{
+                id=$field; vendor='T'; name_cn='Field'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'
+                service_name='S1'; service_display_name='Display S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
+                safe=$true; evidence=[pscustomobject]@{ tested=$true }
+                matched_pattern='S1'; matched_type='exact'; matched_field=$field
+            }
+            Save-PendingActions -Hits @($hit) -Suspicious @()
+            $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            @($p.actions).Count | Should -Be 0 -Because $field
+            @($p.observations).Count | Should -Be 1 -Because $field
+            $p.observations[0].obs_reason | Should -Match '匹配来源缺失或无效' -Because $field
+        }
+    }
+    It '数组或非字符串 matcher provenance 不能进入执行队列' {
+        $cases = @(
+            [pscustomobject]@{ label='pattern array'; pattern=@('S1'); type='exact'; field='service_name' },
+            [pscustomobject]@{ label='pattern number'; pattern=1; type='exact'; field='service_name' },
+            [pscustomobject]@{ label='type array'; pattern='S1'; type=@('exact'); field='service_name' },
+            [pscustomobject]@{ label='type number'; pattern='S1'; type=1; field='service_name' },
+            [pscustomobject]@{ label='field array'; pattern='S1'; type='exact'; field=@('service_name') },
+            [pscustomobject]@{ label='field number'; pattern='S1'; type='exact'; field=1 }
+        )
+        foreach ($case in $cases) {
+            $hit = [pscustomobject]@{
+                id=$case.label; vendor='T'; name_cn='Shape'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'
+                service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
+                safe=$true; evidence=[pscustomobject]@{ tested=$true }
+                matched_pattern=$case.pattern; matched_type=$case.type; matched_field=$case.field
+            }
+            Save-PendingActions -Hits @($hit) -Suspicious @()
+            $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            @($p.actions).Count | Should -Be 0 -Because $case.label
+            @($p.observations).Count | Should -Be 1 -Because $case.label
+            $p.observations[0].obs_reason | Should -Match '匹配来源缺失或无效' -Because $case.label
+        }
+    }
+    It '宽匹配观察不能压制同目标的精确可执行命中' {
+        $base = [ordered]@{
+            id='mixed'; vendor='T'; name_cn='Mixed'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'
+            service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
+            safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S'; matched_type='contains'; matched_field='service_name'
+        }
+        $broad = [pscustomobject]$base
+        $exact = $broad.PSObject.Copy()
+        $exact.matched_pattern = 'S1'
+        $exact.matched_type = 'exact'
+        Save-PendingActions -Hits @($broad, $exact) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        @($p.actions).Count | Should -Be 1
+        @($p.observations).Count | Should -Be 1
+        $p.actions[0].matched_type | Should -Be 'exact'
+        $p.observations[0].matched_type | Should -Be 'contains'
+    }
+    It '同进程名不同 PID 的可执行命中都保留' {
+        $hits = foreach ($processId in @(101, 202)) {
+            [pscustomobject]@{
+                id='same-process'; vendor='T'; name_cn='Process'; action='uninstall'; hit_type='process'; detail="P1 PID=$processId"; reason_cn='r'
+                service_name=''; autostart_source=''; autostart_name=''; task_path=''; process_name='P1'; process_id=$processId; process_path='C:\Apps\P1.exe'
+                safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='P1'; matched_type='exact'; matched_field='process_name'
+            }
+        }
+        Save-PendingActions -Hits $hits -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        @($p.actions).Count | Should -Be 2
+        @($p.actions.process_id) | Should -Contain 101
+        @($p.actions.process_id) | Should -Contain 202
+    }
+    It 'pending JSON 对 0/1 条 action 和 observation 始终使用数组 token' {
+        Save-PendingActions -Hits @() -Suspicious @()
+        $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8
+        $raw | Should -Match '"actions"\s*:\s*\[\s*\]'
+        $raw | Should -Match '"observations"\s*:\s*\[\s*\]'
+
+        $action = [pscustomobject]@{ id='one-action'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }
+        Save-PendingActions -Hits @($action) -Suspicious @()
+        $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8
+        $raw | Should -Match '"actions"\s*:\s*\[\s*\{'
+        $raw | Should -Match '"observations"\s*:\s*\[\s*\]'
+
+        $observation = [pscustomobject]@{ id='one-observation'; vendor='T'; name_cn='O'; action='investigate'; hit_type='service'; detail='S2'; reason_cn='r'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S2'; matched_type='exact'; matched_field='service_name' }
+        Save-PendingActions -Hits @($observation) -Suspicious @()
+        $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8
+        $raw | Should -Match '"actions"\s*:\s*\[\s*\]'
+        $raw | Should -Match '"observations"\s*:\s*\[\s*\{'
+    }
+    It '服务已禁用且停止时不写入 action 或 observation' {
+        Mock Get-Service { [pscustomobject]@{ Name='S1'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'S1' }
+        $hit = [pscustomobject]@{ id='already'; vendor='T'; name_cn='Already'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }
+        Save-PendingActions -Hits @($hit) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 0
     }
     It 'clean 只处理 pending/failed' {
         ('pending') -in @('pending','failed') | Should -Be $true

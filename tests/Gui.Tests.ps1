@@ -226,6 +226,57 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.Directory]::Delete($tmpRoot, $true)
     }
 
+    It '勾选子集保留完整 v2 action provenance 和进程身份' {
+        $raw = [pscustomobject]@{
+            id='process-v2'; vendor='T'; name_cn='Process'; action='uninstall'; hit_type='process'; detail='P1 PID=101'; reason_cn='r'
+            service_name=''; service_display_name=''; autostart_source=''; autostart_name=''; autostart_value=''; task_name=''; task_path=''
+            process_name='P1'; process_id=101; process_path='C:\Apps\P1.exe'; safe=$true; status='failed'
+            matched_pattern='C:\Apps'; matched_type='path'; matched_field='process_path'; future_v2_property='preserve-me'
+        }
+        $checked = @([pscustomobject]@{ _raw=$raw })
+        $source = [pscustomobject]@{ pending_schema_version=2; generated='scan'; actions=@($raw); observations=@(); suspicious=@([pscustomobject]@{ PID=9; Name='Other' }) }
+
+        $payload = New-PendingSubsetPayload -Checked $checked -SourcePending $source
+
+        $payload.pending_schema_version | Should -Be 2
+        @($payload.actions).Count | Should -Be 1
+        $action = $payload.actions[0]
+        $action.status | Should -Be 'pending'
+        $action.matched_pattern | Should -Be 'C:\Apps'
+        $action.matched_type | Should -Be 'path'
+        $action.matched_field | Should -Be 'process_path'
+        $action.process_id | Should -Be 101
+        $action.process_path | Should -Be 'C:\Apps\P1.exe'
+        $action.future_v2_property | Should -Be 'preserve-me'
+        $raw.status | Should -Be 'failed'
+        @($payload.suspicious).Count | Should -Be 1
+        @($payload.observations).Count | Should -Be 0
+        $json = ConvertTo-Json -InputObject $payload -Depth 6
+        $json | Should -Match '"actions"\s*:\s*\[\s*\{'
+        $json | Should -Match '"observations"\s*:\s*\[\s*\]'
+    }
+
+    It '已接受的当前扫描对象缺少 marker 时勾选子集仍标记为 v2' {
+        $raw = [pscustomobject]@{ id='service-v2'; action='disable_service'; hit_type='service'; status='pending'; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'; process_id=0; process_path='' }
+        $payload = New-PendingSubsetPayload -Checked @([pscustomobject]@{ _raw=$raw }) -SourcePending ([pscustomobject]@{ suspicious=@() })
+        $payload.pending_schema_version | Should -Be 2
+    }
+
+    It 'pending identity 区分 action、PID/path 和 matcher provenance' {
+        $base = [ordered]@{ id='p'; hit_type='process'; action='uninstall'; service_name=''; service_display_name=''; autostart_source=''; autostart_name=''; autostart_value=''; task_name=''; task_path=''; process_name='P1'; process_id=101; process_path='C:\Apps\P1.exe'; matched_pattern='P1'; matched_type='exact'; matched_field='process_name' }
+        $same = [pscustomobject]$base
+        $differentAction = $same.PSObject.Copy(); $differentAction.action = 'investigate'
+        $differentPid = $same.PSObject.Copy(); $differentPid.process_id = 202
+        $differentPath = $same.PSObject.Copy(); $differentPath.process_path = 'D:\Apps\P1.exe'
+        $differentEvidence = $same.PSObject.Copy(); $differentEvidence.matched_field = 'process_path'
+        $key = Get-PendingIdentityKey $same
+        Get-PendingIdentityKey $same | Should -Be $key
+        Get-PendingIdentityKey $differentAction | Should -Not -Be $key
+        Get-PendingIdentityKey $differentPid | Should -Not -Be $key
+        Get-PendingIdentityKey $differentPath | Should -Not -Be $key
+        Get-PendingIdentityKey $differentEvidence | Should -Not -Be $key
+    }
+
     It 'Merge-PendingStatus: 子集状态合并回主清单, 未勾选条目不动' {
         $tmpRoot = Join-Path $env:TEMP ("gui_merge_" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
@@ -288,6 +339,33 @@ Describe '勾选视图 (v1.5.5)' {
         $after = Get-Content (Join-Path $tmpRoot 'pending_actions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         @($after.actions | Where-Object { $_.hit_type -eq 'service' })[0].status | Should -Be 'failed'
         @($after.actions | Where-Object { $_.hit_type -eq 'autostart' })[0].status | Should -Be 'pending'
+        [System.IO.Directory]::Delete($tmpRoot, $true)
+    }
+
+    It 'Merge-PendingStatus: 同进程名按 PID/path/provenance 精确合并' {
+        $tmpRoot = Join-Path $env:TEMP ("gui_merge_process_" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
+        $common = [ordered]@{ id='same-process'; hit_type='process'; action='uninstall'; service_name=''; service_display_name=''; autostart_source=''; autostart_name=''; autostart_value=''; task_name=''; task_path=''; process_name='P1'; process_path='C:\Apps\P1.exe'; matched_pattern='P1'; matched_type='exact'; matched_field='process_name'; status='pending' }
+        $pid101 = [pscustomobject]$common; $pid101 | Add-Member process_id 101
+        $pid202 = $pid101.PSObject.Copy(); $pid202.process_id = 202
+        $pathEvidence = $pid101.PSObject.Copy(); $pathEvidence.matched_pattern='C:\Apps'; $pathEvidence.matched_type='path'; $pathEvidence.matched_field='process_path'
+        $main = [pscustomobject]@{ pending_schema_version=2; generated='x'; actions=@($pid101,$pid202,$pathEvidence); observations=@(); suspicious=@() }
+        $main | ConvertTo-Json -Depth 6 | Out-File (Join-Path $tmpRoot 'pending_actions.json') -Encoding utf8
+        $subsetAction = [pscustomobject]@{}
+        $pid101.PSObject.Properties | ForEach-Object { $subsetAction | Add-Member -NotePropertyName $_.Name -NotePropertyValue $_.Value }
+        $subsetAction.status = 'success'
+        $subset = [pscustomobject]@{ pending_schema_version=2; generated='x'; actions=@($subsetAction); observations=@(); suspicious=@() }
+        $subsetFile = Join-Path $tmpRoot 'subset.json'
+        $subset | ConvertTo-Json -Depth 6 | Out-File $subsetFile -Encoding utf8
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try { Merge-PendingStatus $subsetFile } finally { $script:Root = $oldRoot }
+
+        $after = Get-Content (Join-Path $tmpRoot 'pending_actions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        @($after.actions | Where-Object { $_.process_id -eq 101 -and $_.matched_field -eq 'process_name' })[0].status | Should -Be 'success'
+        @($after.actions | Where-Object { $_.process_id -eq 202 })[0].status | Should -Be 'pending'
+        @($after.actions | Where-Object { $_.process_id -eq 101 -and $_.matched_field -eq 'process_path' })[0].status | Should -Be 'pending'
         [System.IO.Directory]::Delete($tmpRoot, $true)
     }
 }

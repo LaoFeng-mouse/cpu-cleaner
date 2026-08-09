@@ -1,9 +1,51 @@
 ﻿# 动作引擎 (v1.7.0 拆分): 待办清单/授权验证/clean/restore/update
 # ---------- 9. 待办清单 (v1.2: safe 强制规则 + status 状态机; v1.3: 同 id 去重) ----------
+function Test-HitMatcherEvidenceShape {
+    param($Hit, [string[]]$AllowedMatchTypes = @('exact','path'))
+    if (-not $Hit) { return $false }
+    foreach ($propertyName in @('matched_pattern','matched_type','matched_field')) {
+        if ($Hit.PSObject.Properties.Name -notcontains $propertyName) { return $false }
+        $value = $Hit.$propertyName
+        if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { return $false }
+    }
+    if ($Hit.matched_type -notin $AllowedMatchTypes) { return $false }
+    $allowedFields = switch ($Hit.hit_type) {
+        'service'   { @('service_name','service_display_name') }
+        'autostart' { @('autostart_name','autostart_value') }
+        'task'      { @('task_name','task_path') }
+        'process'   { @('process_name','process_path') }
+        default     { @() }
+    }
+    return $Hit.matched_field -in $allowedFields
+}
+
+function Get-PendingIdentityKey($Item) {
+    $identity = [ordered]@{
+        id                   = $Item.id
+        hit_type             = $Item.hit_type
+        action               = $Item.action
+        service_name         = $Item.service_name
+        service_display_name = $Item.service_display_name
+        autostart_source     = $Item.autostart_source
+        autostart_name       = $Item.autostart_name
+        autostart_value      = $Item.autostart_value
+        task_name            = $Item.task_name
+        task_path            = $Item.task_path
+        process_name         = $Item.process_name
+        process_id           = $Item.process_id
+        process_path         = $Item.process_path
+        matched_pattern      = $Item.matched_pattern
+        matched_type         = $Item.matched_type
+        matched_field        = $Item.matched_field
+    }
+    return ConvertTo-Json -InputObject $identity -Compress -Depth 4
+}
+
 function Save-PendingActions($Hits, $Suspicious) {
     $actions = @()
     $observations = @()
     $seenActionIds = @{}
+    $seenObservationIds = @{}
     foreach ($h in $Hits) {
         # v1.5.6 数据模型: actions(可执行) / observations(仅观察) 分流
         # 可执行 = 危险动作 + Boolean true safe/tested + 窄匹配证据; 其余一律进 observations
@@ -12,25 +54,26 @@ function Save-PendingActions($Hits, $Suspicious) {
             ($h.evidence.PSObject.Properties.Name -contains 'tested') -and
             ($h.evidence.tested -is [bool]) -and
             ($h.evidence.tested -eq $true)
-        $hasNarrowEvidence = $h.matched_pattern -and
-            ($h.matched_type -in @('exact','path')) -and
-            $h.matched_field
+        $hasNarrowEvidence = Test-HitMatcherEvidenceShape $h
+        $hasBroadEvidence = Test-HitMatcherEvidenceShape $h -AllowedMatchTypes @('contains','regex')
         $executable = ($h.action -in $script:DangerousActions) -and
             $safeAllowed -and
             $testedAllowed -and
             $hasNarrowEvidence
 
-        # v1.3 去重: 同一 id+类型+目标 只保留一条 (不丢同一软件的不同动作)
-        $dedupeKey = "$($h.id)|$($h.hit_type)|$($h.service_name)|$($h.autostart_name)|$($h.task_path)|$($h.process_name)"
-        if ($seenActionIds.ContainsKey($dedupeKey)) { continue }
-        $seenActionIds[$dedupeKey] = $true
+        # action / observation 分开去重, 防止宽匹配观察压制同目标的窄匹配动作
+        $dedupeKey = Get-PendingIdentityKey $h
+        $seenIds = if ($executable) { $seenActionIds } else { $seenObservationIds }
+        if ($seenIds.ContainsKey($dedupeKey)) { continue }
+        $seenIds[$dedupeKey] = $true
 
         if (-not $executable) {
             # v1.5.6: 观察条目 — 记录为什么不能自动处理 (GUI 展示为 disabled checkbox)
             $obsReason = if ($h.action -eq 'none' -or $h.action -eq 'investigate') { '动作仅观察/不处理' }
                 elseif (-not $safeAllowed) { 'safe=false 或类型无效, 不允许自动处理' }
                 elseif (-not $testedAllowed) { '未实测 (tested=false 或类型无效), 仅观察' }
-                elseif (($h.action -in $script:DangerousActions) -and -not $hasNarrowEvidence) { '实际命中不是 exact/path，禁止自动处理' }
+                elseif (($h.action -in $script:DangerousActions) -and $hasBroadEvidence) { '实际命中为宽匹配 (contains/regex)，禁止自动处理' }
+                elseif (($h.action -in $script:DangerousActions) -and -not $hasNarrowEvidence) { '匹配来源缺失或无效，禁止自动处理' }
                 else { '动作不允许自动处理, 仅观察' }
             $observations += [pscustomobject]@{
                 id        = $h.id

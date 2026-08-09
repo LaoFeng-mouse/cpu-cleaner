@@ -270,6 +270,64 @@ function Get-PendingItems {
     return @($p.actions)
 }
 
+function Get-PendingIdentityKey($Item) {
+    $identity = [ordered]@{
+        id                   = $Item.id
+        hit_type             = $Item.hit_type
+        action               = $Item.action
+        service_name         = $Item.service_name
+        service_display_name = $Item.service_display_name
+        autostart_source     = $Item.autostart_source
+        autostart_name       = $Item.autostart_name
+        autostart_value      = $Item.autostart_value
+        task_name            = $Item.task_name
+        task_path            = $Item.task_path
+        process_name         = $Item.process_name
+        process_id           = $Item.process_id
+        process_path         = $Item.process_path
+        matched_pattern      = $Item.matched_pattern
+        matched_type         = $Item.matched_type
+        matched_field        = $Item.matched_field
+    }
+    return ConvertTo-Json -InputObject $identity -Compress -Depth 4
+}
+
+function Copy-PendingActionForSubset($RawAction) {
+    $properties = [ordered]@{}
+    foreach ($property in $RawAction.PSObject.Properties) {
+        $properties[$property.Name] = $property.Value
+    }
+    $properties['status'] = 'pending'
+    return [pscustomobject]$properties
+}
+
+function New-PendingSubsetPayload {
+    param($Checked, $SourcePending)
+    $actions = @()
+    foreach ($checkedItem in @($Checked)) {
+        if ($checkedItem -and $checkedItem._raw) {
+            $actions += Copy-PendingActionForSubset $checkedItem._raw
+        }
+    }
+    $suspicious = @()
+    if ($SourcePending -and $SourcePending.suspicious) { $suspicious = @($SourcePending.suspicious) }
+    # Task5 将在进入此流程前拒绝旧格式; 当前已接受的扫描对象统一输出 pending v2
+    $pendingVersion = 2
+    if ($SourcePending -and
+        ($SourcePending.PSObject.Properties.Name -contains 'pending_schema_version') -and
+        ($SourcePending.pending_schema_version -is [int]) -and
+        ($SourcePending.pending_schema_version -eq 2)) {
+        $pendingVersion = $SourcePending.pending_schema_version
+    }
+    return [pscustomobject]@{
+        pending_schema_version = $pendingVersion
+        generated = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        actions = @($actions)
+        observations = @()
+        suspicious = @($suspicious)
+    }
+}
+
 # v1.5.5: 动作中文标签 (勾选视图展示)
 function Get-ActionLabel($a) {
     switch ($a) {
@@ -367,9 +425,7 @@ function Merge-PendingStatus($SubsetPath) {
     if (-not $main.actions -or -not $subset.actions) { return }
     foreach ($sa in @($subset.actions)) {
         foreach ($ma in @($main.actions)) {
-            $sameKey = ($ma.id -eq $sa.id) -and ($ma.hit_type -eq $sa.hit_type) -and
-                       ($ma.service_name -eq $sa.service_name) -and ($ma.autostart_name -eq $sa.autostart_name) -and
-                       ($ma.task_path -eq $sa.task_path) -and ($ma.process_name -eq $sa.process_name)
+            $sameKey = (Get-PendingIdentityKey $ma) -eq (Get-PendingIdentityKey $sa)
             if ($sameKey) { $ma.status = $sa.status }
         }
     }
@@ -487,23 +543,13 @@ $window.FindName('BtnExec').Add_Click({
         # 构造勾选子集临时清单 (完整 payload 结构, 只含勾选条目; suspicious 原样带上)
         $tmpPending = Join-Path $env:TEMP ("shushu_pending_" + [guid]::NewGuid().ToString('N') + ".json")
         $srcPendingPath = Join-Path $script:Root 'pending_actions.json'
-        $suspArr = @()
+        $src = [pscustomobject]@{ pending_schema_version=2; suspicious=@() }
         if (Test-Path $srcPendingPath) {
             $src = Get-Content $srcPendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($src.suspicious) { $suspArr = @($src.suspicious) }
         }
-        $actions = @()
-        foreach ($c in $checked) {
-            $r = $c._raw
-            $actions += [pscustomobject]@{
-                id=$r.id; vendor=$r.vendor; name_cn=$r.name_cn; action=$r.action; hit_type=$r.hit_type
-                detail=$r.detail; reason_cn=$r.reason_cn; service_name=$r.service_name
-                autostart_source=$r.autostart_source; autostart_name=$r.autostart_name
-                task_path=$r.task_path; process_name=$r.process_name; safe=$r.safe; status='pending'
-            }
-        }
-        $payload = [pscustomobject]@{ generated=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'); actions=$actions; suspicious=$suspArr }
-        $payload | ConvertTo-Json -Depth 5 | Out-File $tmpPending -Encoding utf8
+        $payload = New-PendingSubsetPayload -Checked $checked -SourcePending $src
+        $json = ConvertTo-Json -InputObject $payload -Depth 6
+        [System.IO.File]::WriteAllText($tmpPending, $json, (New-Object System.Text.UTF8Encoding($true)))
 
         $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll','-PendingFileArg',"`"$tmpPending`""
         $proc.WaitForExit()
