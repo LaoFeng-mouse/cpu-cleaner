@@ -115,3 +115,158 @@ Describe 'GUI 壳 (无窗口)' {
         [System.IO.Directory]::Delete($tmpRoot, $true)
     }
 }
+
+Describe '勾选视图 (v1.5.5)' {
+    BeforeAll {
+        $env:SHUSHU_CLEANER_TEST = '1'
+        $script:GuiRoot = Split-Path $PSScriptRoot -Parent
+        . (Join-Path $script:GuiRoot 'gui-cleaner.ps1')
+        $script:Win = $window
+    }
+
+    It '动作中文标签映射' {
+        Get-ActionLabel 'disable_service'  | Should -Be '禁用服务'
+        Get-ActionLabel 'remove_autostart' | Should -Be '删除自启'
+        Get-ActionLabel 'disable_task'     | Should -Be '禁用任务'
+        Get-ActionLabel 'uninstall'        | Should -Be '手动卸载'
+        Get-ActionLabel 'investigate'      | Should -Be '仅观察'
+        Get-ActionLabel 'none'             | Should -Be '不处理'
+    }
+
+    It '勾选视图: 风险/实测/建议/可恢复标签 + 默认勾选规则 + 已处理项过滤' {
+        $tmpRoot = Join-Path $env:TEMP ("gui_view_" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
+        $profiles = [pscustomobject]@{
+            schema_version = 2
+            profiles = @(
+                [pscustomobject]@{ id='t1'; vendor='T'; name_cn='测试高风险'; risk='high'; safe=$true; reason_cn='r1'
+                    detect=[pscustomobject]@{ services=@('S1'); processes=@(); autostarts=@(); tasks=@() }
+                    actions=[pscustomobject]@{ service='disable_service' }
+                    evidence=[pscustomobject]@{ tested=$true; tested_count=1; tested_models=@('X'); last_verified='2026-01-01' } },
+                [pscustomobject]@{ id='t2'; vendor='T'; name_cn='测试未实测'; risk='medium'; safe=$true; reason_cn='r2'
+                    detect=[pscustomobject]@{ services=@('S2'); processes=@(); autostarts=@(); tasks=@() }
+                    actions=[pscustomobject]@{ service='investigate' }
+                    evidence=[pscustomobject]@{ tested=$false; tested_count=0; tested_models=@(); last_verified=$null } }
+            )
+            keep_notes_cn = @()
+        }
+        $profiles | ConvertTo-Json -Depth 6 | Out-File (Join-Path $tmpRoot 'bloatware-profiles.json') -Encoding utf8
+        $pending = [pscustomobject]@{
+            generated = 'x'
+            actions = @(
+                [pscustomobject]@{ id='t1'; vendor='T'; name_cn='测试高风险'; action='disable_service'; hit_type='service'; detail=''; reason_cn='r1'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='pending' },
+                [pscustomobject]@{ id='t2'; vendor='T'; name_cn='测试未实测'; action='investigate'; hit_type='service'; detail=''; reason_cn='r2'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='pending' },
+                [pscustomobject]@{ id='t3'; vendor='T'; name_cn='已完成项'; action='disable_service'; hit_type='service'; detail=''; reason_cn='r3'; service_name='S3'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='success' }
+            )
+            suspicious = @()
+        }
+        $pending | ConvertTo-Json -Depth 6 | Out-File (Join-Path $tmpRoot 'pending_actions.json') -Encoding utf8
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try { $view = @(Get-PendingViewItems) } finally { $script:Root = $oldRoot }
+
+        # 只显示可处理状态: success 的 t3 被过滤
+        $view.Count | Should -Be 2
+        $v1 = $view | Where-Object { $_.name_cn -eq '测试高风险' }
+        $v2 = $view | Where-Object { $_.name_cn -eq '测试未实测' }
+        # 实测+可自动处理 → 默认勾选, 标签正确
+        $v1.IsChecked | Should -Be $true
+        $v1.risk_label | Should -Be '高风险'
+        $v1.evidence_label | Should -Be '实测 1 台'
+        $v1.action_label | Should -Be '禁用服务'
+        $v1.restorable_label | Should -Be '可恢复'
+        # 未实测+investigate → 默认不勾选 (仅观察)
+        $v2.IsChecked | Should -Be $false
+        $v2.risk_label | Should -Be '中风险'
+        $v2.evidence_label | Should -Be '未实测'
+        $v2.action_label | Should -Be '仅观察'
+
+        [System.IO.Directory]::Delete($tmpRoot, $true)
+    }
+
+    It 'Get-CleanResultSummary 支持自定义路径 (-Path)' {
+        $tmpRoot = Join-Path $env:TEMP ("gui_sum2_" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
+        $tmpFile = Join-Path $tmpRoot 'subset.json'
+        $pending = [pscustomobject]@{
+            generated = 'x'
+            actions = @(
+                [pscustomobject]@{ id='a'; status='success' },
+                [pscustomobject]@{ id='b'; status='failed' }
+            )
+            suspicious = @()
+        }
+        $pending | ConvertTo-Json -Depth 5 | Out-File $tmpFile -Encoding utf8
+        $sum = Get-CleanResultSummary -Path $tmpFile
+        $sum.success | Should -Be 1
+        $sum.failed | Should -Be 1
+        $sum.pending | Should -Be 0
+        [System.IO.Directory]::Delete($tmpRoot, $true)
+    }
+
+    It 'Merge-PendingStatus: 子集状态合并回主清单, 未勾选条目不动' {
+        $tmpRoot = Join-Path $env:TEMP ("gui_merge_" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
+        $main = [pscustomobject]@{
+            generated = 'x'
+            actions = @(
+                [pscustomobject]@{ id='t1'; hit_type='service'; service_name='S1'; autostart_name=''; task_path=''; process_name=''; status='pending' },
+                [pscustomobject]@{ id='t2'; hit_type='service'; service_name='S2'; autostart_name=''; task_path=''; process_name=''; status='pending' }
+            )
+            suspicious = @()
+        }
+        $main | ConvertTo-Json -Depth 5 | Out-File (Join-Path $tmpRoot 'pending_actions.json') -Encoding utf8
+        $subset = [pscustomobject]@{
+            generated = 'x'
+            actions = @(
+                [pscustomobject]@{ id='t1'; hit_type='service'; service_name='S1'; autostart_name=''; task_path=''; process_name=''; status='success' }
+            )
+            suspicious = @()
+        }
+        $subsetFile = Join-Path $tmpRoot 'subset.json'
+        $subset | ConvertTo-Json -Depth 5 | Out-File $subsetFile -Encoding utf8
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try { Merge-PendingStatus $subsetFile } finally { $script:Root = $oldRoot }
+
+        $after = Get-Content (Join-Path $tmpRoot 'pending_actions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        @($after.actions | Where-Object { $_.id -eq 't1' })[0].status | Should -Be 'success'
+        @($after.actions | Where-Object { $_.id -eq 't2' })[0].status | Should -Be 'pending'
+        [System.IO.Directory]::Delete($tmpRoot, $true)
+    }
+
+    It 'Merge-PendingStatus: 同 id 不同 target 不误合并' {
+        $tmpRoot = Join-Path $env:TEMP ("gui_merge2_" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
+        # 同 id lenovo-serviceas 两条: 服务 + 自启, target 不同
+        $main = [pscustomobject]@{
+            generated = 'x'
+            actions = @(
+                [pscustomobject]@{ id='lenovo-serviceas'; hit_type='service'; service_name='LenovoServiceAS'; autostart_name=''; task_path=''; process_name=''; status='pending' },
+                [pscustomobject]@{ id='lenovo-serviceas'; hit_type='autostart'; service_name=''; autostart_name='LenovoAppStore'; task_path=''; process_name=''; status='pending' }
+            )
+            suspicious = @()
+        }
+        $main | ConvertTo-Json -Depth 5 | Out-File (Join-Path $tmpRoot 'pending_actions.json') -Encoding utf8
+        $subset = [pscustomobject]@{
+            generated = 'x'
+            actions = @(
+                [pscustomobject]@{ id='lenovo-serviceas'; hit_type='service'; service_name='LenovoServiceAS'; autostart_name=''; task_path=''; process_name=''; status='failed' }
+            )
+            suspicious = @()
+        }
+        $subsetFile = Join-Path $tmpRoot 'subset.json'
+        $subset | ConvertTo-Json -Depth 5 | Out-File $subsetFile -Encoding utf8
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try { Merge-PendingStatus $subsetFile } finally { $script:Root = $oldRoot }
+
+        $after = Get-Content (Join-Path $tmpRoot 'pending_actions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        @($after.actions | Where-Object { $_.hit_type -eq 'service' })[0].status | Should -Be 'failed'
+        @($after.actions | Where-Object { $_.hit_type -eq 'autostart' })[0].status | Should -Be 'pending'
+        [System.IO.Directory]::Delete($tmpRoot, $true)
+    }
+}

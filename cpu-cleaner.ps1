@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 v1.5.4 (cpu-cleaner.ps1) — 多维检测与风险评分
+#  CPU 后台整理工具 v1.5.5 (cpu-cleaner.ps1) — 多维检测与风险评分
 #  适用: Windows 10/11, PowerShell 5.1+
 #
 #  用法:
@@ -20,7 +20,11 @@ param(
     [string]$Mode = 'scan',
     [string]$ReportPath = '',
     [string]$BackupDir = '',
-    [switch]$YesToAll
+    [switch]$YesToAll,
+    # v1.5.5: GUI 勾选子集清单路径 (只处理勾选条目)。
+    # 注意参数名不能是 $PendingFile: param 变量与 $script:PendingFile 同名同变量,
+    # 顶部默认赋值会覆盖参数值导致丢失, 故命名为 $PendingFileArg
+    [string]$PendingFileArg = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -30,7 +34,7 @@ $script:ProfileFile = Join-Path $script:Root 'bloatware-profiles.json'
 $script:PendingFile = Join-Path $script:Root 'pending_actions.json'
 $script:BackupRoot = Join-Path $script:Root 'backups'
 # v1.5.2: 版本号全局唯一 (文本报告/HTML 页脚统一引用, 不再手改多处)
-$script:Version = '1.5.4'
+$script:Version = '1.5.5'
 # 特征库更新地址(可选): 填入指向 bloatware-profiles.json 的 URL 后可用 -Mode update
 $script:ProfileUrl = ''
 # v1.5.1 供应链安全: 特征库 SHA256 校验文件地址 (与 ProfileUrl 配套发布, 可选但强烈建议)
@@ -1327,7 +1331,11 @@ switch ($Mode) {
             Write-Host "报告已保存: $ReportPath" -ForegroundColor Green
         }
     }
-    'clean' { Invoke-Clean }
+    'clean' {
+        # v1.5.5: GUI 勾选子集 — -PendingFileArg 指向临时清单 (只处理勾选条目, 授权验证照跑)
+        if ($PendingFileArg) { $script:PendingFile = $PendingFileArg }
+        Invoke-Clean
+    }
     'restore' { Invoke-Restore }
     'update' { Update-Profiles }
 }

@@ -25,9 +25,10 @@ $script:I18N = @{
         AppName='鼠鼠cleaner'; SubTitle='扫描 · 清理 · 恢复 —— 全程自动备份，后悔可还原'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
         TabScan='🐹 1. 扫描（只读）'; TabPending='📋 2. 处理建议'; TabExec='⚙️ 3. 执行（管理员）'; TabResult='✅ 4. 结果与恢复'
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
-        BtnLoad='读取待处理清单'; PendingHint='显示扫描后需要处理的项目（未扫描或清单为空则无内容）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。到【3. 执行】页一键处理。'
-        ExecInfo1='点击下面按钮，会把【处理建议】里的全部项目处理掉。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
-        BtnExec='执行全部处理（需要管理员）'; ExecEmpty='没有待处理项目，请先扫描。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
+        BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
+        SelectAll='全选'; ClearAll='清空'
+        ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
+        BtnExec='处理已勾选项目（需要管理员）'; ExecEmpty='请先勾选要处理的项目（【2. 处理建议】页勾选）。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
         ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2}'
         BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
         NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。详见管理员窗口。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复出错或被取消: {0}'; RestorePartial='恢复完成，但部分条目验证失败（详见管理员窗口）。'
@@ -37,9 +38,10 @@ $script:I18N = @{
         AppName='Shushu Cleaner'; SubTitle='Scan · Clean · Restore — auto backup, undo anytime'; Hint0='GUI is a shell; core logic is identical to CLI'
         TabScan='🐹 1. Scan (read-only)'; TabPending='📋 2. Recommendations'; TabExec='⚙️ 3. Execute (admin)'; TabResult='✅ 4. Result & Restore'
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
-        BtnLoad='Load Pending Items'; PendingHint='Items to process after scan (empty if none)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Go to tab 3 to process.'
-        ExecInfo1='Click below to process all recommended items.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
-        BtnExec='Process All (admin)'; ExecEmpty='No pending items. Scan first.'; ExecStart='Processing {0} item(s). UAC requested, click YES…'; ExecDone='Processing done. See tab 4 (restart PC recommended).'
+        BtnLoad='Load Pending Items'; PendingHint='Risk & evidence shown; check items to process (unverified = observe only, unchecked)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Check items, then go to tab 3.'
+        SelectAll='Select All'; ClearAll='Clear'
+        ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
+        BtnExec='Process Checked Items (admin)'; ExecEmpty='Check items first (tab 2).'; ExecStart='Processing {0} item(s). UAC requested, click YES…'; ExecDone='Processing done. See tab 4 (restart PC recommended).'
         ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2}'
         BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
         NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}. See admin window.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed/cancelled: {0}'; RestorePartial='Restore finished, but some items failed verification (see admin window).'
@@ -63,6 +65,8 @@ function Apply-Language {
     $w.FindName('BtnScan').Content = $t['BtnScan']
     $w.FindName('ScanHint').Text = $t['ScanHint']
     $w.FindName('BtnLoadPending').Content = $t['BtnLoad']
+    $w.FindName('BtnSelectAll').Content = $t['SelectAll']
+    $w.FindName('BtnClearAll').Content = $t['ClearAll']
     $w.FindName('PendingHint').Text = $t['PendingHint']
     $w.FindName('ExecInfo1').Text = $t['ExecInfo1']
     $w.FindName('ExecInfo2').Text = $t['ExecInfo2']
@@ -159,17 +163,31 @@ $xaml = @"
           <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
             <Image x:Name="ImgPending" Source="assets/rat_pending.jpg" Width="72" Height="72" Stretch="UniformToFill" Margin="0,0,10,0"/>
             <StackPanel>
-              <Button x:Name="BtnLoadPending" Content="读取待处理清单" Width="150" Height="36" Background="#FFD21F" Foreground="#211D16" FontWeight="Bold" BorderThickness="0"/>
-              <TextBlock x:Name="PendingHint" Text="显示扫描后需要处理的项目（未扫描或清单为空则无内容）" Foreground="#666" Margin="0,4,0,0"/>
+              <StackPanel Orientation="Horizontal">
+                <Button x:Name="BtnLoadPending" Content="读取待处理清单" Width="150" Height="30" Background="#FFD21F" Foreground="#211D16" FontWeight="Bold" BorderThickness="0"/>
+                <Button x:Name="BtnSelectAll" Content="全选" Width="64" Height="30" Background="#27AE60" Foreground="White" BorderThickness="0" Margin="8,0,0,0"/>
+                <Button x:Name="BtnClearAll" Content="清空" Width="64" Height="30" Background="#95A5A6" Foreground="White" BorderThickness="0" Margin="6,0,0,0"/>
+              </StackPanel>
+              <TextBlock x:Name="PendingHint" Text="按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）" Foreground="#666" Margin="0,4,0,0"/>
             </StackPanel>
           </StackPanel>
           <ListView x:Name="PendingList" Grid.Row="1" BorderThickness="1" BorderBrush="#DDD" Background="#FFFDF4">
             <ListView.View>
               <GridView>
-                <GridViewColumn Header="项目" Width="230" DisplayMemberBinding="{Binding name_cn}"/>
-                <GridViewColumn Header="动作" Width="110" DisplayMemberBinding="{Binding action}"/>
-                <GridViewColumn Header="状态" Width="90" DisplayMemberBinding="{Binding status}"/>
-                <GridViewColumn Header="说明" Width="330" DisplayMemberBinding="{Binding reason_cn}"/>
+                <GridViewColumn Header="☑" Width="40">
+                  <GridViewColumn.CellTemplate>
+                    <DataTemplate>
+                      <CheckBox IsChecked="{Binding IsChecked}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </DataTemplate>
+                  </GridViewColumn.CellTemplate>
+                </GridViewColumn>
+                <GridViewColumn Header="项目" Width="180" DisplayMemberBinding="{Binding name_cn}"/>
+                <GridViewColumn Header="风险" Width="70" DisplayMemberBinding="{Binding risk_label}"/>
+                <GridViewColumn Header="实测" Width="80" DisplayMemberBinding="{Binding evidence_label}"/>
+                <GridViewColumn Header="建议" Width="80" DisplayMemberBinding="{Binding action_label}"/>
+                <GridViewColumn Header="恢复" Width="56" DisplayMemberBinding="{Binding restorable_label}"/>
+                <GridViewColumn Header="状态" Width="70" DisplayMemberBinding="{Binding status}"/>
+                <GridViewColumn Header="说明" Width="280" DisplayMemberBinding="{Binding reason_cn}"/>
               </GridView>
             </ListView.View>
           </ListView>
@@ -244,11 +262,86 @@ foreach ($imgName in $script:ImgMap.Keys) {
 }
 
 function Get-PendingItems {
-    $pf = Join-Path $script:Root 'pending_actions.json'
+    param([string]$Path = '')
+    $pf = if ($Path) { $Path } else { Join-Path $script:Root 'pending_actions.json' }
     if (-not (Test-Path $pf)) { return @() }
     $p = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $p.actions) { return @() }
     return @($p.actions)
+}
+
+# v1.5.5: 动作中文标签 (勾选视图展示)
+function Get-ActionLabel($a) {
+    switch ($a) {
+        'disable_service'  { return '禁用服务' }
+        'remove_autostart' { return '删除自启' }
+        'disable_task'     { return '禁用任务' }
+        'uninstall'        { return '手动卸载' }
+        'investigate'      { return '仅观察' }
+        'none'             { return '不处理' }
+        default            { return $a }
+    }
+}
+
+# v1.5.5: 特征库 id → 规则 查找表 (仅展示用; 执行层的严格校验由 CLI Load-Profiles + 授权验证负责)
+function Get-ProfileLookup {
+    $map = @{}
+    $pf = Join-Path $script:Root 'bloatware-profiles.json'
+    if (-not (Test-Path $pf)) { return $map }
+    try {
+        $p = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($r in @($p.profiles)) { if ($r.id) { $map[$r.id] = $r } }
+    } catch {}
+    return $map
+}
+
+# v1.5.5: 构造勾选展示对象 — 风险/实测/建议/可恢复标签
+# 只显示可处理状态 (pending/failed); 默认勾选 = 可自动处理 (investigate/none 仅观察不勾选)
+function Get-PendingViewItems {
+    $items = @(Get-PendingItems | Where-Object { $_.status -in @('pending','failed') })
+    $map = Get-ProfileLookup
+    $view = @()
+    foreach ($i in $items) {
+        $rule = $map[$i.id]
+        $riskLabel = '未知'
+        $evidenceLabel = '未实测'
+        if ($rule) {
+            $riskLabel = switch ($rule.risk) { 'high' { '高风险' } 'medium' { '中风险' } 'low' { '低风险' } default { '未知' } }
+            $evidenceLabel = if ($rule.evidence -and $rule.evidence.tested) { ('实测 {0} 台' -f $rule.evidence.tested_count) } else { '未实测' }
+        }
+        $canAuto = $i.action -ne 'investigate' -and $i.action -ne 'none'
+        $view += [pscustomobject]@{
+            IsChecked         = $canAuto
+            name_cn           = $i.name_cn
+            risk_label        = $riskLabel
+            evidence_label    = $evidenceLabel
+            action_label      = Get-ActionLabel $i.action
+            restorable_label  = '可恢复'
+            status            = $i.status
+            reason_cn         = $i.reason_cn
+            _raw              = $i
+        }
+    }
+    return $view
+}
+
+# v1.5.5: 把勾选子集临时文件的处理结果状态合并回主 pending_actions.json
+# (clean 处理的是临时子集, 主清单不同步的话下次加载仍是 pending, 用户会看到重复待办)
+function Merge-PendingStatus($SubsetPath) {
+    $mainPath = Join-Path $script:Root 'pending_actions.json'
+    if (-not (Test-Path $mainPath) -or -not (Test-Path $SubsetPath)) { return }
+    $main = Get-Content $mainPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $subset = Get-Content $SubsetPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not $main.actions -or -not $subset.actions) { return }
+    foreach ($sa in @($subset.actions)) {
+        foreach ($ma in @($main.actions)) {
+            $sameKey = ($ma.id -eq $sa.id) -and ($ma.hit_type -eq $sa.hit_type) -and
+                       ($ma.service_name -eq $sa.service_name) -and ($ma.autostart_name -eq $sa.autostart_name) -and
+                       ($ma.task_path -eq $sa.task_path) -and ($ma.process_name -eq $sa.process_name)
+            if ($sameKey) { $ma.status = $sa.status }
+        }
+    }
+    $main | ConvertTo-Json -Depth 5 | Out-File $mainPath -Encoding utf8
 }
 
 # v1.5.3: 扫描 job 收尾统一处理 — Completed 成功 / Failed / Stopped 都要恢复 UI
@@ -268,8 +361,10 @@ function Complete-ScanPoll {
 }
 
 # v1.5.3: clean 完成后读回 pending_actions.json 状态机统计 (不信任"进程结束=成功")
+# v1.5.5: 支持 -Path 读自定义清单 (GUI 勾选子集临时文件)
 function Get-CleanResultSummary {
-    $items = @(Get-PendingItems)
+    param([string]$Path = '')
+    $items = @(Get-PendingItems -Path $Path)
     $sum = @{ success = 0; failed = 0; skipped = 0; manual_required = 0; pending = 0 }
     foreach ($i in $items) {
         $s = if ($i.status) { $i.status.ToString() } else { 'pending' }
@@ -318,11 +413,11 @@ $window.FindName('BtnScan').Add_Click({
     $checkTimer.Start()
 })
 
-# ---------- 读取处理建议 (修复: 兜底提示 + 强制刷新) ----------
+# ---------- 读取处理建议 (v1.5.5: 勾选视图 — 风险/实测/建议标签 + 默认勾选 + 全选/清空) ----------
 $window.FindName('BtnLoadPending').Add_Click({
     $list = $window.FindName('PendingList')
     $hint = $window.FindName('PendingHint')
-    $items = @(Get-PendingItems)
+    $items = @(Get-PendingViewItems)
     if ($items.Count -eq 0) {
         $hint.Text = (Get-Text 'PendingNone')
         $list.ItemsSource = $null
@@ -335,18 +430,52 @@ $window.FindName('BtnLoadPending').Add_Click({
     }
 })
 
-# ---------- 执行全部处理 ----------
+# v1.5.5: 全选 / 清空 勾选
+$window.FindName('BtnSelectAll').Add_Click({
+    $list = $window.FindName('PendingList')
+    foreach ($it in @($list.Items)) { $it.IsChecked = $true }
+    $list.Items.Refresh()
+})
+$window.FindName('BtnClearAll').Add_Click({
+    $list = $window.FindName('PendingList')
+    foreach ($it in @($list.Items)) { $it.IsChecked = $false }
+    $list.Items.Refresh()
+})
+
+# ---------- 处理已勾选项目 (v1.5.5: 勾选子集 → 临时清单 → clean -PendingFileArg) ----------
 $window.FindName('BtnExec').Add_Click({
     $hint = $window.FindName('ExecHint')
     $out = $window.FindName('ExecOutput')
-    $items = @(Get-PendingItems)
-    if ($items.Count -eq 0) {
+    $list = $window.FindName('PendingList')
+    $checked = @($list.Items | Where-Object { $_.IsChecked })
+    if ($checked.Count -eq 0) {
         $hint.Text = (Get-Text 'ExecEmpty')
         return
     }
-    $hint.Text = ((Get-Text 'ExecStart') -f $items.Count)
+    $hint.Text = ((Get-Text 'ExecStart') -f $checked.Count)
     try {
-        $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll'
+        # 构造勾选子集临时清单 (完整 payload 结构, 只含勾选条目; suspicious 原样带上)
+        $tmpPending = Join-Path $env:TEMP ("shushu_pending_" + [guid]::NewGuid().ToString('N') + ".json")
+        $srcPendingPath = Join-Path $script:Root 'pending_actions.json'
+        $suspArr = @()
+        if (Test-Path $srcPendingPath) {
+            $src = Get-Content $srcPendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($src.suspicious) { $suspArr = @($src.suspicious) }
+        }
+        $actions = @()
+        foreach ($c in $checked) {
+            $r = $c._raw
+            $actions += [pscustomobject]@{
+                id=$r.id; vendor=$r.vendor; name_cn=$r.name_cn; action=$r.action; hit_type=$r.hit_type
+                detail=$r.detail; reason_cn=$r.reason_cn; service_name=$r.service_name
+                autostart_source=$r.autostart_source; autostart_name=$r.autostart_name
+                task_path=$r.task_path; process_name=$r.process_name; safe=$r.safe; status='pending'
+            }
+        }
+        $payload = [pscustomobject]@{ generated=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'); actions=$actions; suspicious=$suspArr }
+        $payload | ConvertTo-Json -Depth 5 | Out-File $tmpPending -Encoding utf8
+
+        $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll','-PendingFileArg',"`"$tmpPending`""
         $proc.WaitForExit()
         if ($proc.ExitCode -ne 0) {
             # v1.5.3: 管理员进程异常退出 (UAC 取消会抛异常, 走到 catch; 非 0 = 脚本内致命错误)
@@ -355,12 +484,14 @@ $window.FindName('BtnExec').Add_Click({
             $out.Text = $msg
             return
         }
-        # v1.5.3: 读回状态机统计, 不信任"进程结束=成功"
-        $sum = Get-CleanResultSummary
+        # v1.5.3: 读回状态机统计 (从勾选子集临时文件, 不信任"进程结束=成功")
+        $sum = Get-CleanResultSummary -Path $tmpPending
+        # v1.5.5: 把子集处理结果同步回主清单, 避免下次加载仍是 pending
+        Merge-PendingStatus $tmpPending
         $lines = @(
             (Get-Text 'ExecDone'),
             '',
-            '结果汇总:',
+            ('结果汇总 (处理 {0} 项):' -f $checked.Count),
             "  success: $($sum.success)",
             "  failed:  $($sum.failed)",
             "  skipped: $($sum.skipped)",

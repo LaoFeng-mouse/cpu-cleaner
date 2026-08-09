@@ -9,9 +9,18 @@
 - 多品牌规则实测积累：当前 23 条规则中 Lenovo 11 条全实测，非联想规则大多 tested=false→investigate（正确但价值有限）。10 分方向是逐台实机积累 Dell/HP/ASUS/Xiaomi/Acer/MSI/Huawei 规则（每台机器扫描→人工确认→补 evidence 实测字段）
 - CPU 采样增强：当前 2 秒单次采样偏轻量，改为 10~15 秒 3~5 次采样，输出 平均 CPU / 峰值 CPU / 持续占用 / 内存 / 子进程数 等维度，区分「瞬间吃一下」vs「持续后台发疯」（如 updater.exe）
 - Schema 3.0 match_type：detect 匹配从 -like 子串升级为显式 match_type（exact / contains / regex / path / publisher / sha256），危险动作原则上优先 exact——库规模到 200+ 条后子串匹配必然误判
-- GUI 勾选式执行：从「执行全部处理」改为逐项勾选（风险级 / 实测台数 / 建议动作 / 影响 / 可恢复），处理已勾选项目——让底层安全机制被用户看见
+- 特征库 impact 字段（规则级"影响"说明，如"AI 助手不可用"）：GUI 勾选视图已预留展示位，内容随各品牌实测积累补充（不编造）
 - 模块化拆分：cpu-cleaner.ps1 已 ~65KB、gui-cleaner.ps1 ~25KB，下一阶段拆 src/Core/{Scanner,RiskEngine,ProfileEngine,ActionEngine,BackupManager}.psm1 + src/UI/{MainWindow.xaml,GuiController.ps1}，不再往单文件塞功能
 - v2.0 GUI（鼠鼠风格 WPF 壳，进行中）
+
+## [1.5.5] - 2026-08-09
+
+### 功能
+- **GUI 勾选式执行**：处理建议页改为逐项勾选——显示 风险级（高/中/低）、实测（N 台/未实测）、建议动作（禁用服务/删除自启/禁用任务）、可恢复、状态；未实测条目默认不勾选（仅观察）；支持 全选/清空；按钮改为「处理已勾选项目」
+- CLI 新增 `-PendingFileArg` 参数：GUI 把勾选条目写成临时子集清单，clean 只处理勾选条目（授权验证照跑——子集同样过 Test-PendingActionAuthorized），未勾选条目完全不碰；处理结果合并回主清单（Merge-PendingStatus），避免下次加载重复待办
+
+### 工程
+- GUI 无窗口测试新增 5 项（勾选视图/动作标签/子集统计/状态合并×2，含同 id 不同 target 防误伤）
 
 ## [1.5.4] - 2026-08-09
 
