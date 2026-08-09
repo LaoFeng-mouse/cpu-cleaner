@@ -7,7 +7,24 @@
 ### 计划
 - 特征库数字签名验证（profiles.json.sig + 内置公钥）：SHA256 只能防下载损坏/镜像不一致/单文件篡改，攻击者同时控制 JSON 与 SHA256 下载地址时可整体替换——真正身份验证需要签名
 - 多品牌规则实测积累：当前 23 条规则中 Lenovo 11 条全实测，非联想规则大多 tested=false→investigate（正确但价值有限）。10 分方向是逐台实机积累 Dell/HP/ASUS/Xiaomi/Acer/MSI/Huawei 规则（每台机器扫描→人工确认→补 evidence 实测字段）
+- CPU 采样增强：当前 2 秒单次采样偏轻量，改为 10~15 秒 3~5 次采样，输出 平均 CPU / 峰值 CPU / 持续占用 / 内存 / 子进程数 等维度，区分「瞬间吃一下」vs「持续后台发疯」（如 updater.exe）
+- Schema 3.0 match_type：detect 匹配从 -like 子串升级为显式 match_type（exact / contains / regex / path / publisher / sha256），危险动作原则上优先 exact——库规模到 200+ 条后子串匹配必然误判
+- GUI 勾选式执行：从「执行全部处理」改为逐项勾选（风险级 / 实测台数 / 建议动作 / 影响 / 可恢复），处理已勾选项目——让底层安全机制被用户看见
+- 模块化拆分：cpu-cleaner.ps1 已 ~65KB、gui-cleaner.ps1 ~25KB，下一阶段拆 src/Core/{Scanner,RiskEngine,ProfileEngine,ActionEngine,BackupManager}.psm1 + src/UI/{MainWindow.xaml,GuiController.ps1}，不再往单文件塞功能
 - v2.0 GUI（鼠鼠风格 WPF 壳，进行中）
+
+## [1.5.4] - 2026-08-09
+
+### 安全（P0）
+- **自启项备份/恢复粒度修复**：旧实现 reg export 整个 Run 键、restore reg import 整个键——备份与恢复范围远大于「删除一个值」，期间用户新增/修改的同键其他值会被旧备份覆盖（例：8/9 备份 Run → 删 LenovoAppStore → 8/10 装微信新增 Run 项 → 8/11 restore 用 8/9 的整键导入）。改为只备份被删 Value 的 Name/Type/Data（`*.autostart.json`），restore 只写回这一项（`Restore-AutostartValue`），同键其他值完全不动——最小修改、最小恢复
+- 旧格式 `.reg` 备份在 restore 时仍兼容（按备份文件扩展名区分新旧格式）
+
+### 文档
+- README 定位诚实化：新增「能力边界」——tested=true 高价值规则绝大部分来自联想 ThinkBook 16p G6（多 tested_count=1），其他品牌大多 tested=false→investigate，尚不能宣称「任何品牌电脑都可以安全清理」
+- 副标题明确为「Windows 后台进程诊断与安全清理工具」+ 说明 "CPU" 是入口信号而非 CPU 优化工具；GitHub description 同步更新
+
+### 工程
+- 单值备份/恢复单测 7 项（tests/Pester/AutostartValue.Tests.ps1，HKCU 临时键自建自删）：String/ExpandString(%VAR% 不展开)/DWord 类型保持、删除后单值恢复、最小恢复（同键其他值不受影响）、不存在值/非法路径返回 null
 
 ## [1.5.3] - 2026-08-09
 

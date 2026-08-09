@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 v1.5.3 (cpu-cleaner.ps1) — 多维检测与风险评分
+#  CPU 后台整理工具 v1.5.4 (cpu-cleaner.ps1) — 多维检测与风险评分
 #  适用: Windows 10/11, PowerShell 5.1+
 #
 #  用法:
@@ -30,7 +30,7 @@ $script:ProfileFile = Join-Path $script:Root 'bloatware-profiles.json'
 $script:PendingFile = Join-Path $script:Root 'pending_actions.json'
 $script:BackupRoot = Join-Path $script:Root 'backups'
 # v1.5.2: 版本号全局唯一 (文本报告/HTML 页脚统一引用, 不再手改多处)
-$script:Version = '1.5.3'
+$script:Version = '1.5.4'
 # 特征库更新地址(可选): 填入指向 bloatware-profiles.json 的 URL 后可用 -Mode update
 $script:ProfileUrl = ''
 # v1.5.1 供应链安全: 特征库 SHA256 校验文件地址 (与 ProfileUrl 配套发布, 可选但强烈建议)
@@ -830,6 +830,50 @@ function Backup-RegistryKey($keyPath, $backupDir, $tag) {
     return $out
 }
 
+# v1.5.4 P0: 自启项单 Value 备份/恢复 — 恢复粒度必须等于修改粒度
+# 旧实现 reg export 整个 Run 键 + reg import: 备份与恢复的范围远大于"删除一个值",
+# 期间用户新增/修改的同键其他值会被旧备份覆盖。改为只备份被删 Value 的 Name/Type/Data,
+# restore 只写回这一项, 同键其他值完全不动。
+function Get-AutostartValueInfo($keyPath, $name) {
+    $root = $null; $subPath = $null
+    if ($keyPath -match '^HKLM:\\(.*)$') { $root = [Microsoft.Win32.Registry]::LocalMachine; $subPath = $matches[1] }
+    elseif ($keyPath -match '^HKCU:\\(.*)$') { $root = [Microsoft.Win32.Registry]::CurrentUser; $subPath = $matches[1] }
+    else { return $null }
+    $sub = $root.OpenSubKey($subPath)
+    if (-not $sub) { return $null }
+    try {
+        # DoNotExpandEnvironmentNames: 保留 %VAR% 原始形式, 不展开
+        $v = $sub.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($null -eq $v) { return $null }
+        return [pscustomobject]@{
+            key        = $keyPath
+            name       = $name
+            value_type = $sub.GetValueKind($name).ToString()
+            value      = $v
+        }
+    } finally { $sub.Close() }
+}
+
+function Backup-AutostartValue($keyPath, $name, $backupDir, $tag) {
+    $info = Get-AutostartValueInfo $keyPath $name
+    if (-not $info) { return $null }
+    $out = Join-Path $backupDir ("$tag.autostart.json")
+    [System.IO.File]::WriteAllText($out, (ConvertTo-Json -InputObject $info -Depth 5), (New-Object System.Text.UTF8Encoding($true)))
+    return $out
+}
+
+function Restore-AutostartValue($info) {
+    $propType = switch ($info.value_type) {
+        'ExpandString' { 'ExpandString' }
+        'DWord'        { 'DWord' }
+        'QWord'        { 'QWord' }
+        'Binary'       { 'Binary' }
+        'MultiString'  { 'MultiString' }
+        default        { 'String' }
+    }
+    New-ItemProperty -Path $info.key -Name $info.name -Value $info.value -PropertyType $propType -Force | Out-Null
+}
+
 function Invoke-Clean {
     if (-not (Is-Admin)) {
         Write-Host '错误: clean 模式需要管理员权限。请右键以管理员身份运行 PowerShell 再执行。' -ForegroundColor Red
@@ -962,7 +1006,8 @@ function Invoke-Clean {
                     if ($rp -and $nm) {
                         $key = Get-ItemProperty $rp -ErrorAction SilentlyContinue
                         if ($key -and ($key.PSObject.Properties | Where-Object { $_.Name -eq $nm })) {
-                            $bak = Backup-RegistryKey $rp $backupDir $tag
+                            # v1.5.4 P0: 只备份该 Value 的 Name/Type/Data, 不再 reg export 整个键
+                            $bak = Backup-AutostartValue $rp $nm $backupDir $tag
                             Remove-ItemProperty -Path $rp -Name $nm -ErrorAction SilentlyContinue
                             # v1.2: 执行后验证
                             $keyAfter = Get-ItemProperty $rp -ErrorAction SilentlyContinue
@@ -970,11 +1015,11 @@ function Invoke-Clean {
                             if (-not $stillThere) {
                                 $p.status = 'success'
                                 Write-Host "  验证通过: 自启项已删除: $nm (备份: $bak)" -ForegroundColor Green
-                                $manifest += [pscustomobject]@{ type='autostart'; key=$rp; name=$nm; backup=$bak; verified=$true; note='restore: reg import <backup>' }
+                                $manifest += [pscustomobject]@{ type='autostart'; key=$rp; name=$nm; backup=$bak; verified=$true; note='restore: 单值恢复' }
                             } else {
                                 $p.status = 'failed'
                                 Write-Host "  验证失败: 自启项仍在 ($nm)" -ForegroundColor Red
-                                $manifest += [pscustomobject]@{ type='autostart'; key=$rp; name=$nm; backup=$bak; verified=$false; note='restore: reg import <backup>' }
+                                $manifest += [pscustomobject]@{ type='autostart'; key=$rp; name=$nm; backup=$bak; verified=$false; note='restore: 单值恢复' }
                             }
                         } else {
                             Write-Host "  跳过: 自启项已不存在 ($nm)" -ForegroundColor DarkYellow
@@ -1166,8 +1211,16 @@ function Invoke-Restore {
                 }
             }
             'autostart' {
-                Write-Host "  恢复自启项(reg import): $($m.backup)" -ForegroundColor Yellow
-                reg import $m.backup
+                # v1.5.4 P0: 新格式 = 单值备份 (*.autostart.json), 只恢复这一项; 旧格式 .reg = reg import (兼容历史备份)
+                $isNewFormat = $m.backup -and $m.backup -like '*.autostart.json'
+                if ($isNewFormat) {
+                    $info = Get-Content $m.backup -Raw -Encoding UTF8 | ConvertFrom-Json
+                    Write-Host "  恢复自启项(单值): $($info.name) [type=$($info.value_type)]" -ForegroundColor Yellow
+                    Restore-AutostartValue $info
+                } else {
+                    Write-Host "  恢复自启项(reg import 旧格式): $($m.backup)" -ForegroundColor Yellow
+                    reg import $m.backup
+                }
                 # v1.5.3: 执行后验证 (重读注册表属性)
                 $keyAfter = Get-ItemProperty $m.key -ErrorAction SilentlyContinue
                 $restored = $keyAfter -and ($keyAfter.PSObject.Properties | Where-Object { $_.Name -eq $m.name })

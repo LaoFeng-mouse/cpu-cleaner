@@ -1,12 +1,23 @@
 # CPU 后台整理工具
 
+> **Windows 后台进程诊断与安全清理工具**（鼠鼠cleaner）
+
 [![CI](https://github.com/LaoFeng-mouse/cpu-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/LaoFeng-mouse/cpu-cleaner/actions/workflows/ci.yml)
 [![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1%2B-blue)]()
 [![Windows](https://img.shields.io/badge/Windows-10%2F11-0078d6)]()
 
-一键扫描 Windows 电脑的后台 CPU 占用，揪出预装软件全家桶和可疑后台，安全清理（自动备份、可恢复）。
+一键扫描 Windows 电脑的后台进程与预装软件，识别 OEM 全家桶和可疑后台，安全清理（自动备份、可恢复）。
 
-本工具诞生于一次真实案例：一台联想笔记本深夜被 AI 助手全家桶一次性拉起 30+ 进程，CPU 满载 69~93%，表现为"突然卡顿"。本次经验被泛化成这个通用工具——任何品牌的 Windows 电脑都能用它排查同类问题。
+> 说明：工具名里的 "CPU" 是**入口信号**（用高 CPU 占用发现可疑后台），它不是 CPU 调度/降压/电源计划/核心优先级优化工具。
+
+本工具诞生于一次真实案例：一台联想笔记本深夜被 AI 助手全家桶一次性拉起 30+ 进程，CPU 满载 69~93%，表现为"突然卡顿"。
+
+## 能力边界（实话实说）
+
+- 当前拥有 **tested=true（实测）且可自动处理** 的高价值规则，绝大部分来自联想 ThinkBook 16p G6 ADR (21U0)，且很多是 tested_count=1 的单机实测
+- 华为 / Dell / HP / ASUS / 小米等品牌已写入特征库，但大多是 tested=false → 动作降级为 investigate（只报告、不自动处理）
+- 因此更准确的定位是：**联想部分机型已具备实战能力的 Windows 后台诊断工具 + 其他品牌的实验性识别框架**，尚不能宣称"任何品牌电脑都可以安全清理"
+- 多品牌实测覆盖是持续积累方向（扫描→人工确认→补 evidence 实测字段，见 CHANGELOG Unreleased 计划）
 
 ```
 ├── gui-cleaner.ps1          鼠鼠风格图形界面（WPF，双击 bat 或命令行启动）
@@ -212,6 +223,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ## 版本记录
 
+- 2026-08-09 v1.5.4（恢复粒度 P0）：自启项备份从 reg export 整个 Run 键改为单 Value 备份（Name/Type/Data），restore 只恢复这一项——期间用户新增的同键其他值不再被旧整键覆盖；旧 .reg 备份兼容；README 定位诚实化 + 副标题「Windows 后台进程诊断与安全清理工具」+ GitHub description 同步。
 - 2026-08-09 v1.5.3（安全边界）：clean 提权后按当前特征库重新验证授权动作（Test-PendingActionAuthorized：id/tested/safe/action/target 五重确认，不信任被改过的 pending_actions.json）；GUI 扫描轮询三态收尾（Completed/Failed/Stopped）；GUI 执行/恢复检查 ExitCode 并读回状态统计；CLI restore 执行后验证 + exit 0/2；GUI 无窗口测试套件 + CI 覆盖。
 - 2026-08-09 v1.5.2（CI 假绿根治）：移除 Pester 断言兼容包装（`Should-Be` 绑定错误导致断言从未执行、39 项全空转仍绿），全部改原生 `Should -Be`；CI 固定 Pester 5.9.0（PS5.1/PS7 双跑）；Pending 测试 Mock Windows 状态（Get-Service/Get-ItemProperty/Get-ScheduledTask）使结果与跑测试的机器无关；版本号全局化 $script:Version 单点引用；HTML 报告与文本报告统一（Top CPU 风险分/评分依据 + 风险分级汇总 + 计划任务 + evidence）。
 - 2026-08-09 v1.5（Pester + CI）：新增 Pester 测试套件 tests/Pester/（6 个文件 37 项：特征库加载/待办清单/清理动作/恢复兼容/扫描评分/报告输出，覆盖空 profile/错误 JSON/去重/safe 规则/映射/中文输出）；GitHub Actions CI（PS 5.1 单元测试 + PS5.1/PS7 双跑 Pester + PSScriptAnalyzer + schema 校验），README 加 CI 徽章。修复自启进程名提取对带参数路径的解析。本机 Pester 37 项全过。
