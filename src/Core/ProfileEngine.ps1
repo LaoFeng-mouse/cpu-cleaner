@@ -96,22 +96,34 @@ function Test-ProcessDetectMatch($target, $pattern, $Context = $null) {
     return Test-DetectMatch $normalizedTarget $matchPattern -Context $Context
 }
 
-# 规则某命中类型对应的 detect 匹配类型集合 (用于执行闸门)
-function Get-DetectTypesFor($rule, $hitType) {
-    if (-not $rule -or -not $rule.detect) { return @() }
-    $items = @()
-    switch ($hitType) {
-        'service'   { $items = @($rule.detect.services) }
-        'autostart' { $items = @($rule.detect.autostarts) }
-        'task'      { $items = @($rule.detect.tasks) }
-        'process'   { $items = @($rule.detect.processes) }
+# 按规则声明顺序和候选字段顺序寻找首个命中，并返回该命中的可审计证据
+function Find-DetectMatch($Patterns, $Candidates, [switch]$NormalizeProcessName) {
+    foreach ($pattern in @($Patterns)) {
+        $n = Normalize-DetectItem $pattern
+        foreach ($candidate in @($Candidates)) {
+            if (-not $candidate) { continue }
+            $field = [string]$candidate.field
+            $matched = $false
+            if ($NormalizeProcessName -and $field -eq 'process_name') {
+                $matched = Test-ProcessDetectMatch $candidate.value $n -Context $candidate.context
+            } else {
+                $matched = Test-DetectMatch $candidate.value $n -Context $candidate.context
+            }
+            if ($matched) {
+                return [pscustomobject]@{
+                    matched_pattern = $n.match
+                    matched_type = $n.type
+                    matched_field = $field
+                }
+            }
+        }
     }
-    return @($items | ForEach-Object { (Normalize-DetectItem $_).type } | Select-Object -Unique)
+    return $null
 }
 
-# v1.6.0: v2 → v3 迁移 — detect 字符串对象化 + 实测规则显式授权
-# 迁移决策: tested=true 规则 (实机验证过) 默认 execution.allow_auto=true 保留自动资格;
-# tested=false 不设 (危险动作本来就会被闸门降级, 识别保留执行收紧)
+# v1.6.0: v2 → v3 迁移 — detect 字符串对象化 + 保留历史 execution 审计字段
+# 迁移决策: tested=true 规则记录 execution.allow_auto=true 供兼容/审计;
+# 实际执行资格只由当前命中的窄匹配证据决定
 function Convert-ProfilesV2ToV3($v2) {
     foreach ($p in @($v2.profiles)) {
         foreach ($dk in @('services','processes','autostarts','tasks')) {
@@ -222,29 +234,20 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
         throw ("特征库校验失败, 拒绝加载:`n" + ($errors -join "`n"))
     }
 
-    # v1.6.0 执行闸门: 危险动作对应的 detect 匹配必须是窄匹配 (exact/path) 才可自动执行
-    # contains/regex 宽匹配 → 默认降级 investigate (识别保留, 执行收紧);
-    # 规则显式 execution.allow_auto=true (实机审查过) 可保留自动资格
-    foreach ($p in $profiles.profiles) {
-        $allowAuto = $p.execution -and $p.execution.allow_auto
-        if ($allowAuto) { continue }
-        foreach ($ak in Get-ActionKeys $p.actions) {
-            $av = Get-ActionFor $p.actions $ak
-            if ($script:DangerousActions -contains $av) {
-                $types = Get-DetectTypesFor $p $ak
-                $narrow = @($types | Where-Object { $_ -in @('exact','path') }).Count -gt 0
-                if (-not $narrow) {
-                    $p.actions.$ak = 'investigate'
-                }
-            }
-        }
-    }
     return $profiles
 }
 
 # 构造一条命中记录 (结构化字段)
 function New-Hit {
-    param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $action)
+    param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $action, $matchEvidence, $processId = 0, $processPath = '')
+    $matchedPattern = ''
+    $matchedType = ''
+    $matchedField = ''
+    if ($matchEvidence) {
+        $matchedPattern = [string]$matchEvidence.matched_pattern
+        $matchedType = [string]$matchEvidence.matched_type
+        $matchedField = [string]$matchEvidence.matched_field
+    }
     return [pscustomobject]@{
         id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
         risk = $p.risk; action = $action; safe = $p.safe; reason_cn = $p.reason_cn
@@ -254,6 +257,8 @@ function New-Hit {
         service_name = $srvName
         autostart_source = $autostartSource; autostart_name = $autostartName
         task_path = $taskPath; process_name = $procName
+        matched_pattern = $matchedPattern; matched_type = $matchedType; matched_field = $matchedField
+        process_id = $processId; process_path = $processPath
     }
 }
 
@@ -275,6 +280,16 @@ function Get-ActionFor($act, $key) {
     return 'none'
 }
 
+# 危险动作只能由当前命中的窄规则证据授权; execution.allow_auto 仅保留作兼容/审计字段
+function Get-EffectiveHitAction($profile, $hitType, $evidence) {
+    $declaredAction = Get-ActionFor $profile.actions $hitType
+    if ($script:DangerousActions -notcontains $declaredAction) { return $declaredAction }
+    if ($profile.safe -ne $true) { return 'investigate' }
+    if (-not $profile.evidence -or $profile.evidence.tested -ne $true) { return 'investigate' }
+    if (-not $evidence -or $evidence.matched_type -notin @('exact','path')) { return 'investigate' }
+    return $declaredAction
+}
+
 # v1.5.1 P1: 进程名标准化 (mcpman.exe / MCPMAN.EXE / mcpman / C:\x\mcpman.exe → mcpman)
 # ---------- 7. 特征库匹配 (v1.3: detect/actions 分离, 多类型同时命中) ----------
 function Match-Profiles {
@@ -286,47 +301,62 @@ function Match-Profiles {
 
     foreach ($p in $profiles.profiles) {
         $det = $p.detect
-        $act = $p.actions
         $nullDet = $false
         if (-not $det) { $nullDet = $true; $det = @{ services=@(); processes=@(); autostarts=@(); tasks=@() } }
 
         # 服务命中 (同一 profile 多个服务, 取全部; v1.6.0: 按 match_type 分发)
         if (-not $nullDet -and @($det.services).Count -gt 0) {
             foreach ($s in $Services) {
-                $m = @($det.services | Where-Object { Test-DetectMatch $s.Name $_ -or Test-DetectMatch $s.DisplayName $_ }) | Select-Object -First 1
-                if ($m) {
-                    $action = Get-ActionFor $act 'service'
-                    $hits += New-Hit $p 'service' "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)" $s.Name '' '' '' '' $action
+                $matchEvidence = Find-DetectMatch $det.services @(
+                    [pscustomobject]@{ field = 'service_name'; value = $s.Name; context = $null },
+                    [pscustomobject]@{ field = 'service_display_name'; value = $s.DisplayName; context = $null }
+                )
+                if ($matchEvidence) {
+                    $action = Get-EffectiveHitAction $p 'service' $matchEvidence
+                    $hits += New-Hit -p $p -hitType 'service' -detail "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)" -srvName $s.Name -autostartSource '' -autostartName '' -taskPath '' -procName '' -action $action -matchEvidence $matchEvidence
                 }
             }
         }
         # 自启命中
         if (-not $nullDet -and @($det.autostarts).Count -gt 0) {
             foreach ($a in $AutoStarts) {
-                $m = @($det.autostarts | Where-Object { Test-DetectMatch $a.Name $_ -or Test-DetectMatch $a.Value $_ }) | Select-Object -First 1
-                if ($m) {
-                    $action = Get-ActionFor $act 'autostart'
-                    $hits += New-Hit $p 'autostart' "$($a.Name) => $($a.Value)" '' $a.Source $a.Name '' '' $action
+                $matchEvidence = Find-DetectMatch $det.autostarts @(
+                    [pscustomobject]@{ field = 'autostart_name'; value = $a.Name; context = $null },
+                    [pscustomobject]@{ field = 'autostart_value'; value = $a.Value; context = $null }
+                )
+                if ($matchEvidence) {
+                    $action = Get-EffectiveHitAction $p 'autostart' $matchEvidence
+                    $hits += New-Hit -p $p -hitType 'autostart' -detail "$($a.Name) => $($a.Value)" -srvName '' -autostartSource $a.Source -autostartName $a.Name -taskPath '' -procName '' -action $action -matchEvidence $matchEvidence
                 }
             }
         }
         # 计划任务命中
         if (-not $nullDet -and @($det.tasks).Count -gt 0) {
             foreach ($t in $Tasks) {
-                $m = @($det.tasks | Where-Object { Test-DetectMatch $t.TaskName $_ -or Test-DetectMatch $t.TaskPath $_ }) | Select-Object -First 1
-                if ($m) {
-                    $action = Get-ActionFor $act 'task'
-                    $hits += New-Hit $p 'task' "$($t.TaskPath)$($t.TaskName) | $($t.State)" '' '' '' "$($t.TaskPath)$($t.TaskName)" '' $action
+                $actionableTaskPath = "$($t.TaskPath)$($t.TaskName)"
+                $matchEvidence = Find-DetectMatch $det.tasks @(
+                    [pscustomobject]@{ field = 'task_name'; value = $t.TaskName; context = $null },
+                    [pscustomobject]@{ field = 'task_path'; value = $actionableTaskPath; context = $null }
+                )
+                if ($matchEvidence) {
+                    $action = Get-EffectiveHitAction $p 'task' $matchEvidence
+                    $hits += New-Hit -p $p -hitType 'task' -detail "$actionableTaskPath | $($t.State)" -srvName '' -autostartSource '' -autostartName '' -taskPath $actionableTaskPath -procName '' -action $action -matchEvidence $matchEvidence
                 }
             }
         }
         # 进程命中 (Top CPU 进程, 动作按 actions.process; v1.5.1: 进程名标准化匹配; v1.6.0: exact/contains 走标准化, 其余按类型)
         if (-not $nullDet -and @($det.processes).Count -gt 0) {
             foreach ($tp in $TopProcs) {
-                $m = @($det.processes | Where-Object { Test-ProcessDetectMatch $tp.Name $_ -Context ([pscustomobject]@{ Path = $tp.Path }) }) | Select-Object -First 1
-                if ($m) {
-                    $action = Get-ActionFor $act 'process'
-                    $hits += New-Hit $p 'process' "$($tp.Name) PID=$($tp.PID) CPU=$($tp.'CPU%')%" '' '' '' '' $tp.Name $action
+                $processPath = if ($tp.PSObject.Properties.Name -contains 'Path') { [string]$tp.Path } else { '' }
+                $processId = if ($tp.PSObject.Properties.Name -contains 'PID' -and $null -ne $tp.PID) { [int]$tp.PID } else { 0 }
+                $processContext = [pscustomobject]@{ Path = $processPath }
+                $matchEvidence = Find-DetectMatch $det.processes @(
+                    [pscustomobject]@{ field = 'process_name'; value = $tp.Name; context = $processContext },
+                    [pscustomobject]@{ field = 'process_path'; value = $processPath; context = $processContext }
+                ) -NormalizeProcessName
+                if ($matchEvidence) {
+                    $action = Get-EffectiveHitAction $p 'process' $matchEvidence
+                    $hits += New-Hit -p $p -hitType 'process' -detail "$($tp.Name) PID=$processId CPU=$($tp.'CPU%')%" -srvName '' -autostartSource '' -autostartName '' -taskPath '' -procName $tp.Name -action $action -matchEvidence $matchEvidence -processId $processId -processPath $processPath
                 }
             }
         }

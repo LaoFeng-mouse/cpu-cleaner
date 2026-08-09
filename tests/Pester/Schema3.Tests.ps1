@@ -128,26 +128,96 @@ Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
         Remove-Item $tmp -ErrorAction SilentlyContinue
         $p.profiles[0].actions.service | Should -Be 'disable_service'
     }
-    It 'contains 危险动作无 allow_auto → 降级 investigate' {
+    It 'contains 危险动作加载时保留声明值' {
         $tmp = Join-Path $env:TEMP ("s3b_" + [guid]::NewGuid().ToString('N') + ".json")
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"S1","type":"contains"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         $p = Load-Profiles -Path $tmp
         Remove-Item $tmp -ErrorAction SilentlyContinue
-        $p.profiles[0].actions.service | Should -Be 'investigate'
+        $p.profiles[0].actions.service | Should -Be 'disable_service'
     }
-    It 'contains 危险动作 + allow_auto=true → 保留' {
+    It 'contains 危险动作 + allow_auto=true 加载时保留声明值' {
         $tmp = Join-Path $env:TEMP ("s3c_" + [guid]::NewGuid().ToString('N') + ".json")
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"execution":{"allow_auto":true,"review_note":"实机验证"},"detect":{"services":[{"match":"S1","type":"contains"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         $p = Load-Profiles -Path $tmp
         Remove-Item $tmp -ErrorAction SilentlyContinue
         $p.profiles[0].actions.service | Should -Be 'disable_service'
     }
-    It '宽匹配规则加载后带降级标注 (execution 保留原始信息)' {
+    It 'regex 危险动作加载时保留声明值' {
         $tmp = Join-Path $env:TEMP ("s3d_" + [guid]::NewGuid().ToString('N') + ".json")
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"S1","type":"regex"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_task","process":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         $p = Load-Profiles -Path $tmp
         Remove-Item $tmp -ErrorAction SilentlyContinue
-        $p.profiles[0].actions.service | Should -Be 'investigate'
+        $p.profiles[0].actions.service | Should -Be 'disable_task'
+    }
+}
+
+Describe 'Schema 3.0 命中证据与逐命中执行闸门' {
+    It '混合规则按实际命中证据决定动作并保留规则顺序' {
+        $tmp = Join-Path $env:TEMP ("s3_hit_mixed_" + [guid]::NewGuid().ToString('N') + ".json")
+        $originalProfileFile = $script:ProfileFile
+        try {
+            [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"mixed-service","vendor":"Lenovo","name_cn":"混合服务规则","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"execution":{"allow_auto":true},"detect":{"services":[{"match":"LenovoExactService","type":"exact"},{"match":"Lenovo","type":"contains"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
+            $script:ProfileFile = $tmp
+
+            $services = @(
+                [pscustomobject]@{ Name = 'LenovoOtherService'; DisplayName = 'Other'; State = 'Running'; StartMode = 'Automatic' },
+                [pscustomobject]@{ Name = 'LenovoExactService'; DisplayName = 'Exact'; State = 'Running'; StartMode = 'Automatic' }
+            )
+            $hits = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @())
+            $broadHit = @($hits | Where-Object { $_.service_name -eq 'LenovoOtherService' }) | Select-Object -First 1
+            $exactHit = @($hits | Where-Object { $_.service_name -eq 'LenovoExactService' }) | Select-Object -First 1
+
+            $broadHit | Should -Not -BeNullOrEmpty
+            $broadHit.action | Should -Be 'investigate'
+            $broadHit.matched_pattern | Should -Be 'Lenovo'
+            $broadHit.matched_type | Should -Be 'contains'
+            $broadHit.matched_field | Should -Be 'service_name'
+            $exactHit.action | Should -Be 'disable_service'
+            $exactHit.matched_pattern | Should -Be 'LenovoExactService'
+            $exactHit.matched_type | Should -Be 'exact'
+            $exactHit.matched_field | Should -Be 'service_name'
+        } finally {
+            $script:ProfileFile = $originalProfileFile
+            Remove-Item $tmp -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'pure contains 即使 allow_auto=true 也只生成 investigate 命中' {
+        $tmp = Join-Path $env:TEMP ("s3_hit_contains_" + [guid]::NewGuid().ToString('N') + ".json")
+        $originalProfileFile = $script:ProfileFile
+        try {
+            [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"broad-service","vendor":"Lenovo","name_cn":"宽服务规则","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"execution":{"allow_auto":true},"detect":{"services":[{"match":"Lenovo","type":"contains"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
+            $script:ProfileFile = $tmp
+
+            $hits = @(Match-Profiles -Services @([pscustomobject]@{ Name = 'LenovoOtherService'; DisplayName = 'Other'; State = 'Running'; StartMode = 'Automatic' }) -AutoStarts @() -Tasks @() -TopProcs @())
+
+            $hits.Count | Should -Be 1
+            $hits[0].action | Should -Be 'investigate'
+            $hits[0].matched_type | Should -Be 'contains'
+        } finally {
+            $script:ProfileFile = $originalProfileFile
+            Remove-Item $tmp -ErrorAction SilentlyContinue
+        }
+    }
+
+    It '记录实际命中的 service display name 字段' {
+        $tmp = Join-Path $env:TEMP ("s3_hit_display_" + [guid]::NewGuid().ToString('N') + ".json")
+        $originalProfileFile = $script:ProfileFile
+        try {
+            [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"display-service","vendor":"Lenovo","name_cn":"显示名规则","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"detect":{"services":[{"match":"Lenovo Display Service","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
+            $script:ProfileFile = $tmp
+
+            $hits = @(Match-Profiles -Services @([pscustomobject]@{ Name = 'UnrelatedInternalName'; DisplayName = 'Lenovo Display Service'; State = 'Running'; StartMode = 'Automatic' }) -AutoStarts @() -Tasks @() -TopProcs @())
+
+            $hits.Count | Should -Be 1
+            $hits[0].action | Should -Be 'disable_service'
+            $hits[0].matched_pattern | Should -Be 'Lenovo Display Service'
+            $hits[0].matched_type | Should -Be 'exact'
+            $hits[0].matched_field | Should -Be 'service_display_name'
+        } finally {
+            $script:ProfileFile = $originalProfileFile
+            Remove-Item $tmp -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -184,8 +254,8 @@ Describe 'Schema 3.0 格式校验' {
         $p.schema_version | Should -Be 3
         $p.profiles[0].detect.services[0].match | Should -Be 'S1'
         $p.profiles[0].detect.services[0].type | Should -Be 'contains'
-        # v2 无 evidence → allow_auto=false → contains 危险动作降级
-        $p.profiles[0].actions.service | Should -Be 'investigate'
+        # 加载只做迁移和校验, 不改写声明动作; 执行资格由实际命中证据决定
+        $p.profiles[0].actions.service | Should -Be 'disable_service'
     }
 }
 
@@ -195,7 +265,10 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
         $hits = Match-Profiles -Services @($svc) -AutoStarts @() -Tasks @() -TopProcs @()
         $hit = @($hits | Where-Object { $_.hit_type -eq 'service' -and $_.id -eq 'lenovo-serviceas' }) | Select-Object -First 1
         $hit | Should -Not -BeNullOrEmpty
-        $hit.action | Should -Be 'disable_service'
+        $hit.action | Should -Be 'investigate'
+        $hit.matched_pattern | Should -Be 'LenovoServiceAS'
+        $hit.matched_type | Should -Be 'contains'
+        $hit.matched_field | Should -Be 'service_name'
     }
     It '授权验证 target 检查兼容对象化 detect' {
         $profiles = Load-Profiles
