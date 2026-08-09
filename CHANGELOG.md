@@ -6,12 +6,28 @@
 
 ### 计划
 - 特征库数字签名验证（profiles.json.sig + 内置公钥）：SHA256 只能防下载损坏/镜像不一致/单文件篡改，攻击者同时控制 JSON 与 SHA256 下载地址时可整体替换——真正身份验证需要签名
-- 多品牌规则实测积累：当前 23 条规则中 Lenovo 11 条全实测，非联想规则大多 tested=false→investigate（正确但价值有限）。10 分方向是逐台实机积累 Dell/HP/ASUS/Xiaomi/Acer/MSI/Huawei 规则（每台机器扫描→人工确认→补 evidence 实测字段）
-- CPU 采样增强：当前 2 秒单次采样偏轻量，改为 10~15 秒 3~5 次采样，输出 平均 CPU / 峰值 CPU / 持续占用 / 内存 / 子进程数 等维度，区分「瞬间吃一下」vs「持续后台发疯」（如 updater.exe）
-- Schema 3.0 match_type：detect 匹配从 -like 子串升级为显式 match_type（exact / contains / regex / path / publisher / sha256），危险动作原则上优先 exact——库规模到 200+ 条后子串匹配必然误判
+- 多品牌规则实测积累：当前 23 条规则中 Lenovo 11 条全实测，非联想规则大多 tested=false→investigate（正确但价值有限）。10 分方向是逐台实机积累 Dell/HP/ASUS/Xiaomi/Acer/MSI/Huawei 规则（每台机器扫描→人工确认→测试禁用/恢复→补 evidence 实测字段）。技术框架已跑在数据前面，**找机器实测的价值 > 继续加功能**
+- CPU 采样增强：当前 2 秒单次采样偏轻量，改为 10~15 秒 3~5 次采样，输出 平均 CPU / 峰值 CPU / 持续占用 / 内存 / 子进程数 等维度，区分「瞬间吃一下」vs「持续后台发疯」（如 updater.exe）——下一步真正该做的功能升级
+- Schema 3.0 match_type：detect 匹配从 -like 子串升级为显式 match_type（exact / contains / regex / path / publisher / sha256）。架构原则：**识别规则可以宽，执行规则必须窄**——自动危险操作只允许 exact / publisher+exact / path+exact；contains 默认不能执行、regex 需额外审查
 - 特征库 impact 字段（规则级"影响"说明，如"AI 助手不可用"）：GUI 勾选视图已预留展示位，内容随各品牌实测积累补充（不编造）
 - 模块化拆分：cpu-cleaner.ps1 已 ~65KB、gui-cleaner.ps1 ~25KB，下一阶段拆 src/Core/{Scanner,RiskEngine,ProfileEngine,ActionEngine,BackupManager}.psm1 + src/UI/{MainWindow.xaml,GuiController.ps1}，不再往单文件塞功能
 - v2.0 GUI（鼠鼠风格 WPF 壳，进行中）
+
+## [1.5.6] - 2026-08-09
+
+### 数据模型（P0）
+- **pending_actions.json 拆为 actions / observations / suspicious 三类**：之前 investigate/safe=false/tested=false 在扫描阶段被直接丢弃，GUI 宣称「未实测显示但默认不勾选」实际永远看不到——测试数据与生产数据流不一致。现在 Save-PendingActions 分流：actions=可执行（危险动作+safe+tested），observations=仅观察（investigate/none/safe=false/tested=false/无 evidence，记录 obs_reason 为什么不能动）
+- 真实 scan 验证：联想推送框架→actions；联想安全中心组件（action=none）→observations（此前被静默丢弃）
+
+### GUI（v1.5.5 勾选式增强）
+- 观察项以 **disabled checkbox** 展示（CanExecute=false）：「软件知道它，但证据不足，所以不让我动」——证据纪律可视化
+- 全选跳过 CanExecute=false（Set-AllChecked）；处理已勾选也过滤 CanExecute
+
+### 修复（P1）
+- 单值恢复 Binary/MultiString 类型边角：JSON 往返后 byte[]/string[] 变 object[]，直接写注册表类型错乱——Restore-AutostartValue 强转 [byte[]]/[string[]]（测试驱动暴露）
+
+### 工程
+- Pending 测试更新为分流语义（可执行 hit 补 evidence 字段；tested=false/safe=false/investigate/无 evidence 断言进 observations）；GUI 测试更新（CanExecute/disabled/全选跳过）；单值恢复测试补 QWord/Binary/MultiString（10 项）
 
 ## [1.5.5] - 2026-08-09
 

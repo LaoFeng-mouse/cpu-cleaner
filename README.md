@@ -223,6 +223,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ## 版本记录
 
+- 2026-08-09 v1.5.6（数据模型 P0）：pending_actions.json 拆 actions/observations/suspicious——investigate/safe=false/tested=false 不再静默丢弃，进 observations 且 GUI 以 disabled checkbox 展示（「证据不足，不让我动」）；全选跳过观察项；单值恢复补 Binary/MultiString 类型修复；测试 63+14 项。
 - 2026-08-09 v1.5.5（GUI 勾选式）：处理建议页逐项勾选（风险级/实测/建议动作/可恢复），未实测默认不勾选，全选/清空；「处理已勾选项目」→ CLI `-PendingFileArg` 只处理勾选子集（授权验证照跑），结果合并回主清单；GUI 无窗口测试 13 项。
 - 2026-08-09 v1.5.4（恢复粒度 P0）：自启项备份从 reg export 整个 Run 键改为单 Value 备份（Name/Type/Data），restore 只恢复这一项——期间用户新增的同键其他值不再被旧整键覆盖；旧 .reg 备份兼容；README 定位诚实化 + 副标题「Windows 后台进程诊断与安全清理工具」+ GitHub description 同步。
 - 2026-08-09 v1.5.3（安全边界）：clean 提权后按当前特征库重新验证授权动作（Test-PendingActionAuthorized：id/tested/safe/action/target 五重确认，不信任被改过的 pending_actions.json）；GUI 扫描轮询三态收尾（Completed/Failed/Stopped）；GUI 执行/恢复检查 ExitCode 并读回状态统计；CLI restore 执行后验证 + exit 0/2；GUI 无窗口测试套件 + CI 覆盖。

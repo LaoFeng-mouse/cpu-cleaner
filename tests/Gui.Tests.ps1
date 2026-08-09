@@ -133,7 +133,7 @@ Describe '勾选视图 (v1.5.5)' {
         Get-ActionLabel 'none'             | Should -Be '不处理'
     }
 
-    It '勾选视图: 风险/实测/建议/可恢复标签 + 默认勾选规则 + 已处理项过滤' {
+    It '勾选视图: actions 可勾选 / observations disabled (v1.5.6 数据模型)' {
         $tmpRoot = Join-Path $env:TEMP ("gui_view_" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
         $profiles = [pscustomobject]@{
@@ -155,8 +155,10 @@ Describe '勾选视图 (v1.5.5)' {
             generated = 'x'
             actions = @(
                 [pscustomobject]@{ id='t1'; vendor='T'; name_cn='测试高风险'; action='disable_service'; hit_type='service'; detail=''; reason_cn='r1'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='pending' },
-                [pscustomobject]@{ id='t2'; vendor='T'; name_cn='测试未实测'; action='investigate'; hit_type='service'; detail=''; reason_cn='r2'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='pending' },
                 [pscustomobject]@{ id='t3'; vendor='T'; name_cn='已完成项'; action='disable_service'; hit_type='service'; detail=''; reason_cn='r3'; service_name='S3'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='success' }
+            )
+            observations = @(
+                [pscustomobject]@{ id='t2'; vendor='T'; name_cn='测试未实测'; action='investigate'; hit_type='service'; detail=''; reason_cn='r2'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; obs_reason='未实测 (tested=false), 仅观察' }
             )
             suspicious = @()
         }
@@ -166,23 +168,42 @@ Describe '勾选视图 (v1.5.5)' {
         $script:Root = $tmpRoot
         try { $view = @(Get-PendingViewItems) } finally { $script:Root = $oldRoot }
 
-        # 只显示可处理状态: success 的 t3 被过滤
+        # t3 success 被过滤; 剩下 t1 (actions) + t2 (observations)
         $view.Count | Should -Be 2
         $v1 = $view | Where-Object { $_.name_cn -eq '测试高风险' }
         $v2 = $view | Where-Object { $_.name_cn -eq '测试未实测' }
-        # 实测+可自动处理 → 默认勾选, 标签正确
+        # actions: 可执行 → 默认勾选 + CanExecute=true, 标签正确
         $v1.IsChecked | Should -Be $true
+        $v1.CanExecute | Should -Be $true
         $v1.risk_label | Should -Be '高风险'
         $v1.evidence_label | Should -Be '实测 1 台'
         $v1.action_label | Should -Be '禁用服务'
         $v1.restorable_label | Should -Be '可恢复'
-        # 未实测+investigate → 默认不勾选 (仅观察)
+        # observations: 仅观察 → checkbox disabled (CanExecute=false), 默认不勾选
         $v2.IsChecked | Should -Be $false
+        $v2.CanExecute | Should -Be $false
         $v2.risk_label | Should -Be '中风险'
         $v2.evidence_label | Should -Be '未实测'
         $v2.action_label | Should -Be '仅观察'
+        $v2.status | Should -Be '观察'
+        $v2.restorable_label | Should -Be '不可自动'
+        $v2.reason_cn | Should -Match '未实测'
 
         [System.IO.Directory]::Delete($tmpRoot, $true)
+    }
+
+    It '全选跳过 CanExecute=false (观察项不被全选勾上, v1.5.6)' {
+        $items = @(
+            [pscustomobject]@{ CanExecute = $true;  IsChecked = $false },
+            [pscustomobject]@{ CanExecute = $false; IsChecked = $false }
+        )
+        $list = [pscustomobject]@{ Items = $items }
+        Set-AllChecked $list $true
+        $items[0].IsChecked | Should -Be $true
+        $items[1].IsChecked | Should -Be $false
+        # 清空: 全部取消
+        Set-AllChecked $list $false
+        $items[0].IsChecked | Should -Be $false
     }
 
     It 'Get-CleanResultSummary 支持自定义路径 (-Path)' {

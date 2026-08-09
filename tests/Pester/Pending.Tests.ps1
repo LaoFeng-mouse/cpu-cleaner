@@ -20,41 +20,65 @@ Describe '待办清单规则' {
 
     It '同一 id 不同动作都保留(不丢 autostart)' {
         $hits = @(
-            [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true },
-            [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='remove_autostart'; hit_type='autostart'; detail='X'; reason_cn='r'; service_name=''; autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='X'; task_path=''; process_name=''; safe=$true }
+            [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; evidence=[pscustomobject]@{ tested=$true } },
+            [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='remove_autostart'; hit_type='autostart'; detail='X'; reason_cn='r'; service_name=''; autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='X'; task_path=''; process_name=''; safe=$true; evidence=[pscustomobject]@{ tested=$true } }
         )
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 2
+        @($p.observations).Count | Should -Be 0
     }
     It '完全重复(同 id+类型+目标)才去重' {
         $hits = @(
-            [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true },
-            [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true }
+            [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; evidence=[pscustomobject]@{ tested=$true } },
+            [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; evidence=[pscustomobject]@{ tested=$true } }
         )
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 1
     }
-    It 'tested=false 永不进入待办队列(P0)' {
+    It 'tested=false 永不进入执行队列, 进观察(v1.5.6)' {
         $hits = @(
             [pscustomobject]@{ id='d'; vendor='T'; name_cn='D'; action='disable_service'; hit_type='service'; detail='S4'; reason_cn='r'; service_name='S4'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; evidence=[pscustomobject]@{ tested=$false } }
         )
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].obs_reason | Should -Match '未实测'
     }
-    It 'safe=false 永不进入待办队列' {
+    It 'safe=false 永不进入执行队列, 进观察(v1.5.6)' {
         $hits = @(
-            [pscustomobject]@{ id='b'; vendor='T'; name_cn='B'; action='disable_service'; hit_type='service'; detail='S2'; reason_cn='r'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$false }
+            [pscustomobject]@{ id='b'; vendor='T'; name_cn='B'; action='disable_service'; hit_type='service'; detail='S2'; reason_cn='r'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$false; evidence=[pscustomobject]@{ tested=$true } }
         )
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].obs_reason | Should -Match 'safe=false'
+    }
+    It 'investigate 动作进观察不进执行队列(v1.5.6)' {
+        $hits = @(
+            [pscustomobject]@{ id='e'; vendor='T'; name_cn='E'; action='investigate'; hit_type='process'; detail='P1'; reason_cn='r'; service_name=''; autostart_source=''; autostart_name=''; task_path=''; process_name='P1'; safe=$true; evidence=[pscustomobject]@{ tested=$true } }
+        )
+        Save-PendingActions -Hits $hits -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].obs_reason | Should -Match '仅观察'
+    }
+    It '无 evidence 字段视为未实测进观察(v1.5.6 边界)' {
+        $hits = @(
+            [pscustomobject]@{ id='f'; vendor='T'; name_cn='F'; action='disable_service'; hit_type='service'; detail='S5'; reason_cn='r'; service_name='S5'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true }
+        )
+        Save-PendingActions -Hits $hits -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
     }
     It '待办初始状态为 pending' {
         $hits = @(
-            [pscustomobject]@{ id='c'; vendor='T'; name_cn='C'; action='disable_task'; hit_type='task'; detail='\X\T1'; reason_cn='r'; service_name=''; autostart_source=''; autostart_name=''; task_path='\X\T1'; process_name=''; safe=$true }
+            [pscustomobject]@{ id='c'; vendor='T'; name_cn='C'; action='disable_task'; hit_type='task'; detail='\X\T1'; reason_cn='r'; service_name=''; autostart_source=''; autostart_name=''; task_path='\X\T1'; process_name=''; safe=$true; evidence=[pscustomobject]@{ tested=$true } }
         )
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json

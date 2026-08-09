@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 v1.5.5 (cpu-cleaner.ps1) — 多维检测与风险评分
+#  CPU 后台整理工具 v1.5.6 (cpu-cleaner.ps1) — 多维检测与风险评分
 #  适用: Windows 10/11, PowerShell 5.1+
 #
 #  用法:
@@ -34,7 +34,7 @@ $script:ProfileFile = Join-Path $script:Root 'bloatware-profiles.json'
 $script:PendingFile = Join-Path $script:Root 'pending_actions.json'
 $script:BackupRoot = Join-Path $script:Root 'backups'
 # v1.5.2: 版本号全局唯一 (文本报告/HTML 页脚统一引用, 不再手改多处)
-$script:Version = '1.5.5'
+$script:Version = '1.5.6'
 # 特征库更新地址(可选): 填入指向 bloatware-profiles.json 的 URL 后可用 -Mode update
 $script:ProfileUrl = ''
 # v1.5.1 供应链安全: 特征库 SHA256 校验文件地址 (与 ProfileUrl 配套发布, 可选但强烈建议)
@@ -693,27 +693,52 @@ $sec1$sec2$sec3$sec4$sec5$sec6$sec7$sec8
 # ---------- 9. 待办清单 (v1.2: safe 强制规则 + status 状态机; v1.3: 同 id 去重) ----------
 function Save-PendingActions($Hits, $Suspicious) {
     $actions = @()
+    $observations = @()
     $seenActionIds = @{}
     foreach ($h in $Hits) {
-        if ($h.action -eq 'none' -or $h.action -eq 'investigate') { continue }
-        # v1.2 强制规则: safe=false 只报告, 永不进入待办队列 (即使 -YesToAll 也不能执行)
-        if (-not $h.safe) { continue }
-        # v1.5.1 P0: evidence.tested=false 只报告, 永不进入待办队列 (证据纪律)
-        if ($h.evidence -and -not $h.evidence.tested) { continue }
+        # v1.5.6 数据模型: actions(可执行) / observations(仅观察) 分流
+        # 可执行 = 危险动作 + safe + tested (证据纪律); 其余一律进 observations:
+        #   investigate/none、safe=false、tested=false —— 不丢弃, 保留给 GUI 展示(disabled)
+        $executable = ($h.action -in $script:DangerousActions) -and $h.safe -and ($h.evidence -and $h.evidence.tested)
+
         # v1.3 去重: 同一 id+类型+目标 只保留一条 (不丢同一软件的不同动作)
         $dedupeKey = "$($h.id)|$($h.hit_type)|$($h.service_name)|$($h.autostart_name)|$($h.task_path)|$($h.process_name)"
         if ($seenActionIds.ContainsKey($dedupeKey)) { continue }
         $seenActionIds[$dedupeKey] = $true
 
-        # 跳过已经是目标状态的条目
+        if (-not $executable) {
+            # v1.5.6: 观察条目 — 记录为什么不能自动处理 (GUI 展示为 disabled checkbox)
+            $obsReason = if ($h.action -eq 'none' -or $h.action -eq 'investigate') { '动作仅观察/不处理' }
+                elseif (-not $h.safe) { 'safe=false 不允许自动处理' }
+                else { '未实测 (tested=false), 仅观察' }
+            $observations += [pscustomobject]@{
+                id        = $h.id
+                vendor    = $h.vendor
+                name_cn   = $h.name_cn
+                action    = $h.action
+                hit_type  = $h.hit_type
+                detail    = $h.detail
+                reason_cn = $h.reason_cn
+                service_name      = $h.service_name
+                autostart_source  = $h.autostart_source
+                autostart_name    = $h.autostart_name
+                task_path         = $h.task_path
+                process_name      = $h.process_name
+                safe      = $h.safe
+                obs_reason = $obsReason
+            }
+            continue
+        }
+
+        # 跳过已经是目标状态的条目 (仅可执行条目需要, 观察条目不动系统状态)
         $skip = $false
         if ($h.action -eq 'disable_service' -and $h.service_name) {
             $svc = Get-Service -Name $h.service_name -ErrorAction SilentlyContinue
             if ($svc -and $svc.StartType -eq 'Disabled' -and $svc.Status -eq 'Stopped') { $skip = $true }
         }
         elseif ($h.action -eq 'disable_task' -and $h.task_path) {
-            $taskName = $h.task_path.Split('\')[-1]
-            $taskFolder = if ($h.task_path.Length -gt $taskName.Length) { $h.task_path.Substring(0, $h.task_path.Length - $taskName.Length) } else { '\' }
+            $taskName = $h.task_path.Split('\\')[-1]
+            $taskFolder = if ($h.task_path.Length -gt $taskName.Length) { $h.task_path.Substring(0, $h.task_path.Length - $taskName.Length) } else { '\\' }
             $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
             if ($task -and $task.State -eq 'Disabled') { $skip = $true }
         }
@@ -750,9 +775,10 @@ function Save-PendingActions($Hits, $Suspicious) {
         })
     }
     $payload = [pscustomobject]@{
-        generated  = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-        actions    = $actions
-        suspicious = $suspArr
+        generated     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        actions       = $actions
+        observations  = $observations
+        suspicious    = $suspArr
     }
     # 用 -InputObject 强制序列化, 避免管道展开导致空数组写空文件
     $json = ConvertTo-Json -InputObject $payload -Depth 5
@@ -875,7 +901,12 @@ function Restore-AutostartValue($info) {
         'MultiString'  { 'MultiString' }
         default        { 'String' }
     }
-    New-ItemProperty -Path $info.key -Name $info.name -Value $info.value -PropertyType $propType -Force | Out-Null
+    # v1.5.6: JSON 往返后类型还原 — ConvertTo-Json/ConvertFrom-Json 会把 byte[]/string[] 变成 object[],
+    # 直接写注册表会类型错乱 (Binary 尤其明显), 必须强转回原类型
+    $val = $info.value
+    if ($propType -eq 'Binary') { $val = [byte[]]$info.value }
+    elseif ($propType -eq 'MultiString') { $val = [string[]]$info.value }
+    New-ItemProperty -Path $info.key -Name $info.name -Value $val -PropertyType $propType -Force | Out-Null
 }
 
 function Invoke-Clean {

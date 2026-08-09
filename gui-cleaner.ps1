@@ -177,7 +177,7 @@ $xaml = @"
                 <GridViewColumn Header="☑" Width="40">
                   <GridViewColumn.CellTemplate>
                     <DataTemplate>
-                      <CheckBox IsChecked="{Binding IsChecked}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                      <CheckBox IsChecked="{Binding IsChecked}" IsEnabled="{Binding CanExecute}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                     </DataTemplate>
                   </GridViewColumn.CellTemplate>
                 </GridViewColumn>
@@ -295,26 +295,34 @@ function Get-ProfileLookup {
     return $map
 }
 
-# v1.5.5: 构造勾选展示对象 — 风险/实测/建议/可恢复标签
-# 只显示可处理状态 (pending/failed); 默认勾选 = 可自动处理 (investigate/none 仅观察不勾选)
+# v1.5.6: 从特征库查单条规则的展示标签 (风险/实测)
+function Get-RuleDisplay($rule) {
+    $riskLabel = '未知'
+    $evidenceLabel = '未实测'
+    if ($rule) {
+        $riskLabel = switch ($rule.risk) { 'high' { '高风险' } 'medium' { '中风险' } 'low' { '低风险' } default { '未知' } }
+        $evidenceLabel = if ($rule.evidence -and $rule.evidence.tested) { ('实测 {0} 台' -f $rule.evidence.tested_count) } else { '未实测' }
+    }
+    return [pscustomobject]@{ risk_label = $riskLabel; evidence_label = $evidenceLabel }
+}
+
+# v1.5.6: 构造勾选展示对象 — actions(可执行, 勾选) / observations(仅观察, checkbox disabled)
+# 数据流: scan → Save-PendingActions 已分流; 这里 actions 只读可执行集, observations 只读观察集
 function Get-PendingViewItems {
-    $items = @(Get-PendingItems | Where-Object { $_.status -in @('pending','failed') })
+    $pf = Join-Path $script:Root 'pending_actions.json'
+    if (-not (Test-Path $pf)) { return @() }
+    $p = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json
     $map = Get-ProfileLookup
     $view = @()
-    foreach ($i in $items) {
-        $rule = $map[$i.id]
-        $riskLabel = '未知'
-        $evidenceLabel = '未实测'
-        if ($rule) {
-            $riskLabel = switch ($rule.risk) { 'high' { '高风险' } 'medium' { '中风险' } 'low' { '低风险' } default { '未知' } }
-            $evidenceLabel = if ($rule.evidence -and $rule.evidence.tested) { ('实测 {0} 台' -f $rule.evidence.tested_count) } else { '未实测' }
-        }
-        $canAuto = $i.action -ne 'investigate' -and $i.action -ne 'none'
+    # 1) 可执行项: 默认勾选, 可勾选
+    foreach ($i in @($p.actions | Where-Object { $_ -and $_.status -in @('pending','failed') })) {
+        $d = Get-RuleDisplay $map[$i.id]
         $view += [pscustomobject]@{
-            IsChecked         = $canAuto
+            IsChecked         = $true
+            CanExecute        = $true
             name_cn           = $i.name_cn
-            risk_label        = $riskLabel
-            evidence_label    = $evidenceLabel
+            risk_label        = $d.risk_label
+            evidence_label    = $d.evidence_label
             action_label      = Get-ActionLabel $i.action
             restorable_label  = '可恢复'
             status            = $i.status
@@ -322,7 +330,31 @@ function Get-PendingViewItems {
             _raw              = $i
         }
     }
+    # 2) 观察项: 证据不足/仅观察 — checkbox disabled, 全选跳过
+    foreach ($i in @($p.observations)) {
+        $d = Get-RuleDisplay $map[$i.id]
+        $obsReason = if ($i.obs_reason) { $i.obs_reason } else { '仅观察, 不允许自动处理' }
+        $view += [pscustomobject]@{
+            IsChecked         = $false
+            CanExecute        = $false
+            name_cn           = $i.name_cn
+            risk_label        = $d.risk_label
+            evidence_label    = $d.evidence_label
+            action_label      = Get-ActionLabel $i.action
+            restorable_label  = '不可自动'
+            status            = '观察'
+            reason_cn         = $obsReason
+            _raw              = $i
+        }
+    }
     return $view
+}
+
+# v1.5.6: 全选/清空 — 全选跳过 CanExecute=false (观察项 checkbox disabled 且不可被全选勾上)
+function Set-AllChecked($list, $value) {
+    foreach ($it in @($list.Items)) {
+        if (-not $value -or $it.CanExecute) { $it.IsChecked = $value }
+    }
 }
 
 # v1.5.5: 把勾选子集临时文件的处理结果状态合并回主 pending_actions.json
@@ -430,16 +462,14 @@ $window.FindName('BtnLoadPending').Add_Click({
     }
 })
 
-# v1.5.5: 全选 / 清空 勾选
+# v1.5.5: 全选 / 清空 勾选 (v1.5.6: 全选跳过观察项 CanExecute=false)
 $window.FindName('BtnSelectAll').Add_Click({
-    $list = $window.FindName('PendingList')
-    foreach ($it in @($list.Items)) { $it.IsChecked = $true }
-    $list.Items.Refresh()
+    Set-AllChecked $window.FindName('PendingList') $true
+    $window.FindName('PendingList').Items.Refresh()
 })
 $window.FindName('BtnClearAll').Add_Click({
-    $list = $window.FindName('PendingList')
-    foreach ($it in @($list.Items)) { $it.IsChecked = $false }
-    $list.Items.Refresh()
+    Set-AllChecked $window.FindName('PendingList') $false
+    $window.FindName('PendingList').Items.Refresh()
 })
 
 # ---------- 处理已勾选项目 (v1.5.5: 勾选子集 → 临时清单 → clean -PendingFileArg) ----------
@@ -447,7 +477,7 @@ $window.FindName('BtnExec').Add_Click({
     $hint = $window.FindName('ExecHint')
     $out = $window.FindName('ExecOutput')
     $list = $window.FindName('PendingList')
-    $checked = @($list.Items | Where-Object { $_.IsChecked })
+    $checked = @($list.Items | Where-Object { $_.IsChecked -and $_.CanExecute })
     if ($checked.Count -eq 0) {
         $hint.Text = (Get-Text 'ExecEmpty')
         return
