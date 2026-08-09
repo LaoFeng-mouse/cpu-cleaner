@@ -66,10 +66,10 @@ function Test-DetectMatch($target, $pattern, $Context = $null) {
     $n = Normalize-DetectItem $pattern
     if (-not $n.match -or $null -eq $target) { return $false }
     switch ($n.type) {
-        'exact'    { return ([string]$target -ieq $n.match) }
-        'contains' { return ([string]$target -like "*$($n.match)*") }
+        'exact'    { return [string]::Equals([string]$target, [string]$n.match, [System.StringComparison]::OrdinalIgnoreCase) }
+        'contains' { return ([string]$target).IndexOf([string]$n.match, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }
         'regex'    { try { return ([string]$target -match $n.match) } catch { return $false } }
-        'path'     { return ([string]$target -like "$($n.match)*") }
+        'path'     { return ([string]$target).StartsWith([string]$n.match, [System.StringComparison]::OrdinalIgnoreCase) }
         'publisher' {
             $sig = $null
             if ($Context -and $Context.Signature) { $sig = $Context.Signature }
@@ -82,7 +82,7 @@ function Test-DetectMatch($target, $pattern, $Context = $null) {
             elseif ($Context -and $Context.Path) { try { $hash = (Get-FileHash $Context.Path -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash } catch {} }
             return $hash -and ($hash -ieq $n.match)
         }
-        default    { return ([string]$target -like "*$($n.match)*") }
+        default    { return $false }
     }
 }
 

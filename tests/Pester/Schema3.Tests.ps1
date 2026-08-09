@@ -1,8 +1,17 @@
 ﻿# Schema 3.0 专项测试 (v1.6.0): match_type 分发 / 执行闸门 / detect 格式校验
 # 运行: Import-Module Pester -RequiredVersion 5.9.0; Invoke-Pester tests\Pester\Schema3.Tests.ps1
 BeforeAll {
-    $script:Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    . (Join-Path $script:Root 'cpu-cleaner.ps1') -NoProfile
+    $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $src = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
+    $idx = $src.IndexOf("switch (`$Mode)")
+    if ($idx -lt 0) { throw '未找到主流程 switch, 无法截取' }
+    $defs = $src.Substring(0, $idx)
+    $defs = $defs -replace "(?s)# ---------- v1\.7\.0 模块化.*?\n\}", ''
+    $defs = $defs.Replace('$script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path', '$script:Root = $projectRoot')
+    Invoke-Expression $defs
+    foreach ($f in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
+        . (Join-Path $projectRoot ('src\Core\' + $f + '.ps1'))
+    }
 }
 
 Describe 'Test-DetectMatch (match_type 分发)' {
@@ -13,6 +22,14 @@ Describe 'Test-DetectMatch (match_type 分发)' {
     It 'contains 默认行为 (字符串 = contains)' {
         Test-DetectMatch 'LenovoServiceAS' 'LenovoService' | Should -BeTrue
         Test-DetectMatch 'LenovoServiceAS' @{ match = 'lenovo'; type = 'contains' } | Should -BeTrue
+    }
+    It 'contains 使用大小写不敏感的序号字面子串匹配' {
+        Test-DetectMatch 'abc*def' @{ match = '*'; type = 'contains' } | Should -BeTrue
+        Test-DetectMatch 'abcdef' @{ match = '*'; type = 'contains' } | Should -BeFalse
+        Test-DetectMatch 'abc?def' @{ match = '?'; type = 'contains' } | Should -BeTrue
+        Test-DetectMatch 'abcXdef' @{ match = '?'; type = 'contains' } | Should -BeFalse
+        Test-DetectMatch 'abc[def]' @{ match = '[def]'; type = 'contains' } | Should -BeTrue
+        Test-DetectMatch 'abcdef' @{ match = '[def]'; type = 'contains' } | Should -BeFalse
     }
     It 'regex 匹配' {
         Test-DetectMatch 'WeChatAppEx.exe' @{ match = '^WeChat'; type = 'regex' } | Should -BeTrue
@@ -25,12 +42,17 @@ Describe 'Test-DetectMatch (match_type 分发)' {
         Test-DetectMatch 'C:\Program Files\Lenovo\ImController\Lenovo.Modern.ImController.exe' @{ match = 'C:\Program Files\Lenovo'; type = 'path' } | Should -BeTrue
         Test-DetectMatch 'D:\Games\steam.exe' @{ match = 'C:\Program Files'; type = 'path' } | Should -BeFalse
     }
+    It 'path 使用大小写不敏感的序号字面前缀匹配' {
+        Test-DetectMatch 'c:\PROGRAM FILES\Lenovo\app.exe' @{ match = 'C:\Program Files\Lenovo'; type = 'path' } | Should -BeTrue
+        Test-DetectMatch 'C:\Apps\[*]\app.exe' @{ match = 'C:\Apps\[*]'; type = 'path' } | Should -BeTrue
+        Test-DetectMatch 'C:\Apps\x\app.exe' @{ match = 'C:\Apps\[*]'; type = 'path' } | Should -BeFalse
+    }
     It '空 match / null target 返回 false' {
         Test-DetectMatch 'anything' @{ match = ''; type = 'exact' } | Should -BeFalse
         Test-DetectMatch $null 'x' | Should -BeFalse
     }
-    It '未知 type 回退 contains' {
-        Test-DetectMatch 'abc123' @{ match = '123'; type = 'fuzzy' } | Should -BeTrue
+    It '未知 type 返回 false' {
+        Test-DetectMatch 'abc123' @{ match = '123'; type = 'fuzzy' } | Should -BeFalse
     }
 }
 
