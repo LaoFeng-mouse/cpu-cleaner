@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 v1.2 (cpu-cleaner.ps1) — Reliability Release
+#  CPU 后台整理工具 v1.3 (cpu-cleaner.ps1) — Schema 2.0
 #  适用: Windows 10/11, PowerShell 5.1+
 #
 #  用法:
@@ -44,6 +44,137 @@ function Is-Admin {
 function Read-Utf8Json($path) {
     $raw = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
     return $raw | ConvertFrom-Json
+}
+
+# ---------- v1.3: 特征库加载与校验 (Schema 2.0) ----------
+$script:ValidRisks   = @('high','medium','low')
+$script:ValidActions = @('disable_service','remove_autostart','disable_task','uninstall','investigate','none')
+$script:DangerousActions = @('disable_service','remove_autostart','disable_task','uninstall')
+
+# 旧格式 v1 → v2 转换 (type/match/action → detect/actions)
+function Convert-ProfilesV1ToV2($old) {
+    $newProfiles = @()
+    foreach ($p in $old.profiles) {
+        $detect = @{ services = @(); processes = @(); autostarts = @(); tasks = @() }
+        $actions = @{}
+        switch ($p.type) {
+            'service'       { $detect.services = @($p.match); $actions.service = $p.action }
+            'process'       { $detect.processes = @($p.match); $actions.process = $p.action }
+            'scheduled_task' { $detect.tasks = @($p.match); $actions.task = $p.action }
+            'app' {
+                $detect.services = @($p.match); $detect.processes = @($p.match)
+                $detect.autostarts = @($p.match); $detect.tasks = @($p.match)
+                $actions.service = $p.action; $actions.process = $p.action
+                $actions.autostart = $p.action; $actions.task = $p.action
+            }
+            default         { $detect.processes = @($p.match); $actions.process = $p.action }
+        }
+        $newProfiles += [pscustomobject]@{
+            id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
+            risk = $p.risk; safe = $p.safe; reason_cn = $p.reason_cn
+            detect = $detect; actions = $actions
+            evidence = [pscustomobject]@{ tested = $false; tested_count = 0; tested_models = @(); last_verified = $null }
+        }
+    }
+    return [pscustomobject]@{
+        schema_version = 2
+        profiles = $newProfiles
+        keep_notes_cn = $old.keep_notes_cn
+    }
+}
+
+# 特征库加载 + 校验: schema_version / id 唯一 / risk 合法 / action 合法 / detect 非空 / safe=false 禁危险动作
+# 校验失败直接 throw, 拒绝加载 (错误规则绝不能进扫描)
+function Load-Profiles([string]$Path = $script:ProfileFile) {
+    if (-not (Test-Path $Path)) { throw "特征库不存在: $Path" }
+    $profiles = Read-Utf8Json $Path
+    $errors = @()
+
+    # schema_version 检查 + v1 兼容
+    $ver = 0
+    if ($profiles.PSObject.Properties.Name -contains 'schema_version') { $ver = [int]$profiles.schema_version }
+    if ($ver -eq 0) {
+        $profiles = Convert-ProfilesV1ToV2 $profiles
+        $ver = 2
+    } elseif ($ver -lt 2) {
+        $errors += "特征库 schema_version=$ver 过低, 需要 v2 (请更新 bloatware-profiles.json)"
+    } elseif ($ver -gt 2) {
+        $errors += "特征库 schema_version=$ver 高于程序支持的 v2, 请更新 cpu-cleaner.ps1"
+    }
+
+    if ($errors.Count -eq 0) {
+        $seen = @{}
+        foreach ($p in $profiles.profiles) {
+            # id 必须存在且唯一
+            if (-not $p.id) { $errors += "规则缺少 id (vendor=$($p.vendor))" }
+            elseif ($seen.ContainsKey($p.id)) { $errors += "id 重复: $($p.id)" }
+            else { $seen[$p.id] = $true }
+            # risk 合法
+            if ($p.risk -and ($script:ValidRisks -notcontains $p.risk)) { $errors += "id=$($p.id) risk 非法: $($p.risk)" }
+            # detect 非空
+            if (-not $p.detect) { $errors += "id=$($p.id) 缺少 detect" }
+            else {
+                $d = $p.detect
+                $cnt = @($d.services).Count + @($d.processes).Count + @($d.autostarts).Count + @($d.tasks).Count
+                if ($cnt -eq 0) { $errors += "id=$($p.id) detect 全为空" }
+            }
+            # actions 合法
+            if (-not $p.actions) { $errors += "id=$($p.id) 缺少 actions" }
+            else {
+                foreach ($ak in Get-ActionKeys $p.actions) {
+                    $av = Get-ActionFor $p.actions $ak
+                    if ($script:ValidActions -notcontains $av) { $errors += "id=$($p.id) actions.$ak 非法: $av" }
+                }
+                # safe=false 只能配 none/investigate
+                if ($p.safe -eq $false) {
+                    foreach ($ak in Get-ActionKeys $p.actions) {
+                        $av = Get-ActionFor $p.actions $ak
+                        if ($script:DangerousActions -contains $av) {
+                            $errors += "id=$($p.id) safe=false 但 actions.$ak=$av (危险动作禁止)"
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if ($errors.Count -gt 0) {
+        throw ("特征库校验失败, 拒绝加载:`n" + ($errors -join "`n"))
+    }
+    return $profiles
+}
+
+# 构造一条命中记录 (结构化字段)
+function New-Hit {
+    param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $action)
+    return [pscustomobject]@{
+        id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
+        risk = $p.risk; action = $action; safe = $p.safe; reason_cn = $p.reason_cn
+        evidence = $p.evidence
+        hit_type = $hitType
+        detail = $detail
+        service_name = $srvName
+        autostart_source = $autostartSource; autostart_name = $autostartName
+        task_path = $taskPath; process_name = $procName
+    }
+}
+
+# 统一读取 actions 的键列表 (兼容 hashtable 与 PSCustomObject; v1 转换产物是 hashtable)
+function Get-ActionKeys($act) {
+    if (-not $act) { return @() }
+    if ($act -is [System.Collections.IDictionary]) { return @($act.Keys) }
+    return @($act.PSObject.Properties.Name)
+}
+
+# 统一读取 actions 中某类型的动作 (缺省返回 none)
+function Get-ActionFor($act, $key) {
+    if (-not $act) { return 'none' }
+    if ($act -is [System.Collections.IDictionary]) {
+        if ($act.Contains($key)) { return $act[$key] }
+        return 'none'
+    }
+    if ($act.PSObject.Properties.Name -contains $key) { return $act.$key }
+    return 'none'
 }
 
 # ---------- 1. 系统与 CPU 概况 ----------
@@ -199,67 +330,57 @@ function Get-TasksInfo {
     return $tasks
 }
 
-# ---------- 7. 特征库匹配 (A2: 多类型同时命中, 结构化字段) ----------
+# ---------- 7. 特征库匹配 (v1.3: detect/actions 分离, 多类型同时命中) ----------
 function Match-Profiles {
     param($Services, $AutoStarts, $Tasks, $TopProcs)
 
-    $profiles = Read-Utf8Json $script:ProfileFile
+    # v1.3: 通过 Load-Profiles 加载 (含 schema 校验, 错误规则拒绝加载)
+    $profiles = Load-Profiles
     $hits = @()
 
     foreach ($p in $profiles.profiles) {
-        # 服务命中 (同一 profile 可能有多个服务, 取全部)
-        foreach ($s in $Services) {
-            $m = $p.match | Where-Object { $s.Name -like "*$_*" -or $s.DisplayName -like "*$_*" } | Select-Object -First 1
-            if ($m) {
-                $hits += [pscustomobject]@{
-                    id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
-                    risk = $p.risk; action = $p.action; safe = $p.safe; reason_cn = $p.reason_cn
-                    hit_type = 'service'
-                    detail = "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)"
-                    service_name = $s.Name
-                    autostart_source = ''; autostart_name = ''; task_path = ''; process_name = ''
+        $det = $p.detect
+        $act = $p.actions
+        $nullDet = $false
+        if (-not $det) { $nullDet = $true; $det = @{ services=@(); processes=@(); autostarts=@(); tasks=@() } }
+
+        # 服务命中 (同一 profile 多个服务, 取全部)
+        if (-not $nullDet -and @($det.services).Count -gt 0) {
+            foreach ($s in $Services) {
+                $m = @($det.services) | Where-Object { $s.Name -like "*$_*" -or $s.DisplayName -like "*$_*" } | Select-Object -First 1
+                if ($m) {
+                    $action = Get-ActionFor $act 'service'
+                    $hits += New-Hit $p 'service' "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)" $s.Name '' '' '' '' $action
                 }
             }
         }
         # 自启命中
-        foreach ($a in $AutoStarts) {
-            $m = $p.match | Where-Object { $a.Name -like "*$_*" -or $a.Value -like "*$_*" } | Select-Object -First 1
-            if ($m) {
-                $hits += [pscustomobject]@{
-                    id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
-                    risk = $p.risk; action = $p.action; safe = $p.safe; reason_cn = $p.reason_cn
-                    hit_type = 'autostart'
-                    detail = "$($a.Name) => $($a.Value)"
-                    service_name = ''
-                    autostart_source = $a.Source; autostart_name = $a.Name; task_path = ''; process_name = ''
+        if (-not $nullDet -and @($det.autostarts).Count -gt 0) {
+            foreach ($a in $AutoStarts) {
+                $m = @($det.autostarts) | Where-Object { $a.Name -like "*$_*" -or $a.Value -like "*$_*" } | Select-Object -First 1
+                if ($m) {
+                    $action = Get-ActionFor $act 'autostart'
+                    $hits += New-Hit $p 'autostart' "$($a.Name) => $($a.Value)" '' $a.Source $a.Name '' '' $action
                 }
             }
         }
         # 计划任务命中
-        foreach ($t in $Tasks) {
-            $m = $p.match | Where-Object { $t.TaskName -like "*$_*" -or $t.TaskPath -like "*$_*" } | Select-Object -First 1
-            if ($m) {
-                $hits += [pscustomobject]@{
-                    id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
-                    risk = $p.risk; action = $p.action; safe = $p.safe; reason_cn = $p.reason_cn
-                    hit_type = 'task'
-                    detail = "$($t.TaskPath)$($t.TaskName) | $($t.State)"
-                    service_name = ''
-                    autostart_source = ''; autostart_name = ''; task_path = "$($t.TaskPath)$($t.TaskName)"; process_name = ''
+        if (-not $nullDet -and @($det.tasks).Count -gt 0) {
+            foreach ($t in $Tasks) {
+                $m = @($det.tasks) | Where-Object { $t.TaskName -like "*$_*" -or $t.TaskPath -like "*$_*" } | Select-Object -First 1
+                if ($m) {
+                    $action = Get-ActionFor $act 'task'
+                    $hits += New-Hit $p 'task' "$($t.TaskPath)$($t.TaskName) | $($t.State)" '' '' '' "$($t.TaskPath)$($t.TaskName)" '' $action
                 }
             }
         }
-        # 进程命中 (仅提示)
-        foreach ($tp in $TopProcs) {
-            $m = $p.match | Where-Object { $tp.Name -like "*$_*" } | Select-Object -First 1
-            if ($m) {
-                $hits += [pscustomobject]@{
-                    id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
-                    risk = $p.risk; action = $p.action; safe = $p.safe; reason_cn = $p.reason_cn
-                    hit_type = 'process'
-                    detail = "$($tp.Name) PID=$($tp.PID) CPU=$($tp.'CPU%')%"
-                    service_name = ''
-                    autostart_source = ''; autostart_name = ''; task_path = ''; process_name = $tp.Name
+        # 进程命中 (Top CPU 进程, 动作按 actions.process)
+        if (-not $nullDet -and @($det.processes).Count -gt 0) {
+            foreach ($tp in $TopProcs) {
+                $m = @($det.processes) | Where-Object { $tp.Name -like "*$_*" } | Select-Object -First 1
+                if ($m) {
+                    $action = Get-ActionFor $act 'process'
+                    $hits += New-Hit $p 'process' "$($tp.Name) PID=$($tp.PID) CPU=$($tp.'CPU%')%" '' '' '' '' $tp.Name $action
                 }
             }
         }
@@ -273,7 +394,7 @@ function Write-ScanReport {
 
     $lines = @()
     $lines += '=' * 60
-    $lines += '  CPU 后台整理工具 - 诊断报告 v1.2'
+    $lines += '  CPU 后台整理工具 - 诊断报告 v1.3'
     $lines += '  生成时间: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     $lines += '=' * 60
     $lines += ''
@@ -325,9 +446,17 @@ function Write-ScanReport {
     } else {
         foreach ($h in $Hits) {
             $riskMark = switch ($h.risk) { 'high' { '!!' } 'medium' { '! ' } default { '  ' } }
-            $lines += ('  {0} [{1}] {2} ({3})' -f $riskMark, $h.vendor, $h.name_cn, $h.name)
+            $nameSuffix = if ($h.name) { " ($($h.name))" } else { '' }
+            $lines += ('  {0} [{1}] {2}{3}' -f $riskMark, $h.vendor, $h.name_cn, $nameSuffix)
             $lines += ('      命中: {0}  |  {1}' -f $h.hit_type, $h.detail)
             $lines += ('      建议: {0}  |  安全: {1}' -f $h.action, $(if ($h.safe) { '是' } else { '否-谨慎' }))
+            # v1.3: evidence 显示
+            if ($h.evidence -and $h.evidence.tested) {
+                $models = @($h.evidence.tested_models) -join ','
+                $lines += ('      实测: 是 ({0} 台, {1}, {2})' -f $h.evidence.tested_count, $models, $h.evidence.last_verified)
+            } elseif ($h.evidence) {
+                $lines += '      实测: 否 (参考规则, 谨慎对待)'
+            }
             $lines += ('      原因: {0}' -f $h.reason_cn)
         }
     }
@@ -345,7 +474,7 @@ function Write-ScanReport {
     $lines += ''
 
     $lines += '【8. 处理原则 (别乱动)】'
-    $notes = (Read-Utf8Json $script:ProfileFile).keep_notes_cn
+    $notes = (Load-Profiles).keep_notes_cn
     foreach ($n in $notes) { $lines += ('  - ' + $n) }
     $lines += ''
     $lines += ('待处理清单已保存: {0}' -f $script:PendingFile)
@@ -355,13 +484,17 @@ function Write-ScanReport {
     return ($lines -join "`r`n")
 }
 
-# ---------- 9. 待办清单 (v1.2: safe 强制规则 + status 状态机) ----------
+# ---------- 9. 待办清单 (v1.2: safe 强制规则 + status 状态机; v1.3: 同 id 去重) ----------
 function Save-PendingActions($Hits, $Suspicious) {
     $actions = @()
+    $seenActionIds = @{}
     foreach ($h in $Hits) {
         if ($h.action -eq 'none' -or $h.action -eq 'investigate') { continue }
         # v1.2 强制规则: safe=false 只报告, 永不进入待办队列 (即使 -YesToAll 也不能执行)
         if (-not $h.safe) { continue }
+        # v1.3: 同一 id 的多个命中只保留第一条 (避免同一软件重复待办)
+        if ($seenActionIds.ContainsKey($h.id)) { continue }
+        $seenActionIds[$h.id] = $true
 
         # 跳过已经是目标状态的条目
         $skip = $false
@@ -799,9 +932,9 @@ function Update-Profiles {
     try {
         $tmp = Join-Path $script:Root 'bloatware-profiles.json.tmp'
         Invoke-WebRequest -Uri $script:ProfileUrl -OutFile $tmp -UseBasicParsing -TimeoutSec 30
-        # 验证是合法 JSON 且含 profiles 字段
-        $check = Get-Content $tmp -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($check.profiles) {
+        # v1.3: 用 Load-Profiles 完整校验 (schema_version / id / risk / action / detect / safe 规则)
+        $check = Load-Profiles -Path $tmp
+        if ($check -and $check.profiles) {
             $bak = Join-Path $script:Root ('bloatware-profiles.json.bak.' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
             Copy-Item $script:ProfileFile $bak -Force
             Move-Item $tmp $script:ProfileFile -Force
@@ -865,7 +998,7 @@ switch ($Mode) {
                 $sec5 += '</table>'
             }
 
-            $notes = (Read-Utf8Json $script:ProfileFile).keep_notes_cn
+            $notes = (Load-Profiles).keep_notes_cn
             $sec6 = "<h2>6. 处理原则</h2><ul>"
             foreach ($n in $notes) { $sec6 += "<li>$(& $esc $n)</li>" }
             $sec6 += '</ul>'

@@ -1,280 +1,374 @@
 {
+  "schema_version": 2,
+  "description": "CPU 后台整理工具特征库。v2: detect/actions 分离, 每种检测对象可配不同动作。evidence.tested=false 表示未经实机验证, 仅报告不自动处理(程序会校验)。",
   "profiles": [
     {
       "id": "lenovo-lemcpmanager",
       "vendor": "Lenovo",
-      "name": "LeMcpManager (AI Agent MCP Manager)",
       "name_cn": "联想 AI MCP 管理器（AI 全家桶核心）",
-      "type": "service",
-      "match": ["LeMCPManagerService", "LeMcpManager", "mcpman.exe", "LeMCPHive.exe", "XLMCPAdapter.exe"],
       "risk": "high",
-      "action": "disable_service",
       "safe": true,
-      "reason_cn": "联想预装 AI 助手全家桶，会一次性拉起 30+ 个 MCP 进程导致 CPU 满载，无卸载入口，禁用即最干净"
+      "reason_cn": "联想预装 AI 助手全家桶，会一次性拉起 30+ 个 MCP 进程导致 CPU 满载，无卸载入口，禁用即最干净",
+      "detect": {
+        "services": ["LeMCPManagerService", "LeMcpManager"],
+        "processes": ["mcpman.exe", "LeMCPHive.exe", "XLMCPAdapter.exe", "XLMCPServerHost.exe", "xl_mcp_server.exe"],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service", "process": "investigate" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {
       "id": "lenovo-xlsmart",
       "vendor": "Lenovo",
-      "name": "XLSmart (联想小天 AI)",
       "name_cn": "联想小天 AI 助手",
-      "type": "service",
-      "match": ["XLSmartService", "XLSmartUI.exe", "XLSmartTray.exe", "XLSmartUtils.exe", "XLAUI.exe"],
       "risk": "high",
-      "action": "disable_service",
       "safe": true,
-      "reason_cn": "联想 AI 对话助手，常驻后台，不用它就没存在意义"
+      "reason_cn": "联想 AI 对话助手，常驻后台，不用它就没存在意义",
+      "detect": {
+        "services": ["XLSmartService"],
+        "processes": ["XLSmartUI.exe", "XLSmartTray.exe", "XLSmartUtils.exe", "XLAUI.exe"],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service", "process": "investigate" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {
       "id": "lenovo-lisf",
       "vendor": "Lenovo",
-      "name": "LISFService (Lenovo Internet Software Framework)",
       "name_cn": "联想推送框架（广告/推广）",
-      "type": "service",
-      "match": ["LISFService"],
       "risk": "high",
-      "action": "disable_service",
       "safe": true,
-      "reason_cn": "联想广告/内容推送框架。注意：进程 NOT_STOPPABLE 杀不掉，禁用后重启才消失"
+      "reason_cn": "联想广告/内容推送框架。注意：进程 NOT_STOPPABLE 杀不掉，禁用后重启才消失",
+      "detect": {
+        "services": ["LISFService"],
+        "processes": ["LISFService"],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service", "process": "investigate" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {
       "id": "lenovo-serviceas",
       "vendor": "Lenovo",
-      "name": "LenovoServiceAS (Lenovo App Store)",
       "name_cn": "联想应用商店服务",
-      "type": "service",
-      "match": ["LenovoServiceAS"],
       "risk": "medium",
-      "action": "disable_service",
       "safe": true,
-      "reason_cn": "联想应用商店后台服务，从商店装的软件可能需要它，纯用户软件可禁用"
+      "reason_cn": "联想应用商店后台服务，从商店装的软件可能需要它，纯用户软件可禁用",
+      "detect": {
+        "services": ["LenovoServiceAS"],
+        "processes": [],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {
       "id": "lenovo-gaserivce",
       "vendor": "Lenovo",
-      "name": "GAService (Lenovo Gaming AI)",
       "name_cn": "联想游戏 AI 服务",
-      "type": "service",
-      "match": ["GAService"],
       "risk": "medium",
-      "action": "disable_service",
       "safe": true,
-      "reason_cn": "LegionZone 游戏 AI 辅助，非游戏本或不用游戏助手可禁用"
+      "reason_cn": "LegionZone 游戏 AI 辅助，非游戏本或不用游戏助手可禁用",
+      "detect": {
+        "services": ["GAService"],
+        "processes": [],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {
       "id": "lenovo-smartconnect",
       "vendor": "Lenovo",
-      "name": "SmartConnect (Ready For Assistant)",
       "name_cn": "联想 Ready For 智能助手",
-      "type": "service",
-      "match": ["SmartConnect", "Ready For Assistant"],
       "risk": "high",
-      "action": "disable_service",
       "safe": true,
-      "reason_cn": "联想多设备协同智能助手，无卸载入口，禁用服务+删自启即可，不会自动再生"
+      "reason_cn": "联想多设备协同智能助手，无卸载入口，禁用服务+删自启即可，不会自动再生",
+      "detect": {
+        "services": ["SmartConnect"],
+        "processes": ["SmartConnect.exe"],
+        "autostarts": ["SmartConnect"],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service", "autostart": "remove_autostart", "process": "investigate" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {
       "id": "lenovo-lnvvcam",
       "vendor": "Lenovo",
-      "name": "LnvVCamInstaller (Lenovo VCamera Installer)",
       "name_cn": "联想摄像头安装器",
-      "type": "service",
-      "match": ["LnvVCamInstaller"],
       "risk": "medium",
-      "action": "disable_service",
       "safe": true,
-      "reason_cn": "摄像头驱动安装辅助，摄像头已正常工作就不需要它常驻"
+      "reason_cn": "摄像头驱动安装辅助，摄像头已正常工作就不需要它常驻",
+      "detect": {
+        "services": ["LnvVCamInstaller"],
+        "processes": [],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {
       "id": "lenovo-hrwscctrl",
       "vendor": "Lenovo",
-      "name": "HRWSCCtrl (Lenovo Windows Security Center)",
       "name_cn": "联想安全中心组件",
-      "type": "service",
-      "match": ["HRWSCCtrl"],
       "risk": "low",
-      "action": "none",
       "safe": false,
-      "reason_cn": "电脑管家安全组件，带自我保护禁不掉且属正常，随电脑管家运行，别硬刚"
+      "reason_cn": "电脑管家安全组件，带自我保护禁不掉且属正常，随电脑管家运行，别硬刚（safe=false 只报告）",
+      "detect": {
+        "services": ["HRWSCCtrl"],
+        "processes": ["wsctrl11.exe"],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "service": "none", "process": "none" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {
       "id": "lenovo-magicenter",
       "vendor": "Lenovo",
-      "name": "MagiCenter / 百应 / 联想语音",
       "name_cn": "联想 MagiCenter / 百应 / 语音助手",
-      "type": "app",
-      "match": ["LenovoBaiying", "Lenovo Speech", "LenovoMagiCenterDetecter", "MagiCenter"],
       "risk": "high",
-      "action": "uninstall",
       "safe": true,
-      "reason_cn": "联想预装骚扰组件，有卸载入口（Inno Setup unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART）"
+      "reason_cn": "联想预装骚扰组件，有卸载入口（Inno Setup unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART）",
+      "detect": {
+        "services": ["LenovoBaiying", "Lenovo Speech", "LenovoMagiCenterDetecter", "MagiCenter"],
+        "processes": ["LenovoBaiying", "Lenovo Speech", "MagiCenter"],
+        "autostarts": ["LenovoBaiying", "LenovoMagiCenterDetecter"],
+        "tasks": ["StartLenovoMagiCenterDetecterOnLogin"]
+      },
+      "actions": { "service": "uninstall", "process": "uninstall", "autostart": "uninstall", "task": "uninstall" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {
       "id": "lenovo-task-notify",
       "vendor": "Lenovo",
-      "name": "Lenovo 通知/诊断计划任务",
       "name_cn": "联想通知与诊断计划任务",
-      "type": "scheduled_task",
-      "match": ["LenovoMachineFixUser_OOBE_AUTO_Notification", "Lenovo UDC Diagnostic Scan", "StartLenovoMagiCenterDetecterOnLogin"],
       "risk": "medium",
-      "action": "disable_task",
       "safe": true,
-      "reason_cn": "联想后台通知/诊断任务，禁用不影响系统功能"
-    },
-    {
-      "id": "huawei-hwservice",
-      "vendor": "Huawei",
-      "name": "HwServiceHost (华为服务)",
-      "name_cn": "华为服务",
-      "type": "service",
-      "match": ["HwServiceHost", "HuaweiService", "华为服务"],
-      "risk": "medium",
-      "action": "disable_service",
-      "safe": false,
-      "reason_cn": "华为电脑管家核心服务，多屏协同/一碰传依赖它；只玩华为生态再考虑保留，纯办公可禁"
-    },
-    {
-      "id": "huawei-pcmanager",
-      "vendor": "Huawei",
-      "name": "华为电脑管家 PCManager",
-      "name_cn": "华为电脑管家",
-      "type": "app",
-      "match": ["HuaweiPCManager", "Huawei-PC-Manager", "华为电脑管家"],
-      "risk": "low",
-      "action": "none",
-      "safe": false,
-      "reason_cn": "华为设备管理主程序，多屏协同用户必须保留；不用华为生态可卸载"
-    },
-    {
-      "id": "dell-supportassist",
-      "vendor": "Dell",
-      "name": "Dell SupportAssist / DellUpdate",
-      "name_cn": "戴尔 SupportAssist/更新服务",
-      "type": "service",
-      "match": ["DellSupportAssist", "DellUpdateService", "DellFoundationServices", "DSA"],
-      "risk": "medium",
-      "action": "disable_service",
-      "safe": true,
-      "reason_cn": "戴尔自动更新/支持助手，会后台扫描并推送更新，手动更新可禁用"
-    },
-    {
-      "id": "hp-supportassist",
-      "vendor": "HP",
-      "name": "HP Support Assistant / HPSupportSolutionsFramework",
-      "name_cn": "惠普支持助手",
-      "type": "service",
-      "match": ["HPAppHelper", "HPSupportSolutionsFramework", "HP Support Assistant"],
-      "risk": "medium",
-      "action": "disable_service",
-      "safe": true,
-      "reason_cn": "惠普自动更新/诊断后台，非必要常驻"
-    },
-    {
-      "id": "asus-bloat",
-      "vendor": "ASUS",
-      "name": "ASUS 预装服务（非核心）",
-      "name_cn": "华硕预装服务",
-      "type": "service",
-      "match": ["AsusUpdateCheck", "ASUSSoftwareManager", "AsusAppService", "ASUS App"],
-      "risk": "medium",
-      "action": "disable_service",
-      "safe": true,
-      "reason_cn": "华硕更新/推广服务；注意 ArmouryCrate 游戏用户要保留，别一刀切"
-    },
-    {
-      "id": "xiaomi-service",
-      "vendor": "Xiaomi",
-      "name": "小米服务 / 小米电脑管家",
-      "name_cn": "小米服务",
-      "type": "service",
-      "match": ["MiService", "小米电脑管家", "MiPCManager"],
-      "risk": "medium",
-      "action": "disable_service",
-      "safe": true,
-      "reason_cn": "小米预装后台服务，不用小米生态可禁用"
-    },
-    {
-      "id": "generic-cn-bloat",
-      "vendor": "Generic",
-      "name": "国产流氓软件（鲁大师/驱动精灵/2345/360/金山）",
-      "name_cn": "国产流氓/推广软件",
-      "type": "app",
-      "match": ["鲁大师", "驱动精灵", "2345", "360安全卫士", "360杀毒", "金山毒霸", "WPS推广", "爱奇艺", "猎豹"],
-      "risk": "high",
-      "action": "uninstall",
-      "safe": true,
-      "reason_cn": "用户自行安装的推广/流氓软件，弹广告、常驻高 CPU，卸载最佳（注意 360 杀毒用户若依赖其防护需自行权衡）"
-    },
-    {
-      "id": "cn-360",
-      "vendor": "Generic",
-      "name": "360 安全卫士/杀毒",
-      "name_cn": "360 全家桶",
-      "type": "app",
-      "match": ["360Safe", "360tray", "360sd", "360安全卫士", "360杀毒"],
-      "risk": "high",
-      "action": "uninstall",
-      "safe": true,
-      "reason_cn": "360 安全卫士/杀毒，常驻 + 弹窗推广，日常很吃后台资源；若依赖其防护需自行权衡（系统自带 Defender 足够）"
-    },
-    {
-      "id": "cn-ludashi",
-      "vendor": "Generic",
-      "name": "鲁大师",
-      "name_cn": "鲁大师",
-      "type": "app",
-      "match": ["LuDaShi", "ludashi", "鲁大师"],
-      "risk": "high",
-      "action": "uninstall",
-      "safe": true,
-      "reason_cn": "鲁大师，跑分/监控工具但常驻弹窗，卸载后不影响系统任何功能"
-    },
-    {
-      "id": "cn-drivergenius",
-      "vendor": "Generic",
-      "name": "驱动精灵",
-      "name_cn": "驱动精灵",
-      "type": "app",
-      "match": ["DrvGen", "drivergenius", "驱动精灵"],
-      "risk": "high",
-      "action": "uninstall",
-      "safe": true,
-      "reason_cn": "驱动精灵，自动装驱动有风险且常驻后台；驱动更新建议用厂商官网或 Windows 更新"
-    },
-    {
-      "id": "dell-command-update",
-      "vendor": "Dell",
-      "name": "Dell Command Update",
-      "name_cn": "戴尔 Command Update",
-      "type": "service",
-      "match": ["DellCommandUpdate", "Dell Command Update"],
-      "risk": "medium",
-      "action": "disable_service",
-      "safe": true,
-      "reason_cn": "戴尔驱动/BIOS 自动更新服务，会后台检查更新；想要时手动打开更新即可"
-    },
-    {
-      "id": "generic-updater",
-      "vendor": "Generic",
-      "name": "通用自动更新器进程",
-      "name_cn": "通用自动更新器",
-      "type": "process",
-      "match": ["updater.exe"],
-      "risk": "low",
-      "action": "investigate",
-      "safe": false,
-      "reason_cn": "自动更新器本身常见，但若多个同时常驻会持续占 CPU；按具体厂商判断，别一刀切禁用（注意：系统自带 tzautoupdate 时区更新等会被宽泛匹配误报，已改为精确匹配 updater.exe）"
+      "reason_cn": "联想后台通知/诊断任务，禁用不影响系统功能",
+      "detect": {
+        "services": [],
+        "processes": [],
+        "autostarts": [],
+        "tasks": ["LenovoMachineFixUser_OOBE_AUTO_Notification", "Lenovo UDC Diagnostic Scan"]
+      },
+      "actions": { "task": "disable_task" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
     },
     {
       "id": "lenovo-kdcore",
       "vendor": "Lenovo",
-      "name": "KDCoreApp (联想后台组件)",
       "name_cn": "联想 KDCore 后台组件",
-      "type": "process",
-      "match": ["KDCoreApp"],
       "risk": "low",
-      "action": "investigate",
       "safe": false,
-      "reason_cn": "联想 lsf 框架相关组件，占用一般很低；若长期高 CPU 再考虑处理"
+      "reason_cn": "联想 lsf 框架相关组件，占用一般很低；若长期高 CPU 再考虑处理（未实测安全影响, 只报告）",
+      "detect": {
+        "services": [],
+        "processes": ["KDCoreApp"],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "process": "investigate" },
+      "evidence": { "tested": true, "tested_count": 1, "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"], "last_verified": "2026-08-09" }
+    },
+    {
+      "id": "huawei-hwservice",
+      "vendor": "Huawei",
+      "name_cn": "华为服务",
+      "risk": "medium",
+      "safe": false,
+      "reason_cn": "华为电脑管家核心服务，多屏协同/一碰传依赖它；只玩华为生态再考虑保留（safe=false 只报告）",
+      "detect": {
+        "services": ["HwServiceHost", "HuaweiService", "华为服务"],
+        "processes": ["HwServiceHost"],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "service": "none", "process": "investigate" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "huawei-pcmanager",
+      "vendor": "Huawei",
+      "name_cn": "华为电脑管家",
+      "risk": "low",
+      "safe": false,
+      "reason_cn": "华为设备管理主程序，多屏协同用户必须保留；不用华为生态可卸载（safe=false 只报告）",
+      "detect": {
+        "services": ["HuaweiPCManager", "Huawei-PC-Manager"],
+        "processes": ["HuaweiPCManager"],
+        "autostarts": ["华为电脑管家", "HuaweiPCManager"],
+        "tasks": []
+      },
+      "actions": { "service": "none", "process": "none", "autostart": "none" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "dell-supportassist",
+      "vendor": "Dell",
+      "name_cn": "戴尔 SupportAssist/更新服务",
+      "risk": "medium",
+      "safe": true,
+      "reason_cn": "戴尔自动更新/支持助手，会后台扫描并推送更新，手动更新可禁用",
+      "detect": {
+        "services": ["DellSupportAssist", "DellUpdateService", "DellFoundationServices"],
+        "processes": ["DellSupportAssist", "DSA"],
+        "autostarts": ["DellSupportAssist"],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service", "process": "investigate", "autostart": "remove_autostart" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "dell-command-update",
+      "vendor": "Dell",
+      "name_cn": "戴尔 Command Update",
+      "risk": "medium",
+      "safe": true,
+      "reason_cn": "戴尔驱动/BIOS 自动更新服务，会后台检查更新；想要时手动打开更新即可",
+      "detect": {
+        "services": ["DellCommandUpdate"],
+        "processes": ["DellCommandUpdate"],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service", "process": "investigate" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "hp-supportassist",
+      "vendor": "HP",
+      "name_cn": "惠普支持助手",
+      "risk": "medium",
+      "safe": true,
+      "reason_cn": "惠普自动更新/诊断后台，非必要常驻",
+      "detect": {
+        "services": ["HPAppHelper", "HPSupportSolutionsFramework"],
+        "processes": ["HPAppHelper"],
+        "autostarts": ["HPAppHelper"],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service", "process": "investigate", "autostart": "remove_autostart" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "asus-bloat",
+      "vendor": "ASUS",
+      "name_cn": "华硕预装服务",
+      "risk": "medium",
+      "safe": true,
+      "reason_cn": "华硕更新/推广服务；注意 ArmouryCrate 游戏用户要保留，别一刀切",
+      "detect": {
+        "services": ["AsusUpdateCheck", "ASUSSoftwareManager", "AsusAppService"],
+        "processes": ["AsusUpdateCheck", "ASUSSoftwareManager"],
+        "autostarts": ["ASUSSoftwareManager"],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service", "process": "investigate", "autostart": "remove_autostart" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "xiaomi-service",
+      "vendor": "Xiaomi",
+      "name_cn": "小米服务",
+      "risk": "medium",
+      "safe": true,
+      "reason_cn": "小米预装后台服务，不用小米生态可禁用",
+      "detect": {
+        "services": ["MiService", "MiPCManager"],
+        "processes": ["MiService", "MiPCManager"],
+        "autostarts": ["小米电脑管家"],
+        "tasks": []
+      },
+      "actions": { "service": "disable_service", "process": "investigate", "autostart": "remove_autostart" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "generic-cn-bloat",
+      "vendor": "Generic",
+      "name_cn": "国产流氓/推广软件",
+      "risk": "high",
+      "safe": true,
+      "reason_cn": "用户自行安装的推广/流氓软件，弹广告、常驻高 CPU，卸载最佳（360 杀毒用户若依赖其防护需自行权衡）",
+      "detect": {
+        "services": ["鲁大师", "驱动精灵", "2345", "360安全卫士", "360杀毒", "金山毒霸"],
+        "processes": ["鲁大师", "驱动精灵", "2345", "360安全卫士", "360杀毒", "金山毒霸"],
+        "autostarts": ["鲁大师", "驱动精灵", "2345", "360安全卫士", "360杀毒", "金山毒霸"],
+        "tasks": ["鲁大师", "驱动精灵", "2345", "360安全卫士", "360杀毒", "金山毒霸"]
+      },
+      "actions": { "service": "uninstall", "process": "uninstall", "autostart": "uninstall", "task": "uninstall" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "cn-360",
+      "vendor": "Generic",
+      "name_cn": "360 全家桶",
+      "risk": "high",
+      "safe": true,
+      "reason_cn": "360 安全卫士/杀毒，常驻 + 弹窗推广，日常很吃后台资源；若依赖其防护需自行权衡（系统自带 Defender 足够）",
+      "detect": {
+        "services": ["360Safe", "360tray", "360sd"],
+        "processes": ["360Safe", "360tray", "360sd"],
+        "autostarts": ["360Safe", "360tray"],
+        "tasks": []
+      },
+      "actions": { "service": "uninstall", "process": "uninstall", "autostart": "uninstall" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "cn-ludashi",
+      "vendor": "Generic",
+      "name_cn": "鲁大师",
+      "risk": "high",
+      "safe": true,
+      "reason_cn": "鲁大师，跑分/监控工具但常驻弹窗，卸载后不影响系统任何功能",
+      "detect": {
+        "services": ["LuDaShi", "ludashi"],
+        "processes": ["LuDaShi", "ludashi"],
+        "autostarts": ["LuDaShi", "ludashi"],
+        "tasks": []
+      },
+      "actions": { "service": "uninstall", "process": "uninstall", "autostart": "uninstall" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "cn-drivergenius",
+      "vendor": "Generic",
+      "name_cn": "驱动精灵",
+      "risk": "high",
+      "safe": true,
+      "reason_cn": "驱动精灵，自动装驱动有风险且常驻后台；驱动更新建议用厂商官网或 Windows 更新",
+      "detect": {
+        "services": ["DrvGen", "drivergenius"],
+        "processes": ["DrvGen", "drivergenius"],
+        "autostarts": ["DrvGen", "drivergenius"],
+        "tasks": []
+      },
+      "actions": { "service": "uninstall", "process": "uninstall", "autostart": "uninstall" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
+    },
+    {
+      "id": "generic-updater",
+      "vendor": "Generic",
+      "name_cn": "通用自动更新器",
+      "risk": "low",
+      "safe": false,
+      "reason_cn": "自动更新器本身常见，但若多个同时常驻会持续占 CPU；按具体厂商判断，别一刀切禁用（safe=false 只报告）",
+      "detect": {
+        "services": [],
+        "processes": ["updater.exe"],
+        "autostarts": [],
+        "tasks": []
+      },
+      "actions": { "process": "investigate" },
+      "evidence": { "tested": false, "tested_count": 0, "tested_models": [], "last_verified": null }
     }
   ],
   "keep_notes_cn": [
@@ -282,6 +376,7 @@
     "厂商硬件功能服务（Fn 键、电源管理、WiFi、触控板、显卡驱动）禁用会坏功能",
     "游戏外设软件（雷蛇/罗技/外星人）用户在用就别禁",
     "不确定的条目选 investigate（人工调查）而不是直接禁用",
-    "所有处理前工具会自动备份，可一键恢复"
+    "所有处理前工具会自动备份，可一键恢复",
+    "evidence.tested=false 的条目是未经实机验证的参考规则，程序只报告不自动处理"
   ]
 }

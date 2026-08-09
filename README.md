@@ -16,6 +16,19 @@
 
 ---
 
+## 使用方式总览
+
+这台工具提供**两条路**，按你适合的选：
+
+| 方案 | 适合谁 | 入口 |
+|---|---|---|
+| **A. 工具自动**（推荐） | 会用命令行，想要"扫描→确认→处理→可恢复"闭环 | 本 README「快速开始」，三条命令搞定 |
+| **B. 手动整理** | 不想碰命令行 / 给别人用 / 想逐项亲手操作 | `手动整理方案.md`，纯 Windows 自带功能 |
+
+> 工具自动处理前会自动备份、可一键恢复；手动方案胜在每一步都看得见。两者结论互通——工具扫描报告里的"建议禁用项"，就是手动方案里要手动禁的服务/自启/任务。
+
+---
+
 ## 快速开始
 
 ```powershell
@@ -91,27 +104,57 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ---
 
-## 特征库扩展
+## 特征库扩展（Schema 2.0）
 
-`bloatware-profiles.json` 是一个纯数据文件，发现新机型/新软件后往里加一条即可，不用改代码：
+`bloatware-profiles.json` 是纯数据文件（schema_version=2），发现新机型/新软件往里加一条即可，不用改代码：
 
 ```json
 {
-  "id": "厂商-标识",
+  "id": "厂商-标识",              // 必须唯一
   "vendor": "Lenovo",
-  "name": "显示名",
   "name_cn": "中文名",
-  "type": "service | app | scheduled_task | process",
-  "match": ["匹配关键词1", "匹配关键词2"],
   "risk": "high | medium | low",
-  "action": "disable_service | remove_autostart | disable_task | uninstall | none | investigate",
-  "safe": true,
-  "reason_cn": "处理原因（中文，会显示在报告和确认清单里）"
+  "safe": true,                   // false = 只报告, 永不进执行队列
+  "reason_cn": "处理原因（会显示在报告和确认清单里）",
+  "detect": {                     // 每种检测对象的匹配关键词
+    "services":  ["LeMCPManagerService"],
+    "processes": ["mcpman.exe"],
+    "autostarts": [],
+    "tasks": []
+  },
+  "actions": {                    // 每种检测对象对应的动作
+    "service": "disable_service",
+    "process": "investigate"
+  },
+  "evidence": {                   // 证据体系: tested=false 表示未实测
+    "tested": true,
+    "tested_count": 1,
+    "tested_models": ["Lenovo ThinkBook 16p G6 ADR (21U0)"],
+    "last_verified": "2026-08-09"
+  }
 }
 ```
 
-匹配规则：服务名/显示名、自启项名/值、计划任务名/路径、进程名，任一含关键词即命中。
-**注意：关键词不要太泛**（如 "PCManager" 会误伤联想电脑管家，"AutoUpdate" 会误伤 Windows 时区更新服务），要精确到厂商专属名。
+**程序启动时自动校验，错误规则直接拒绝加载：**
+- schema_version 必须 = 2（过低/过高都拒绝；无字段的 v1 旧格式自动转换）
+- id 必须存在且唯一
+- risk 必须是 high/medium/low
+- action 必须是 disable_service / remove_autostart / disable_task / uninstall / investigate / none
+- detect 不能全空（四类至少一个关键词）
+- **safe=false 的规则只能配 none/investigate，配了危险动作（disable/remove/uninstall）直接拒绝**
+
+**动作类型说明：**
+
+| 动作 | 含义 | 进执行队列吗 |
+|---|---|---|
+| disable_service | 禁用服务 | ✅ |
+| remove_autostart | 删除开机自启项 | ✅ |
+| disable_task | 禁用计划任务 | ✅ |
+| uninstall | 提示人工去"设置-应用"卸载（不自动执行） | ✅（标记 manual_required） |
+| investigate | 只报告，人工调查 | ❌ |
+| none | 只报告（safe=false 常用） | ❌ |
+
+**证据纪律：** 没实机验证过的规则 `tested=false`，程序只报告不自动处理，并在报告里标注"参考规则"；实测过的规则标注机型/日期。宁缺毋滥——100 条验证过的规则比 1000 条抄来的有价值。
 
 ---
 
@@ -133,6 +176,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ## 版本记录
 
+- 2026-08-09 v1.3（Schema 2.0）：特征库重构为 detect/actions 分离结构 + schema_version + evidence 证据字段；新增 Load-Profiles 启动校验（id 唯一/risk 合法/action 合法/detect 非空/safe=false 禁危险动作，错误规则拒绝加载）；v1 旧格式自动转换；同 id 去重避免重复待办；报告显示实测证据；update 下载后先完整校验再替换。新增 schema 单元测试 12 项（合计 41 项全过）。修复 v1 转换后 actions 为 hashtable 导致 PSObject.Properties 遍历到元属性的 bug（新增 Get-ActionKeys/Get-ActionFor 统一处理）。
 - 2026-08-09 v1.2（Reliability Release）：① 修复 restore 服务启动类型映射（Automatic→auto/Manual→demand/Disabled→disabled，兼容旧数字枚举 manifest），备份记录启动类型+运行状态+DelayedAutoStart；② safe=false 强制只报告永不进执行队列（-YesToAll 也拒绝）；③ done 布尔改五态状态机 pending/success/failed/skipped/manual_required，重跑幂等；④ 修复 HTML 报告 $SysInfo 未定义变量（系统概况原本为空）；⑤ 每个 clean 动作执行后重新读取真实状态验证（服务 StartType/注册表值/任务 State），通过才标 success。新增 tests/ 单元测试 29 项全过，scan→clean→幂等→restore 集成回归通过。
 - 2026-08-09 v1.1.1：审查修复 5 处 PowerShell 陷阱——① clean 写回 JSON 用 -InputObject 防管道展开（原会把完整清单写成单对象/空文件）；② 清单读取 null 防御（$null 进管道产生 @($null) 导致空备份）；③ 数组序列化用变量构造（if/else 表达式输出空数组会变 $null 序列化成 {}）；④ 空 manifest 写 []；⑤ restore 对空/损坏备份报错退出。本机回归 scan→clean→clean 幂等全通过。
 - 2026-08-09 v1.1：重构落地——① clean 改用结构化字段（不再拆显示字符串，杜绝错位）；② 特征命中多类型同时列出（同一软件的服务+自启+任务不遗漏）；③ 新增未知高占用进程检测（可疑路径/无签名→人工调查，不进自动清单）；④ clean 可显式输入 PID 结束可疑进程（绝不自动杀）；⑤ 服务触发器提示（Manual 却 Running 的第三方服务单独列出）；⑥ 特征库扩展至 23 条（补 360/鲁大师/驱动精灵/Dell Command Update 等）；⑦ clean 打印 sc 执行结果；⑧ pending done 标记利用（重跑跳过已完成）；⑨ HTML 报告美化（CSS 表格）；⑩ 新增 -Mode update 特征库更新机制。

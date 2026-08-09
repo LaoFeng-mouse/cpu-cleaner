@@ -51,4 +51,4 @@ Assert-Equal 'skipped 跳过' (& $statusFilter 'skipped') $false
 Assert-Equal 'manual_required 跳过' (& $statusFilter 'manual_required') $false
 
 Write-Host "`n结果: $pass 通过, $fail 失败" -ForegroundColor Cyan
-if ($fail -gt 0) { exit 1 } else { Write-Host 'ALL TESTS PASSED' -ForegroundColor Green; exit 0 }
+if ($fail -gt 0) { throw 'UNIT LOGIC TESTS FAILED' } else { Write-Host 'ALL LOGIC TESTS PASSED' -ForegroundColor Green }
