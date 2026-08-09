@@ -63,7 +63,7 @@ $converted = Load-Profiles -Path $tmp2
 Remove-Item $tmp2 -ErrorAction SilentlyContinue
 Assert-Equal 'v1 转换: schema_version=2' $converted.schema_version 2
 Assert-Equal 'v1 转换: detect.services[0]=OldService' @($converted.profiles[0].detect.services)[0] 'OldService'
-Assert-Equal 'v1 转换: actions.service=disable_service' $converted.profiles[0].actions.service 'disable_service'
+Assert-Equal 'v1 转换: actions.service=investigate(降级)' $converted.profiles[0].actions.service 'investigate'
 
 Write-Host "`n结果: $pass 通过, $fail 失败" -ForegroundColor Cyan
 if ($fail -gt 0) { throw 'SCHEMA TESTS FAILED' } else { Write-Host 'ALL SCHEMA TESTS PASSED' -ForegroundColor Green }

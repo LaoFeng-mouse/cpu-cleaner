@@ -33,15 +33,6 @@ foreach ($s in $validStates) {
 }
 Assert-Equal "非法状态 rejected" ($validStates -contains 'done') $false
 
-# 5. safe=false 规则: 模拟 Save-PendingActions 的过滤条件
-$hitSafeFalse = @{ safe = $false; action = 'disable_service' }
-$hitSafeTrue  = @{ safe = $true;  action = 'disable_service' }
-$enterQueue = { param($h) if ($h.action -in @('none','investigate')) { return $false }; if (-not $h.safe) { return $false }; return $true }
-Assert-Equal 'safe=false 不进队列' (& $enterQueue $hitSafeFalse) $false
-Assert-Equal 'safe=true 进队列' (& $enterQueue $hitSafeTrue) $true
-Assert-Equal 'action=none 不进队列' (& $enterQueue @{ safe=$true; action='none' }) $false
-Assert-Equal 'action=investigate 不进队列' (& $enterQueue @{ safe=$true; action='investigate' }) $false
-
 # 6. 状态机过滤逻辑: clean 只处理 pending/failed
 $statusFilter = { param($s) $s -in @('pending','failed') }
 Assert-Equal 'pending 处理' (& $statusFilter 'pending') $true

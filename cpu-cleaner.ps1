@@ -31,6 +31,8 @@ $script:PendingFile = Join-Path $script:Root 'pending_actions.json'
 $script:BackupRoot = Join-Path $script:Root 'backups'
 # 特征库更新地址(可选): 填入指向 bloatware-profiles.json 的 URL 后可用 -Mode update
 $script:ProfileUrl = ''
+# v1.5.1 供应链安全: 特征库 SHA256 校验文件地址 (与 ProfileUrl 配套发布, 可选但强烈建议)
+$script:ProfileSha256Url = ''
 
 # ---------- 工具函数 ----------
 function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
@@ -68,6 +70,10 @@ function Convert-ProfilesV1ToV2($old) {
                 $actions.autostart = $p.action; $actions.task = $p.action
             }
             default         { $detect.processes = @($p.match); $actions.process = $p.action }
+        }
+        # v1.5.1 P0: 旧库规则一律视为未实测, 危险动作降级为 investigate (只报告)
+        foreach ($ak in @($actions.Keys)) {
+            if ($script:DangerousActions -contains $actions[$ak]) { $actions[$ak] = 'investigate' }
         }
         $newProfiles += [pscustomobject]@{
             id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
@@ -134,6 +140,15 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                         }
                     }
                 }
+                # v1.5.1 P0: evidence.tested=false 只能配 none/investigate (证据纪律)
+                if ($p.evidence -and -not $p.evidence.tested) {
+                    foreach ($ak in Get-ActionKeys $p.actions) {
+                        $av = Get-ActionFor $p.actions $ak
+                        if ($script:DangerousActions -contains $av) {
+                            $errors += "id=$($p.id) evidence.tested=false 但 actions.$ak=$av (未实测规则禁止危险动作)"
+                        }
+                    }
+                }
             }
         }
     }
@@ -175,6 +190,12 @@ function Get-ActionFor($act, $key) {
     }
     if ($act.PSObject.Properties.Name -contains $key) { return $act.$key }
     return 'none'
+}
+
+# v1.5.1 P1: 进程名标准化 (mcpman.exe / MCPMAN.EXE / mcpman / C:\x\mcpman.exe → mcpman)
+function Normalize-ProcessName($name) {
+    if (-not $name) { return '' }
+    return ([System.IO.Path]::GetFileNameWithoutExtension($name)).ToLowerInvariant()
 }
 
 # ---------- 1. 系统与 CPU 概况 ----------
@@ -283,17 +304,17 @@ function Get-ProcessRiskScore {
     # +20 非系统目录
     if ($proc.Path -and $proc.Path -notmatch '^C:\\Windows\\') { $score += 20; $reasons += '非系统目录' }
 
-    # +15 开机自启
-    if ($AutoStartNames -contains $proc.Name) { $score += 15; $reasons += '开机自启' }
+    # +15 开机自启 (v1.5.1: 双方标准化后比较)
+    if ($AutoStartNames -contains (Normalize-ProcessName $proc.Name)) { $score += 15; $reasons += '开机自启' }
 
     # +15 高 CPU (瞬时采样 >5%, 报告标注为瞬时值)
     if ($proc.'CPU%' -gt 5) { $score += 15; $reasons += "CPU$($proc.'CPU%')%" }
 
-    # 签名: +10 无有效签名 / -40 Microsoft 签名
+    # 签名 (v1.5.1 P1: Microsoft 分支必须同时满足 Status -eq Valid, 防止"主题像微软但签名无效"吃到 -40)
     if ($proc.Path) {
         try {
             $sig = Get-AuthenticodeSignature $proc.Path -ErrorAction SilentlyContinue
-            if ($sig -and $sig.SignerCertificate -and $sig.SignerCertificate.Subject -match 'Microsoft') {
+            if ($sig -and $sig.Status -eq 'Valid' -and $sig.SignerCertificate -and $sig.SignerCertificate.Subject -match 'Microsoft') {
                 $score -= 40; $reasons += 'Microsoft签名'
             } elseif ($sig -and $sig.Status -ne 'Valid') {
                 $score += 10; $reasons += '无有效签名'
@@ -318,13 +339,13 @@ function Get-ProcessRiskScore {
     return [pscustomobject]@{ Score = $score; Level = (Get-RiskLevel $score); Reasons = ($reasons -join ',') }
 }
 
-# 从自启列表提取进程名集合 (用于评分 +15 开机自启)
+# 从自启列表提取进程名集合 (v1.5.1: 统一标准化为无扩展名小写, 用于评分 +15 开机自启)
 function Get-AutoStartProcessNames($AutoStarts) {
     $names = @()
     foreach ($a in $AutoStarts) {
         $v = $a.Value -replace '"', ''
-        if ($v -match '([^\s"\\/]+\.exe)') { $names += $matches[1] }
-        $names += $a.Name
+        if ($v -match '([^\s"\\/]+\.exe)') { $names += Normalize-ProcessName $matches[1] }
+        $names += Normalize-ProcessName $a.Name
     }
     return @($names | Where-Object { $_ } | Select-Object -Unique)
 }
@@ -445,10 +466,11 @@ function Match-Profiles {
                 }
             }
         }
-        # 进程命中 (Top CPU 进程, 动作按 actions.process)
+        # 进程命中 (Top CPU 进程, 动作按 actions.process; v1.5.1: 进程名标准化匹配)
         if (-not $nullDet -and @($det.processes).Count -gt 0) {
             foreach ($tp in $TopProcs) {
-                $m = @($det.processes) | Where-Object { $tp.Name -like "*$_*" } | Select-Object -First 1
+                $normProc = Normalize-ProcessName $tp.Name
+                $m = @($det.processes) | Where-Object { $normProc -like "*$(Normalize-ProcessName $_)*" } | Select-Object -First 1
                 if ($m) {
                     $action = Get-ActionFor $act 'process'
                     $hits += New-Hit $p 'process' "$($tp.Name) PID=$($tp.PID) CPU=$($tp.'CPU%')%" '' '' '' '' $tp.Name $action
@@ -580,9 +602,12 @@ function Save-PendingActions($Hits, $Suspicious) {
         if ($h.action -eq 'none' -or $h.action -eq 'investigate') { continue }
         # v1.2 强制规则: safe=false 只报告, 永不进入待办队列 (即使 -YesToAll 也不能执行)
         if (-not $h.safe) { continue }
-        # v1.3: 同一 id 的多个命中只保留第一条 (避免同一软件重复待办)
-        if ($seenActionIds.ContainsKey($h.id)) { continue }
-        $seenActionIds[$h.id] = $true
+        # v1.5.1 P0: evidence.tested=false 只报告, 永不进入待办队列 (证据纪律)
+        if ($h.evidence -and -not $h.evidence.tested) { continue }
+        # v1.3 去重: 同一 id+类型+目标 只保留一条 (不丢同一软件的不同动作)
+        $dedupeKey = "$($h.id)|$($h.hit_type)|$($h.service_name)|$($h.autostart_name)|$($h.task_path)|$($h.process_name)"
+        if ($seenActionIds.ContainsKey($dedupeKey)) { continue }
+        $seenActionIds[$dedupeKey] = $true
 
         # 跳过已经是目标状态的条目
         $skip = $false
@@ -1020,7 +1045,24 @@ function Update-Profiles {
     try {
         $tmp = Join-Path $script:Root 'bloatware-profiles.json.tmp'
         Invoke-WebRequest -Uri $script:ProfileUrl -OutFile $tmp -UseBasicParsing -TimeoutSec 30
-        # v1.3: 用 Load-Profiles 完整校验 (schema_version / id / risk / action / detect / safe 规则)
+
+        # v1.5.1 供应链安全: 配置了 SHA256 地址则先校验哈希, 不一致拒绝替换
+        if ($script:ProfileSha256Url) {
+            $shaTmp = Join-Path $script:Root 'bloatware-profiles.json.sha256.tmp'
+            Invoke-WebRequest -Uri $script:ProfileSha256Url -OutFile $shaTmp -UseBasicParsing -TimeoutSec 30
+            $expected = (Get-Content $shaTmp -Raw).Trim() -split '\s+' | Select-Object -First 1
+            $actual = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
+            Remove-Item $shaTmp -ErrorAction SilentlyContinue
+            if ($expected -ne $actual) {
+                Remove-Item $tmp -ErrorAction SilentlyContinue
+                throw "SHA256 校验失败: 期望 $expected, 实际 $actual (更新地址可能被篡改, 已中止)"
+            }
+            Write-Host "  SHA256 校验通过: $actual" -ForegroundColor Green
+        } else {
+            Write-Host '  警告: 未配置 ProfileSha256Url, 跳过哈希校验 (建议配置以防供应链攻击)' -ForegroundColor DarkYellow
+        }
+
+        # v1.3: 用 Load-Profiles 完整校验 (schema_version / id / risk / action / detect / safe / tested 规则)
         $check = Load-Profiles -Path $tmp
         if ($check -and $check.profiles) {
             $bak = Join-Path $script:Root ('bloatware-profiles.json.bak.' + (Get-Date -Format 'yyyyMMdd_HHmmss'))

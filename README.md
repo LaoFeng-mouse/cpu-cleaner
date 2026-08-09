@@ -198,6 +198,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ## 已知限制
 
+- **restore 恢复的是"持久化配置"而非"运行时原状"**：服务恢复 StartType/DelayedAutoStart，原运行状态（Running）会提示用户手动 `sc start`，默认不自动拉起（保守，避免误启服务）；删除的自启项/禁用的任务则完整还原。
 - **卸载动作不自动执行**：uninstall 只提示，需要人工到"设置-应用"卸载（安全考虑）
 - **NOT_STOPPABLE 服务**（如联想 LISFService）：禁用成功但进程杀不掉，重启后消失，工具会如实提示
 - **自我保护服务**（如联想 HRWSCCtrl）：拒绝访问禁不掉属正常，工具标记为"别硬刚"

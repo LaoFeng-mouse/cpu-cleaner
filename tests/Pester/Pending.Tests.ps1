@@ -12,7 +12,7 @@ Describe '待办清单规则' {
         function Should-Be {
             param([Parameter(ValueFromPipeline)]$actual, $expected)
             process {
-                if ((Get-Module Pester).Version.Major -ge 5) { $actual | Should -Be $expected }
+                if ((Get-Module Pester).Version.Major -ge 5) { $actual | Should-Be $expected }
                 else { $actual | Should Be $expected }
             }
         }
@@ -26,14 +26,31 @@ Describe '待办清单规则' {
         $script:PendingFile = Join-Path $env:TEMP ("pending_" + [guid]::NewGuid().ToString('N') + ".json")
     }
 
-    It '同一规则(id)不会重复动作' {
+    It '同一 id 不同动作都保留(不丢 autostart)' {
         $hits = @(
             [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true },
             [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='remove_autostart'; hit_type='autostart'; detail='X'; reason_cn='r'; service_name=''; autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='X'; task_path=''; process_name=''; safe=$true }
         )
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        @($p.actions).Count | Should-Be 2
+    }
+    It '完全重复(同 id+类型+目标)才去重' {
+        $hits = @(
+            [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true },
+            [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true }
+        )
+        Save-PendingActions -Hits $hits -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should-Be 1
+    }
+    It 'tested=false 永不进入待办队列(P0)' {
+        $hits = @(
+            [pscustomobject]@{ id='d'; vendor='T'; name_cn='D'; action='disable_service'; hit_type='service'; detail='S4'; reason_cn='r'; service_name='S4'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; evidence=[pscustomobject]@{ tested=$false } }
+        )
+        Save-PendingActions -Hits $hits -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        @($p.actions).Count | Should-Be 0
     }
     It 'safe=false 永不进入待办队列' {
         $hits = @(
