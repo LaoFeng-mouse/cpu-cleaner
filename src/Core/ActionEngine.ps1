@@ -212,6 +212,21 @@ function ConvertFrom-StrictPendingJson($Json) {
     return $Json | ConvertFrom-Json -ErrorAction Stop
 }
 
+function Test-PendingSchemaSupported($Pending) {
+    if ($null -eq $Pending) { return $false }
+    $schemaProperty = $null
+    foreach ($property in $Pending.PSObject.Properties) {
+        if ([string]::Equals($property.Name, 'pending_schema_version', [System.StringComparison]::Ordinal)) {
+            $schemaProperty = $property
+            break
+        }
+    }
+    if ($null -eq $schemaProperty) { return $false }
+    $version = $schemaProperty.Value
+    if ($version -isnot [int32] -and $version -isnot [int64]) { return $false }
+    return ([int64]2).Equals([int64]$version)
+}
+
 function Test-PendingJsonFileLength($Length) {
     $integerTypes = @([byte],[uint16],[uint32],[int16],[int32],[int64])
     $isInteger = $false
@@ -622,6 +637,10 @@ function Invoke-Clean {
     }
     $pendingRaw = Read-LimitedPendingJsonFile $script:PendingFile
     $pending = ConvertFrom-StrictPendingJson $pendingRaw
+    if (-not (Test-PendingSchemaSupported $pending)) {
+        Write-Host '错误: pending 清单版本旧或不兼容。请重新运行 scan 生成新清单。' -ForegroundColor Red
+        return
+    }
     # null 防御: $pending.actions 为空/null 时不得产生 @($null) 元素 (管道展开陷阱)
     # v1.2 状态机: 只处理 pending(待办) 和 failed(可重试); success/skipped/manual_required 跳过
     $actions = @()

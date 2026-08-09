@@ -21,6 +21,59 @@ Describe '待办清单规则' {
         Mock Get-ItemProperty { [pscustomobject]@{ X = 'C:\fake\X.exe' } } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
     }
 
+    It '仅接受 Int32 pending schema v2' {
+        Test-PendingSchemaSupported ([pscustomobject]@{ pending_schema_version = [int32]2 }) | Should -BeTrue
+    }
+
+    It '接受 Windows PowerShell ConvertFrom-Json 可能产生的 Int64 schema v2' {
+        Test-PendingSchemaSupported ([pscustomobject]@{ pending_schema_version = [int64]2 }) | Should -BeTrue
+    }
+
+    It '拒绝缺失、空值、错误版本及非整数标量 pending schema' {
+        $unsupported = @(
+            [pscustomobject]@{},
+            [pscustomobject]@{ pending_schema_version = $null },
+            [pscustomobject]@{ pending_schema_version = [int32]1 },
+            [pscustomobject]@{ pending_schema_version = [int32]3 },
+            [pscustomobject]@{ pending_schema_version = '2' },
+            [pscustomobject]@{ pending_schema_version = [double]2.0 },
+            [pscustomobject]@{ pending_schema_version = [decimal]2 },
+            [pscustomobject]@{ pending_schema_version = $true },
+            [pscustomobject]@{ pending_schema_version = @([int32]2) },
+            [pscustomobject]@{ pending_schema_version = [pscustomobject]@{ value = 2 } }
+        )
+
+        foreach ($pending in $unsupported) {
+            Test-PendingSchemaSupported $pending | Should -BeFalse
+        }
+    }
+
+    It 'Invoke-Clean 在读取 actions 和 Load-Profiles 前拒绝旧 pending envelope' {
+        $actionEnginePath = Join-Path $projectRoot 'src\Core\ActionEngine.ps1'
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($actionEnginePath, [ref]$tokens, [ref]$parseErrors)
+        @($parseErrors).Count | Should -Be 0
+        $invokeClean = $ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-Clean'
+        }, $true)
+        $body = $invokeClean.Body.Extent.Text
+
+        $convertIndex = $body.IndexOf('$pending = ConvertFrom-StrictPendingJson $pendingRaw')
+        $gateIndex = $body.IndexOf('Test-PendingSchemaSupported $pending')
+        $actionsIndex = $body.IndexOf('$pending.actions')
+        $profilesIndex = $body.IndexOf('Load-Profiles')
+
+        $convertIndex | Should -BeGreaterOrEqual 0
+        $gateIndex | Should -BeGreaterThan $convertIndex
+        $gateIndex | Should -BeLessThan $actionsIndex
+        $gateIndex | Should -BeLessThan $profilesIndex
+        $body.Substring($gateIndex, $actionsIndex - $gateIndex) | Should -Match '\breturn\b'
+        $body | Should -Match '旧|不兼容'
+        $body | Should -Match 'scan'
+    }
+
     It '同一 id 不同动作都保留(不丢 autostart)' {
         $hits = @(
             [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' },
