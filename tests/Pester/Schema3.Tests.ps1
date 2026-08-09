@@ -58,7 +58,7 @@ Describe 'Test-DetectMatch (match_type 分发)' {
 
 Describe '进程标准化匹配保持字面语义' {
     It 'Match-Profiles 不把 contains 通配符解释为模式' {
-        $tmp = Join-Path $env:TEMP ("s3_process_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3_process.json'
         $originalProfileFile = $script:ProfileFile
         try {
             [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"process-wildcard","vendor":"T","name_cn":"进程字面匹配","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"execution":{"allow_auto":true},"detect":{"services":[],"processes":[{"match":"foo*bar","type":"contains"}],"autostarts":[],"tasks":[]},"actions":{"process":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
@@ -91,7 +91,7 @@ Describe '进程标准化匹配保持字面语义' {
     }
 
     It 'Match-Profiles 对 regex 使用标准化后的进程名' {
-        $tmp = Join-Path $env:TEMP ("s3_process_regex_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3_process_regex.json'
         $originalProfileFile = $script:ProfileFile
         try {
             [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"process-regex","vendor":"T","name_cn":"进程正则匹配","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"execution":{"allow_auto":true},"detect":{"services":[],"processes":[{"match":"^foo$","type":"regex"}],"autostarts":[],"tasks":[]},"actions":{"process":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
@@ -122,38 +122,38 @@ Describe '进程标准化匹配保持字面语义' {
 
 Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
     It 'exact 危险动作无需 allow_auto 保留' {
-        $tmp = Join-Path $env:TEMP ("s3a_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3a.json'
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"S1","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         $p = Load-Profiles -Path $tmp
         Remove-Item $tmp -ErrorAction SilentlyContinue
         $p.profiles[0].actions.service | Should -Be 'disable_service'
     }
     It 'contains 危险动作加载时保留声明值' {
-        $tmp = Join-Path $env:TEMP ("s3b_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3b.json'
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"S1","type":"contains"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         $p = Load-Profiles -Path $tmp
         Remove-Item $tmp -ErrorAction SilentlyContinue
         $p.profiles[0].actions.service | Should -Be 'disable_service'
     }
     It 'contains 危险动作 + allow_auto=true 加载时保留声明值' {
-        $tmp = Join-Path $env:TEMP ("s3c_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3c.json'
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"execution":{"allow_auto":true,"review_note":"实机验证"},"detect":{"services":[{"match":"S1","type":"contains"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         $p = Load-Profiles -Path $tmp
         Remove-Item $tmp -ErrorAction SilentlyContinue
         $p.profiles[0].actions.service | Should -Be 'disable_service'
     }
     It 'regex 危险动作加载时保留声明值' {
-        $tmp = Join-Path $env:TEMP ("s3d_" + [guid]::NewGuid().ToString('N') + ".json")
-        [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"S1","type":"regex"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_task","process":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
+        $tmp = Join-Path $TestDrive 's3d.json'
+        [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"S1","type":"regex"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service","process":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         $p = Load-Profiles -Path $tmp
         Remove-Item $tmp -ErrorAction SilentlyContinue
-        $p.profiles[0].actions.service | Should -Be 'disable_task'
+        $p.profiles[0].actions.service | Should -Be 'disable_service'
     }
 }
 
 Describe 'Schema 3.0 命中证据与逐命中执行闸门' {
     It '混合规则按实际命中证据决定动作并保留规则顺序' {
-        $tmp = Join-Path $env:TEMP ("s3_hit_mixed_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3_hit_mixed.json'
         $originalProfileFile = $script:ProfileFile
         try {
             [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"mixed-service","vendor":"Lenovo","name_cn":"混合服务规则","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"execution":{"allow_auto":true},"detect":{"services":[{"match":"LenovoExactService","type":"exact"},{"match":"Lenovo","type":"contains"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
@@ -183,7 +183,7 @@ Describe 'Schema 3.0 命中证据与逐命中执行闸门' {
     }
 
     It 'pure contains 即使 allow_auto=true 也只生成 investigate 命中' {
-        $tmp = Join-Path $env:TEMP ("s3_hit_contains_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3_hit_contains.json'
         $originalProfileFile = $script:ProfileFile
         try {
             [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"broad-service","vendor":"Lenovo","name_cn":"宽服务规则","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"execution":{"allow_auto":true},"detect":{"services":[{"match":"Lenovo","type":"contains"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
@@ -201,7 +201,7 @@ Describe 'Schema 3.0 命中证据与逐命中执行闸门' {
     }
 
     It '记录实际命中的 service display name 字段' {
-        $tmp = Join-Path $env:TEMP ("s3_hit_display_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3_hit_display.json'
         $originalProfileFile = $script:ProfileFile
         try {
             [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"display-service","vendor":"Lenovo","name_cn":"显示名规则","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"detect":{"services":[{"match":"Lenovo Display Service","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
@@ -221,33 +221,188 @@ Describe 'Schema 3.0 命中证据与逐命中执行闸门' {
     }
 }
 
+Describe 'Schema 3.0 进程字段语义隔离' {
+    It '路径形 exact 不得通过同名进程在其他路径命中' {
+        $tmp = Join-Path $TestDrive 's3_process_exact_path.json'
+        $originalProfileFile = $script:ProfileFile
+        try {
+            [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"process-exact-path","vendor":"T","name_cn":"进程路径精确匹配","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"detect":{"services":[],"processes":[{"match":"C:\\Trusted\\foo.exe","type":"exact"}],"autostarts":[],"tasks":[]},"actions":{"process":"uninstall"}}]}', (New-Object System.Text.UTF8Encoding($false)))
+            $script:ProfileFile = $tmp
+
+            $wrongPathHits = @(Match-Profiles -Services @() -AutoStarts @() -Tasks @() -TopProcs @([pscustomobject]@{ Name = 'foo.exe'; PID = 41; 'CPU%' = 1; Path = 'C:\Elsewhere\foo.exe' }))
+            $trustedPathHits = @(Match-Profiles -Services @() -AutoStarts @() -Tasks @() -TopProcs @([pscustomobject]@{ Name = 'foo.exe'; PID = 42; 'CPU%' = 1; Path = 'C:\Trusted\foo.exe' }))
+
+            $wrongPathHits.Count | Should -Be 0
+            $trustedPathHits.Count | Should -Be 1
+            $trustedPathHits[0].action | Should -Be 'uninstall'
+            $trustedPathHits[0].matched_pattern | Should -Be 'C:\Trusted\foo.exe'
+            $trustedPathHits[0].matched_type | Should -Be 'exact'
+            $trustedPathHits[0].matched_field | Should -Be 'process_path'
+            $trustedPathHits[0].process_id | Should -Be 42
+            $trustedPathHits[0].process_path | Should -Be 'C:\Trusted\foo.exe'
+        } finally {
+            $script:ProfileFile = $originalProfileFile
+            Remove-Item $tmp -ErrorAction SilentlyContinue
+        }
+    }
+
+    It '<type> 证据只归因于 process_path' -TestCases @(
+        @{ type = 'publisher'; match = 'Trusted Publisher' }
+        @{ type = 'sha256'; match = 'ABC123' }
+    ) {
+        param($type, $match)
+        $context = [pscustomobject]@{
+            Path = 'C:\Trusted\foo.exe'
+            Signature = [pscustomobject]@{ SignerCertificate = [pscustomobject]@{ Subject = 'CN=Trusted Publisher' } }
+            FileHash = 'ABC123'
+        }
+        $candidates = @(
+            [pscustomobject]@{ field = 'process_name'; value = 'foo.exe'; context = $context },
+            [pscustomobject]@{ field = 'process_path'; value = 'C:\Trusted\foo.exe'; context = $context }
+        )
+
+        $evidence = Find-DetectMatch @([pscustomobject]@{ match = $match; type = $type }) $candidates -NormalizeProcessName
+
+        $evidence | Should -Not -BeNullOrEmpty
+        $evidence.matched_pattern | Should -Be $match
+        $evidence.matched_type | Should -Be $type
+        $evidence.matched_field | Should -Be 'process_path'
+    }
+}
+
+Describe 'Schema 3.0 matched_field 覆盖矩阵' {
+    It '为自启、任务和进程的每种候选字段各生成一条命中' {
+        $tmp = Join-Path $TestDrive 's3_field_matrix.json'
+        $originalProfileFile = $script:ProfileFile
+        try {
+            $profiles = @(
+                [pscustomobject]@{ id='auto-name'; vendor='T'; name_cn='a1'; risk='high'; safe=$true; reason_cn='r'; evidence=[pscustomobject]@{tested=$true}; detect=[pscustomobject]@{services=@();processes=@();autostarts=@([pscustomobject]@{match='AutoName';type='exact'});tasks=@()}; actions=[pscustomobject]@{autostart='investigate'} },
+                [pscustomobject]@{ id='auto-value'; vendor='T'; name_cn='a2'; risk='high'; safe=$true; reason_cn='r'; evidence=[pscustomobject]@{tested=$true}; detect=[pscustomobject]@{services=@();processes=@();autostarts=@([pscustomobject]@{match='C:\Vendor\auto.exe';type='exact'});tasks=@()}; actions=[pscustomobject]@{autostart='investigate'} },
+                [pscustomobject]@{ id='task-name'; vendor='T'; name_cn='t1'; risk='high'; safe=$true; reason_cn='r'; evidence=[pscustomobject]@{tested=$true}; detect=[pscustomobject]@{services=@();processes=@();autostarts=@();tasks=@([pscustomobject]@{match='NameTask';type='exact'})}; actions=[pscustomobject]@{task='investigate'} },
+                [pscustomobject]@{ id='task-path'; vendor='T'; name_cn='t2'; risk='high'; safe=$true; reason_cn='r'; evidence=[pscustomobject]@{tested=$true}; detect=[pscustomobject]@{services=@();processes=@();autostarts=@();tasks=@([pscustomobject]@{match='\Vendor\FullTask';type='exact'})}; actions=[pscustomobject]@{task='investigate'} },
+                [pscustomobject]@{ id='proc-name'; vendor='T'; name_cn='p1'; risk='high'; safe=$true; reason_cn='r'; evidence=[pscustomobject]@{tested=$true}; detect=[pscustomobject]@{services=@();processes=@([pscustomobject]@{match='foo.exe';type='exact'});autostarts=@();tasks=@()}; actions=[pscustomobject]@{process='investigate'} },
+                [pscustomobject]@{ id='proc-path'; vendor='T'; name_cn='p2'; risk='high'; safe=$true; reason_cn='r'; evidence=[pscustomobject]@{tested=$true}; detect=[pscustomobject]@{services=@();processes=@([pscustomobject]@{match='C:\Trusted';type='path'});autostarts=@();tasks=@()}; actions=[pscustomobject]@{process='investigate'} }
+            )
+            $json = [pscustomobject]@{ schema_version = 3; profiles = $profiles } | ConvertTo-Json -Depth 10
+            [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+            $script:ProfileFile = $tmp
+
+            $hits = @(Match-Profiles -Services @() -AutoStarts @(
+                [pscustomobject]@{ Name='AutoName'; Value='C:\Other\one.exe'; Source='HKCU' },
+                [pscustomobject]@{ Name='OtherAuto'; Value='C:\Vendor\auto.exe'; Source='HKLM' }
+            ) -Tasks @(
+                [pscustomobject]@{ TaskName='NameTask'; TaskPath='\Other\'; State='Ready' },
+                [pscustomobject]@{ TaskName='FullTask'; TaskPath='\Vendor\'; State='Ready' }
+            ) -TopProcs @(
+                [pscustomobject]@{ Name='FOO.EXE'; PID=51; 'CPU%'=1; Path='C:\Elsewhere\foo.exe' },
+                [pscustomobject]@{ Name='bar.exe'; PID=52; 'CPU%'=1; Path='C:\Trusted\bar.exe' }
+            ))
+
+            $expectedFields = @{
+                'auto-name'='autostart_name'; 'auto-value'='autostart_value'
+                'task-name'='task_name'; 'task-path'='task_path'
+                'proc-name'='process_name'; 'proc-path'='process_path'
+            }
+            $hits.Count | Should -Be 6
+            foreach ($id in $expectedFields.Keys) {
+                $profileHits = @($hits | Where-Object { $_.id -eq $id })
+                $profileHits.Count | Should -Be 1
+                $profileHits[0].matched_field | Should -Be $expectedFields[$id]
+            }
+            @($hits | Where-Object { $_.id -eq 'task-path' })[0].task_path | Should -Be '\Vendor\FullTask'
+            $nameProcess = @($hits | Where-Object { $_.id -eq 'proc-name' })[0]
+            $nameProcess.process_id | Should -Be 51
+            $nameProcess.process_path | Should -Be 'C:\Elsewhere\foo.exe'
+            $pathProcess = @($hits | Where-Object { $_.id -eq 'proc-path' })[0]
+            $pathProcess.process_id | Should -Be 52
+            $pathProcess.process_path | Should -Be 'C:\Trusted\bar.exe'
+            $pathProcess.matched_type | Should -Be 'path'
+        } finally {
+            $script:ProfileFile = $originalProfileFile
+            Remove-Item $tmp -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Describe 'Schema 3.0 格式校验' {
     It '非法 match_type → 拒绝加载' {
-        $tmp = Join-Path $env:TEMP ("s3e_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3e.json'
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"S1","type":"bogus"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         { Load-Profiles -Path $tmp } | Should -Throw '*匹配类型非法*'
         Remove-Item $tmp -ErrorAction SilentlyContinue
     }
     It '空 match 项 → 拒绝加载' {
-        $tmp = Join-Path $env:TEMP ("s3f_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3f.json'
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         { Load-Profiles -Path $tmp } | Should -Throw '*空匹配项*'
         Remove-Item $tmp -ErrorAction SilentlyContinue
     }
     It 'schema_version=4 → 拒绝加载' {
-        $tmp = Join-Path $env:TEMP ("s3g_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3g.json'
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":4,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"S1","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         { Load-Profiles -Path $tmp } | Should -Throw '*高于程序支持的 v3*'
         Remove-Item $tmp -ErrorAction SilentlyContinue
     }
     It 'allow_auto 非布尔 → 拒绝加载' {
-        $tmp = Join-Path $env:TEMP ("s3h_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3h.json'
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","execution":{"allow_auto":"yes"},"detect":{"services":[{"match":"S1","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         { Load-Profiles -Path $tmp } | Should -Throw '*allow_auto 必须是布尔值*'
         Remove-Item $tmp -ErrorAction SilentlyContinue
     }
+    It 'safe <label> → 拒绝加载' -TestCases @(
+        @{ label='missing'; fragment='' }
+        @{ label='null'; fragment='"safe":null,' }
+        @{ label='string'; fragment='"safe":"true",' }
+        @{ label='number'; fragment='"safe":1,' }
+        @{ label='array'; fragment='"safe":[true],' }
+    ) {
+        param($label, $fragment)
+        $tmp = Join-Path $TestDrive ("safe_$label.json")
+        $json = '{"schema_version":3,"profiles":[{"id":"safe-type","vendor":"T","name_cn":"测试","risk":"high",' + $fragment + '"reason_cn":"r","detect":{"services":[{"match":"S1","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"investigate"}}]}'
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+
+        { Load-Profiles -Path $tmp } | Should -Throw '*safe 必须是布尔值*'
+    }
+    It 'evidence.tested <label> → 拒绝加载' -TestCases @(
+        @{ label='null'; value='null' }
+        @{ label='string'; value='"true"' }
+        @{ label='number'; value='1' }
+        @{ label='array'; value='[true]' }
+    ) {
+        param($label, $value)
+        $tmp = Join-Path $TestDrive ("tested_$label.json")
+        $json = '{"schema_version":3,"profiles":[{"id":"tested-type","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":' + $value + '},"detect":{"services":[{"match":"S1","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"investigate"}}]}'
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+
+        { Load-Profiles -Path $tmp } | Should -Throw '*evidence.tested 必须是布尔值*'
+    }
+    It 'evidence 或 tested 缺失兼容加载且 safe=false 非危险动作有效' {
+        $tmp = Join-Path $TestDrive 'optional_evidence.json'
+        [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"no-evidence","vendor":"T","name_cn":"a","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"A","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}},{"id":"no-tested","vendor":"T","name_cn":"b","risk":"high","safe":true,"reason_cn":"r","evidence":{},"detect":{"services":[{"match":"B","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}},{"id":"safe-false","vendor":"T","name_cn":"c","risk":"high","safe":false,"reason_cn":"r","evidence":{"tested":false},"detect":{"services":[{"match":"C","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
+
+        $loaded = Load-Profiles -Path $tmp
+
+        @($loaded.profiles).Count | Should -Be 3
+    }
+    It '危险动作闸门对缺失、false 或非布尔安全字段失败关闭' {
+        $matchEvidence = [pscustomobject]@{ matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }
+        $profiles = @(
+            [pscustomobject]@{ actions=[pscustomobject]@{service='disable_service'}; safe=$true },
+            [pscustomobject]@{ actions=[pscustomobject]@{service='disable_service'}; safe=$true; evidence=[pscustomobject]@{} },
+            [pscustomobject]@{ actions=[pscustomobject]@{service='disable_service'}; safe=$true; evidence=[pscustomobject]@{tested=$false} },
+            [pscustomobject]@{ actions=[pscustomobject]@{service='disable_service'}; safe=$false; evidence=[pscustomobject]@{tested=$true} },
+            [pscustomobject]@{ actions=[pscustomobject]@{service='disable_service'}; safe='true'; evidence=[pscustomobject]@{tested=$true} },
+            [pscustomobject]@{ actions=[pscustomobject]@{service='disable_service'}; safe=1; evidence=[pscustomobject]@{tested=$true} },
+            [pscustomobject]@{ actions=[pscustomobject]@{service='disable_service'}; safe=$true; evidence=[pscustomobject]@{tested='true'} },
+            [pscustomobject]@{ actions=[pscustomobject]@{service='disable_service'}; safe=$true; evidence=[pscustomobject]@{tested=1} }
+        )
+
+        foreach ($profile in $profiles) {
+            Get-EffectiveHitAction $profile 'service' $matchEvidence | Should -Be 'investigate'
+        }
+    }
     It 'v2 字符串格式自动迁移为 v3 (转换后 detect 对象化 + schema_version=3)' {
-        $tmp = Join-Path $env:TEMP ("s3i_" + [guid]::NewGuid().ToString('N') + ".json")
+        $tmp = Join-Path $TestDrive 's3i.json'
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":2,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":["S1"],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
         $p = Load-Profiles -Path $tmp
         Remove-Item $tmp -ErrorAction SilentlyContinue

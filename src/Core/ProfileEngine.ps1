@@ -100,11 +100,27 @@ function Test-ProcessDetectMatch($target, $pattern, $Context = $null) {
 function Find-DetectMatch($Patterns, $Candidates, [switch]$NormalizeProcessName) {
     foreach ($pattern in @($Patterns)) {
         $n = Normalize-DetectItem $pattern
+        $processField = ''
+        if ($NormalizeProcessName) {
+            switch ($n.type) {
+                'exact' {
+                    $pathShaped = [System.IO.Path]::IsPathRooted($n.match) -or $n.match.IndexOf('\') -ge 0 -or $n.match.IndexOf('/') -ge 0
+                    $processField = if ($pathShaped) { 'process_path' } else { 'process_name' }
+                }
+                'contains'  { $processField = 'process_name' }
+                'regex'     { $processField = 'process_name' }
+                'path'      { $processField = 'process_path' }
+                'publisher' { $processField = 'process_path' }
+                'sha256'    { $processField = 'process_path' }
+                default     { continue }
+            }
+        }
         foreach ($candidate in @($Candidates)) {
             if (-not $candidate) { continue }
             $field = [string]$candidate.field
+            if ($NormalizeProcessName -and $field -ne $processField) { continue }
             $matched = $false
-            if ($NormalizeProcessName -and $field -eq 'process_name') {
+            if ($processField -eq 'process_name') {
                 $matched = Test-ProcessDetectMatch $candidate.value $n -Context $candidate.context
             } else {
                 $matched = Test-DetectMatch $candidate.value $n -Context $candidate.context
@@ -177,6 +193,17 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
             if (-not $p.id) { $errors += "规则缺少 id (vendor=$($p.vendor))" }
             elseif ($seen.ContainsKey($p.id)) { $errors += "id 重复: $($p.id)" }
             else { $seen[$p.id] = $true }
+            # 安全字段禁止 PowerShell 真值/比较强制转换: 必须显式存在且为布尔值
+            if ($p.PSObject.Properties.Name -notcontains 'safe' -or $p.safe -isnot [bool]) {
+                $errors += "id=$($p.id) safe 必须是布尔值"
+            }
+            $hasTested = $false
+            if ($p.PSObject.Properties.Name -contains 'evidence' -and $null -ne $p.evidence) {
+                $hasTested = $p.evidence.PSObject.Properties.Name -contains 'tested'
+                if ($hasTested -and $p.evidence.tested -isnot [bool]) {
+                    $errors += "id=$($p.id) evidence.tested 必须是布尔值"
+                }
+            }
             # risk 合法
             if ($p.risk -and ($script:ValidRisks -notcontains $p.risk)) { $errors += "id=$($p.id) risk 非法: $($p.risk)" }
             # detect 非空
@@ -211,7 +238,7 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                     }
                 }
                 # v1.5.1 P0: evidence.tested=false 只能配 none/investigate (证据纪律)
-                if ($p.evidence -and -not $p.evidence.tested) {
+                if ($hasTested -and $p.evidence.tested -is [bool] -and $p.evidence.tested -eq $false) {
                     foreach ($ak in Get-ActionKeys $p.actions) {
                         $av = Get-ActionFor $p.actions $ak
                         if ($script:DangerousActions -contains $av) {
@@ -284,8 +311,9 @@ function Get-ActionFor($act, $key) {
 function Get-EffectiveHitAction($profile, $hitType, $evidence) {
     $declaredAction = Get-ActionFor $profile.actions $hitType
     if ($script:DangerousActions -notcontains $declaredAction) { return $declaredAction }
-    if ($profile.safe -ne $true) { return 'investigate' }
-    if (-not $profile.evidence -or $profile.evidence.tested -ne $true) { return 'investigate' }
+    if ($profile.PSObject.Properties.Name -notcontains 'safe' -or $profile.safe -isnot [bool] -or $profile.safe -ne $true) { return 'investigate' }
+    if ($profile.PSObject.Properties.Name -notcontains 'evidence' -or $null -eq $profile.evidence) { return 'investigate' }
+    if ($profile.evidence.PSObject.Properties.Name -notcontains 'tested' -or $profile.evidence.tested -isnot [bool] -or $profile.evidence.tested -ne $true) { return 'investigate' }
     if (-not $evidence -or $evidence.matched_type -notin @('exact','path')) { return 'investigate' }
     return $declaredAction
 }
