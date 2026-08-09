@@ -6,7 +6,23 @@
 
 ### 计划
 - 特征库数字签名验证（profiles.json.sig + 内置公钥）：SHA256 只能防下载损坏/镜像不一致/单文件篡改，攻击者同时控制 JSON 与 SHA256 下载地址时可整体替换——真正身份验证需要签名
+- 多品牌规则实测积累：当前 23 条规则中 Lenovo 11 条全实测，非联想规则大多 tested=false→investigate（正确但价值有限）。10 分方向是逐台实机积累 Dell/HP/ASUS/Xiaomi/Acer/MSI/Huawei 规则（每台机器扫描→人工确认→补 evidence 实测字段）
 - v2.0 GUI（鼠鼠风格 WPF 壳，进行中）
+
+## [1.5.3] - 2026-08-09
+
+### 安全（P0）
+- **clean 提权后重新验证授权动作**：不再单纯信任 pending_actions.json——clean 加载清单后按当前特征库逐条确认（新增 `Test-PendingActionAuthorized`）：id 存在 / tested=true / safe=true / action 等于规则允许动作 / target 确实匹配规则 detect（与 Match-Profiles 同款模糊语义）。未授权条目标 skipped 不执行并在输出中列明；特征库校验失败直接中止（安全第一）
+
+### 修复（P1）
+- GUI 扫描轮询只处理 `Completed`：Job 进入 Failed/Stopped 时按钮永久禁用、进度条停 90%。统一收尾函数 `Complete-ScanPoll` 三态全处理，失败时显示错误
+- GUI 执行/恢复反馈不可靠：原来 `Start-Process -Wait` 结束即提示「执行完成/已恢复」。改为 `-PassThru` + ExitCode 检查 + 重新读回 pending_actions.json 状态机统计（success/failed/skipped/manual）明确展示；restore 按 ExitCode 0/2/其他 区分成功/部分失败/失败
+- CLI restore 执行后验证：每项恢复后重读真实状态（服务 StartType / 注册表自启项 / 计划任务存在），失败标红并 exit 2
+
+### 工程
+- GUI 无窗口测试套件（tests/Gui.Tests.ps1 + run-gui-tests.ps1，STA 运行）：XAML 加载、鼠鼠图片资源、中英文切换、扫描轮询四态、clean 统计汇总——GUI 是主要入口，CI 必须保护它
+- CI：新增 GUI 测试步骤（PS5.1 STA）；PSScriptAnalyzer 覆盖 gui-cleaner.ps1
+- 授权验证单测 11 项（tests/Pester/Auth.Tests.ps1）：伪造 id/篡改 action/篡改 target/tested=false/safe=false 全部拒绝
 
 ## [1.5.2] - 2026-08-09
 

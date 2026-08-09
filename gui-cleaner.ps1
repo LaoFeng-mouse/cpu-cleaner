@@ -8,10 +8,12 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:Lang = 'zh'   # zh / en
+# v1.5.3: 测试模式 (SHUSHU_CLEANER_TEST=1) — 跳过单实例检查与窗口显示, 供 CI 无窗口验证 (Pester)
+$script:TestMode = ($env:SHUSHU_CLEANER_TEST -eq '1')
 
-# ---------- 单实例: 只能开一个窗口 ----------
+# ---------- 单实例: 只能开一个窗口 (测试模式跳过) ----------
 $existing = Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID -and $_.MainWindowTitle -match '鼠鼠cleaner' }
-if ($existing) {
+if ($existing -and -not $script:TestMode) {
     Add-Type -AssemblyName PresentationFramework
     [System.Windows.MessageBox]::Show('鼠鼠cleaner 已经在运行了，请到已打开的窗口操作。', '鼠鼠cleaner', 'OK', 'Warning') | Out-Null
     exit 0
@@ -26,8 +28,9 @@ $script:I18N = @{
         BtnLoad='读取待处理清单'; PendingHint='显示扫描后需要处理的项目（未扫描或清单为空则无内容）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。到【3. 执行】页一键处理。'
         ExecInfo1='点击下面按钮，会把【处理建议】里的全部项目处理掉。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
         BtnExec='执行全部处理（需要管理员）'; ExecEmpty='没有待处理项目，请先扫描。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
+        ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2}'
         BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
-        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。详见管理员窗口。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复出错或被取消: {0}'
+        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。详见管理员窗口。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复出错或被取消: {0}'; RestorePartial='恢复完成，但部分条目验证失败（详见管理员窗口）。'
         LangLabel='EN'
     }
     'en' = @{
@@ -37,8 +40,9 @@ $script:I18N = @{
         BtnLoad='Load Pending Items'; PendingHint='Items to process after scan (empty if none)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Go to tab 3 to process.'
         ExecInfo1='Click below to process all recommended items.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
         BtnExec='Process All (admin)'; ExecEmpty='No pending items. Scan first.'; ExecStart='Processing {0} item(s). UAC requested, click YES…'; ExecDone='Processing done. See tab 4 (restart PC recommended).'
+        ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2}'
         BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
-        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}. See admin window.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed/cancelled: {0}'
+        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}. See admin window.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed/cancelled: {0}'; RestorePartial='Restore finished, but some items failed verification (see admin window).'
         LangLabel='中文'
     }
 }
@@ -247,6 +251,33 @@ function Get-PendingItems {
     return @($p.actions)
 }
 
+# v1.5.3: 扫描 job 收尾统一处理 — Completed 成功 / Failed / Stopped 都要恢复 UI
+# 返回 $true 表示 job 已结束 (轮询 timer 应停止), $false 表示仍在运行
+function Complete-ScanPoll {
+    param($job, $checkTimer, $scanTimer, $btn, $prog, $out)
+    if ($job.State -notin @('Completed','Failed','Stopped')) { return $false }
+    $checkTimer.Stop()
+    $scanTimer.Stop()
+    try { $result = Receive-Job $job -ErrorAction SilentlyContinue } catch { $result = '' }
+    try { Remove-Job $job -Force -ErrorAction SilentlyContinue } catch {}
+    $prog.Value = 100
+    if ($job.State -eq 'Completed') { $out.Text = $result }
+    else { $out.Text = "扫描失败 (后台任务状态: $($job.State))`r`n$result" }
+    $btn.IsEnabled = $true
+    return $true
+}
+
+# v1.5.3: clean 完成后读回 pending_actions.json 状态机统计 (不信任"进程结束=成功")
+function Get-CleanResultSummary {
+    $items = @(Get-PendingItems)
+    $sum = @{ success = 0; failed = 0; skipped = 0; manual_required = 0; pending = 0 }
+    foreach ($i in $items) {
+        $s = if ($i.status) { $i.status.ToString() } else { 'pending' }
+        if ($sum.ContainsKey($s)) { $sum[$s]++ } else { $sum['pending']++ }
+    }
+    return $sum
+}
+
 # ---------- 语言切换 ----------
 $window.FindName('BtnLang').Add_Click({
     if ($script:Lang -eq 'zh') { $script:Lang = 'en' } else { $script:Lang = 'zh' }
@@ -276,18 +307,12 @@ $window.FindName('BtnScan').Add_Click({
     $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$script:Root\cpu-cleaner.ps1`" -Mode scan"
     $job = Start-Job -ScriptBlock { param($c) cmd /c $c 2>&1 | Out-String } -ArgumentList $cmd
 
-    # 轮询 job 完成 (UI 不卡: 用第二个 timer)
+    # 轮询 job 完成 (UI 不卡: 用第二个 timer; v1.5.3: Completed/Failed/Stopped 都收尾)
     $checkTimer = New-Object System.Windows.Threading.DispatcherTimer
     $checkTimer.Interval = [TimeSpan]::FromMilliseconds(800)
     $checkTimer.Add_Tick({
-        if ($job.State -eq 'Completed') {
+        if (Complete-ScanPoll -job $job -checkTimer $checkTimer -scanTimer $script:ScanTimer -btn $btn -prog $prog -out $out) {
             $checkTimer.Stop()
-            $script:ScanTimer.Stop()
-            $result = Receive-Job $job
-            Remove-Job $job -Force
-            $prog.Value = 100
-            $out.Text = $result
-            $btn.IsEnabled = $true
         }
     })
     $checkTimer.Start()
@@ -321,9 +346,30 @@ $window.FindName('BtnExec').Add_Click({
     }
     $hint.Text = ((Get-Text 'ExecStart') -f $items.Count)
     try {
-        Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$script:Root\cpu-cleaner.ps1",'-Mode','clean','-YesToAll' -Wait
-        $hint.Text = (Get-Text 'ExecDone')
-        $out.Text = (Get-Text 'ExecDone')
+        $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll'
+        $proc.WaitForExit()
+        if ($proc.ExitCode -ne 0) {
+            # v1.5.3: 管理员进程异常退出 (UAC 取消会抛异常, 走到 catch; 非 0 = 脚本内致命错误)
+            $msg = (Get-Text 'ExecFailed') -f $proc.ExitCode
+            $hint.Text = $msg
+            $out.Text = $msg
+            return
+        }
+        # v1.5.3: 读回状态机统计, 不信任"进程结束=成功"
+        $sum = Get-CleanResultSummary
+        $lines = @(
+            (Get-Text 'ExecDone'),
+            '',
+            '结果汇总:',
+            "  success: $($sum.success)",
+            "  failed:  $($sum.failed)",
+            "  skipped: $($sum.skipped)",
+            "  manual:  $($sum.manual_required)"
+        )
+        $latest = Get-ChildItem (Join-Path $script:Root 'backups') -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($latest) { $lines += ''; $lines += "备份目录: backups\$($latest.Name)" }
+        $hint.Text = ((Get-Text 'ExecDoneSum') -f $sum.success, $sum.failed, $sum.skipped)
+        $out.Text = ($lines -join "`r`n")
     } catch {
         $hint.Text = "ERR: $($_.Exception.Message)"
     }
@@ -360,12 +406,25 @@ $window.FindName('BtnRestore').Add_Click({
         return
     }
     try {
-        Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$script:Root\cpu-cleaner.ps1",'-Mode','restore','-BackupDir',"$script:Root\backups\$($latest.Name)" -Wait
-        [System.Windows.MessageBox]::Show(((Get-Text 'RestoreOk') -f $latest.Name), (Get-Text 'AppName'), 'OK', 'Information') | Out-Null
+        $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','restore','-BackupDir',"`"$script:Root\backups\$($latest.Name)`""
+        $proc.WaitForExit()
+        if ($proc.ExitCode -eq 0) {
+            [System.Windows.MessageBox]::Show(((Get-Text 'RestoreOk') -f $latest.Name), (Get-Text 'AppName'), 'OK', 'Information') | Out-Null
+        } elseif ($proc.ExitCode -eq 2) {
+            # v1.5.3: CLI restore 执行后验证有失败
+            [System.Windows.MessageBox]::Show((Get-Text 'RestorePartial'), (Get-Text 'AppName'), 'OK', 'Warning') | Out-Null
+        } else {
+            [System.Windows.MessageBox]::Show(((Get-Text 'RestoreErr') -f "ExitCode=$($proc.ExitCode)"), (Get-Text 'AppName'), 'OK', 'Warning') | Out-Null
+        }
     } catch {
         [System.Windows.MessageBox]::Show(((Get-Text 'RestoreErr') -f $_.Exception.Message), (Get-Text 'AppName'), 'OK', 'Warning') | Out-Null
     }
 })
 
 Apply-Language
-$window.ShowDialog() | Out-Null
+if ($script:TestMode) {
+    # 测试模式: 不显示窗口, 暴露窗口对象供 Pester 无窗口断言
+    $script:TestWindow = $window
+} else {
+    $window.ShowDialog() | Out-Null
+}

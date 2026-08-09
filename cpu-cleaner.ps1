@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 v1.5.2 (cpu-cleaner.ps1) — 多维检测与风险评分
+#  CPU 后台整理工具 v1.5.3 (cpu-cleaner.ps1) — 多维检测与风险评分
 #  适用: Windows 10/11, PowerShell 5.1+
 #
 #  用法:
@@ -30,7 +30,7 @@ $script:ProfileFile = Join-Path $script:Root 'bloatware-profiles.json'
 $script:PendingFile = Join-Path $script:Root 'pending_actions.json'
 $script:BackupRoot = Join-Path $script:Root 'backups'
 # v1.5.2: 版本号全局唯一 (文本报告/HTML 页脚统一引用, 不再手改多处)
-$script:Version = '1.5.2'
+$script:Version = '1.5.3'
 # 特征库更新地址(可选): 填入指向 bloatware-profiles.json 的 URL 后可用 -Mode update
 $script:ProfileUrl = ''
 # v1.5.1 供应链安全: 特征库 SHA256 校验文件地址 (与 ProfileUrl 配套发布, 可选但强烈建议)
@@ -756,6 +756,31 @@ function Save-PendingActions($Hits, $Suspicious) {
 }
 
 # ---------- 10. clean 模式 ----------
+# v1.5.3 P0: 提权后重新验证授权动作 (不信任 pending_actions.json)
+# pending_actions.json 在 scan 与管理员 clean 之间可能被人为修改,
+# clean 必须按当前特征库重新确认: id 存在 / tested=true / safe=true / action 匹配 / target 匹配
+function Test-PendingActionAuthorized($p, $profiles) {
+    # 1. id 必须存在于当前特征库 (防伪造 id)
+    $rule = @($profiles.profiles | Where-Object { $_.id -eq $p.id }) | Select-Object -First 1
+    if (-not $rule) { return $false }
+    # 2. 证据纪律: 未实测规则禁止危险动作 (Schema 层已保证, 纵深防御)
+    if ($rule.evidence -and -not $rule.evidence.tested) { return $false }
+    # 3. safe 强制规则
+    if (-not $rule.safe) { return $false }
+    # 4. action 必须等于规则允许该命中类型的动作 (防改 action)
+    if ($p.action -ne (Get-ActionFor $rule.actions $p.hit_type)) { return $false }
+    # 5. target 必须确实是规则 detect 的对象 (与 Match-Profiles 同样的模糊匹配语义)
+    $det = $rule.detect
+    $targetOk = $false
+    switch ($p.hit_type) {
+        'service'   { $targetOk = $p.service_name -and (@($det.services | Where-Object { $p.service_name -like "*$_*" }).Count -gt 0) }
+        'autostart' { $targetOk = $p.autostart_name -and (@($det.autostarts | Where-Object { $p.autostart_name -like "*$_*" }).Count -gt 0) }
+        'task'      { $targetOk = $p.task_path -and (@($det.tasks | Where-Object { $p.task_path -like "*$_*" }).Count -gt 0) }
+        'process'   { $targetOk = $p.process_name -and (@($det.processes | Where-Object { (Normalize-ProcessName $p.process_name) -like "*$(Normalize-ProcessName $_)*" }).Count -gt 0) }
+    }
+    return $targetOk
+}
+
 # v1.2: 服务启动类型映射 (sc.exe 参数 vs StartType 枚举)
 function Convert-StartTypeToSc($startType) {
     switch ($startType.ToString()) {
@@ -821,6 +846,26 @@ function Invoke-Clean {
     if ($pending.actions) { $actions = @($pending.actions | Where-Object { $_ -and $_.status -in @('pending','failed') }) }
     $suspicious = @()
     if ($pending.suspicious) { $suspicious = @($pending.suspicious) }
+
+    # v1.5.3 P0: 提权后重新验证 — 不信任 pending_actions.json, 按当前特征库授权
+    try { $profiles = Load-Profiles } catch {
+        Write-Host ('特征库校验失败, clean 中止 (安全第一): ' + $_.Exception.Message) -ForegroundColor Red
+        exit 1
+    }
+    $authorized = @()
+    $rejected = @()
+    foreach ($a in $actions) {
+        if (Test-PendingActionAuthorized $a $profiles) { $authorized += $a }
+        else { $rejected += $a; $a.status = 'skipped' }
+    }
+    if ($rejected.Count -gt 0) {
+        Write-Host ('拒绝 {0} 条未授权动作 (与当前特征库不一致, 清单可能被修改, 已标 skipped 不执行):' -f $rejected.Count) -ForegroundColor Red
+        foreach ($r in $rejected) {
+            $tgt = ($r.service_name + $r.autostart_name + $r.task_path + $r.process_name)
+            Write-Host ('  拒绝: id={0} action={1} hit={2} target={3}' -f $r.id, $r.action, $r.hit_type, $tgt) -ForegroundColor Red
+        }
+    }
+    $actions = $authorized
 
     if ($actions.Count -eq 0) {
         Write-Host '待办动作已全部完成或为空。' -ForegroundColor Green
@@ -1065,6 +1110,8 @@ function Invoke-Restore {
         exit 1
     }
     Write-Step "从备份恢复: $BackupDir"
+    # v1.5.3: 执行后验证 — 每项恢复完重读真实状态, 有失败则 exit 2 供 GUI/CI 区分
+    $restoreFailed = $false
 
     foreach ($m in $manifest) {
         switch ($m.type) {
@@ -1083,6 +1130,16 @@ function Invoke-Restore {
                 }
                 Write-Host "  恢复服务 $($m.name): sc config start= $scVal" -ForegroundColor Yellow
                 sc.exe config $m.name start= $scVal
+
+                # v1.5.3: 执行后验证 (重读 StartType, 不能"命令执行过=成功")
+                $after = Get-Service -Name $m.name -ErrorAction SilentlyContinue
+                if ($after -and (Convert-StartTypeToSc $after.StartType.ToString()) -eq $scVal) {
+                    Write-Host "  验证通过: StartType=$($after.StartType)" -ForegroundColor Green
+                } else {
+                    $actual = if ($after) { Convert-StartTypeToSc $after.StartType.ToString() } else { '服务不存在' }
+                    Write-Host "  验证失败: 当前 StartType=$actual (期望 $scVal)" -ForegroundColor Red
+                    $restoreFailed = $true
+                }
 
                 # 恢复 DelayedAutoStart (v1.2)
                 if ($m.PSObject.Properties.Name -contains 'delayed_autostart') {
@@ -1111,6 +1168,15 @@ function Invoke-Restore {
             'autostart' {
                 Write-Host "  恢复自启项(reg import): $($m.backup)" -ForegroundColor Yellow
                 reg import $m.backup
+                # v1.5.3: 执行后验证 (重读注册表属性)
+                $keyAfter = Get-ItemProperty $m.key -ErrorAction SilentlyContinue
+                $restored = $keyAfter -and ($keyAfter.PSObject.Properties | Where-Object { $_.Name -eq $m.name })
+                if ($restored) {
+                    Write-Host "  验证通过: 自启项已恢复: $($m.name)" -ForegroundColor Green
+                } else {
+                    Write-Host "  验证失败: 自启项 $($m.name) 未恢复" -ForegroundColor Red
+                    $restoreFailed = $true
+                }
             }
             'task' {
                 Write-Host "  恢复计划任务: $($m.name)" -ForegroundColor Yellow
@@ -1118,13 +1184,26 @@ function Invoke-Restore {
                 $taskName = $m.name.Split('\')[-1]
                 $taskFolder = $m.name.Substring(0, $m.name.Length - $taskName.Length)
                 Register-ScheduledTask -Xml $xml -TaskName $taskName -TaskPath $taskFolder -Force | Out-Null
+                # v1.5.3: 执行后验证 (重读任务存在)
+                $taskAfter = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
+                if ($taskAfter) {
+                    Write-Host "  验证通过: 计划任务已恢复: $($m.name)" -ForegroundColor Green
+                } else {
+                    Write-Host "  验证失败: 计划任务 $($m.name) 未恢复" -ForegroundColor Red
+                    $restoreFailed = $true
+                }
             }
             'process' {
                 Write-Host "  进程 $($m.name) 无法自动恢复, 如需恢复请手动启动: $($m.path)" -ForegroundColor Yellow
             }
         }
     }
+    if ($restoreFailed) {
+        Write-Step '恢复完成, 但存在验证失败的条目 (见上方红色提示)。'
+        exit 2
+    }
     Write-Step '恢复完成。'
+    exit 0
 }
 
 # ---------- 12. 特征库更新 (C10) ----------

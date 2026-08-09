@@ -212,6 +212,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ## 版本记录
 
+- 2026-08-09 v1.5.3（安全边界）：clean 提权后按当前特征库重新验证授权动作（Test-PendingActionAuthorized：id/tested/safe/action/target 五重确认，不信任被改过的 pending_actions.json）；GUI 扫描轮询三态收尾（Completed/Failed/Stopped）；GUI 执行/恢复检查 ExitCode 并读回状态统计；CLI restore 执行后验证 + exit 0/2；GUI 无窗口测试套件 + CI 覆盖。
 - 2026-08-09 v1.5.2（CI 假绿根治）：移除 Pester 断言兼容包装（`Should-Be` 绑定错误导致断言从未执行、39 项全空转仍绿），全部改原生 `Should -Be`；CI 固定 Pester 5.9.0（PS5.1/PS7 双跑）；Pending 测试 Mock Windows 状态（Get-Service/Get-ItemProperty/Get-ScheduledTask）使结果与跑测试的机器无关；版本号全局化 $script:Version 单点引用；HTML 报告与文本报告统一（Top CPU 风险分/评分依据 + 风险分级汇总 + 计划任务 + evidence）。
 - 2026-08-09 v1.5（Pester + CI）：新增 Pester 测试套件 tests/Pester/（6 个文件 37 项：特征库加载/待办清单/清理动作/恢复兼容/扫描评分/报告输出，覆盖空 profile/错误 JSON/去重/safe 规则/映射/中文输出）；GitHub Actions CI（PS 5.1 单元测试 + PS5.1/PS7 双跑 Pester + PSScriptAnalyzer + schema 校验），README 加 CI 徽章。修复自启进程名提取对带参数路径的解析。本机 Pester 37 项全过。
 - 2026-08-09 v1.4（多维检测与风险评分）：新增进程综合评分体系（进程名+路径+签名+自启+CPU+特征库 六维信号，评分分级 正常/建议观察/可优化/高度建议处理，只报告不自动执行）；报告第 2 节加风险分列、新增风险分级汇总节；特征库命中显示风险分数；校准 Git/msys 工具目录避免同目录误加分；联想 Appvant 入特征库。新增双击启动器（1-扫描.bat/2-清理.bat/3-恢复.bat，纯 ASCII 规避 cmd 中文解析坑）+ 零基础操作指南.md；评分单元测试 13 项（合计 54 项全过）。
