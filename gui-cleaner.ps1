@@ -1,23 +1,82 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 - 鼠鼠版图形界面 (gui-cleaner.ps1)
-#  需要: Windows 10/11 + PowerShell 5.1 (自带 WPF, 无需安装)
-#  用法: powershell -NoProfile -ExecutionPolicy Bypass -File gui-cleaner.ps1
-#  或双击 "鼠鼠版-图形界面.bat"
+#  鼠鼠cleaner - 图形界面 (gui-cleaner.ps1)
+#  需要: Windows 10/11 + PowerShell 5.1 (自带 WPF)
+#  用法: 双击 鼠鼠cleaner.bat 或 powershell -File gui-cleaner.ps1
 # ============================================================
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:Lang = 'zh'   # zh / en
 
-# ---------- 鼠鼠风格 XAML (镜像大脸鼠: 黑色大圆脸 + 橘黄耳内) ----------
+# ---------- 单实例: 只能开一个窗口 ----------
+$existing = Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID -and $_.MainWindowTitle -match '鼠鼠cleaner' }
+if ($existing) {
+    Add-Type -AssemblyName PresentationFramework
+    [System.Windows.MessageBox]::Show('鼠鼠cleaner 已经在运行了，请到已打开的窗口操作。', '鼠鼠cleaner', 'OK', 'Warning') | Out-Null
+    exit 0
+}
+
+# ---------- 中英文文案 ----------
+$script:I18N = @{
+    'zh' = @{
+        AppName='鼠鼠cleaner'; SubTitle='扫描 · 清理 · 恢复 —— 全程自动备份，后悔可还原'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
+        TabScan='🐹 1. 扫描（只读）'; TabPending='📋 2. 处理建议'; TabExec='⚙️ 3. 执行（管理员）'; TabResult='✅ 4. 结果与恢复'
+        BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
+        BtnLoad='读取待处理清单'; PendingHint='显示扫描后需要处理的项目（未扫描或清单为空则无内容）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。到【3. 执行】页一键处理。'
+        ExecInfo1='点击下面按钮，会把【处理建议】里的全部项目处理掉。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
+        BtnExec='执行全部处理（需要管理员）'; ExecEmpty='没有待处理项目，请先扫描。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
+        BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
+        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。详见管理员窗口。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复出错或被取消: {0}'
+        LangLabel='EN'
+    }
+    'en' = @{
+        AppName='Shushu Cleaner'; SubTitle='Scan · Clean · Restore — auto backup, undo anytime'; Hint0='GUI is a shell; core logic is identical to CLI'
+        TabScan='🐹 1. Scan (read-only)'; TabPending='📋 2. Recommendations'; TabExec='⚙️ 3. Execute (admin)'; TabResult='✅ 4. Result & Restore'
+        BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
+        BtnLoad='Load Pending Items'; PendingHint='Items to process after scan (empty if none)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Go to tab 3 to process.'
+        ExecInfo1='Click below to process all recommended items.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
+        BtnExec='Process All (admin)'; ExecEmpty='No pending items. Scan first.'; ExecStart='Processing {0} item(s). UAC requested, click YES…'; ExecDone='Processing done. See tab 4 (restart PC recommended).'
+        BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
+        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}. See admin window.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed/cancelled: {0}'
+        LangLabel='中文'
+    }
+}
+
+function Get-Text($key) { return $script:I18N[$script:Lang][$key] }
+
+function Apply-Language {
+    $t = Get-Text
+    $w = $window
+    $w.Title = $t['AppName']
+    $w.FindName('TitleMain').Text = $t['AppName']
+    $w.FindName('TitleSub').Text = $t['SubTitle']
+    $w.FindName('TitleHint').Text = $t['Hint0']
+    $w.FindName('TabScan').Header = $t['TabScan']
+    $w.FindName('TabPending').Header = $t['TabPending']
+    $w.FindName('TabExec').Header = $t['TabExec']
+    $w.FindName('TabResult').Header = $t['TabResult']
+    $w.FindName('BtnScan').Content = $t['BtnScan']
+    $w.FindName('ScanHint').Text = $t['ScanHint']
+    $w.FindName('BtnLoadPending').Content = $t['BtnLoad']
+    $w.FindName('PendingHint').Text = $t['PendingHint']
+    $w.FindName('ExecInfo1').Text = $t['ExecInfo1']
+    $w.FindName('ExecInfo2').Text = $t['ExecInfo2']
+    $w.FindName('BtnExec').Content = $t['BtnExec']
+    $w.FindName('BtnResult').Content = $t['BtnResult']
+    $w.FindName('BtnRestore').Content = $t['BtnRestore']
+    $w.FindName('ResultHint').Text = $t['ResultHint']
+    $w.FindName('BtnLang').Content = $t['LangLabel']
+}
+
+# ---------- 鼠鼠风格 XAML ----------
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="CPU 后台整理工具 - 鼠鼠版" Width="860" Height="620"
+        Title="鼠鼠cleaner" Width="880" Height="660"
         WindowStartupLocation="CenterScreen" Background="#FFF6DC"
         FontFamily="Microsoft YaHei UI" FontSize="13">
   <Window.Resources>
-    <!-- 鼠鼠头部几何 (viewBox 240, 与乐不思鼠 MascotRat.tsx 同参数) -->
     <StreamGeometry x:Key="RatHeadGeo">M45 58 C58 46 182 46 195 58 C220 72 236 98 238 128 C240 156 198 180 120 180 C42 180 0 156 2 128 C4 98 20 72 45 58 Z</StreamGeometry>
   </Window.Resources>
   <Grid Margin="12">
@@ -26,122 +85,129 @@ $xaml = @"
       <RowDefinition Height="*"/>
     </Grid.RowDefinitions>
 
-    <!-- 头部: 鼠鼠 + 标题 (鼠鼠风格指南配色: 墨黑底 + 蛋黄字) -->
-    <Border Grid.Row="0" Background="#211D16" CornerRadius="14" Margin="0,0,0,10" Padding="0">
+    <!-- 头部: 鼠鼠 + 标题 + 语言切换 -->
+    <Border Grid.Row="0" Background="#211D16" CornerRadius="14" Margin="0,0,0,10">
     <Grid>
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="Auto"/>
         <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
       </Grid.ColumnDefinitions>
-
-      <!-- 鼠鼠吉祥物 (镜像大脸鼠: 奶白柿饼脸+暖灰褐头盔+死黑豆眼+龇牙) -->
       <Viewbox Width="150" Height="113" Margin="14,4,4,2">
         <Canvas Width="240" Height="180">
-          <!-- 耳朵 (压头下层, 外灰内粉) -->
           <Ellipse Canvas.Left="28"  Canvas.Top="33" Width="36" Height="30" Fill="#8D8478" Stroke="#211D16" StrokeThickness="3.5"/>
           <Ellipse Canvas.Left="35"  Canvas.Top="39" Width="18" Height="14" Fill="#D9A8A0"/>
           <Ellipse Canvas.Left="176" Canvas.Top="33" Width="36" Height="30" Fill="#8D8478" Stroke="#211D16" StrokeThickness="3.5"/>
           <Ellipse Canvas.Left="183" Canvas.Top="39" Width="18" Height="14" Fill="#D9A8A0"/>
-          <!-- 头: 柿饼脸 -->
           <Path Data="M45 58 C58 46 182 46 195 58 C220 72 236 98 238 128 C240 156 198 180 120 180 C42 180 0 156 2 128 C4 98 20 72 45 58 Z" Fill="#F1EBE1" Stroke="#211D16" StrokeThickness="4.5"/>
-          <!-- 头盔 (裁进头形) + 额斑 -->
           <Path Data="M4 100 C40 92 70 96 95 96 C108 96 114 102 120 110 C126 102 132 96 145 96 C170 96 200 92 236 100 L236 240 L4 240 Z" Fill="#8D8478" Clip="{StaticResource RatHeadGeo}"/>
           <Ellipse Canvas.Left="54" Canvas.Top="57" Width="40" Height="22" Fill="#6F675C" Opacity="0.28"/>
           <Ellipse Canvas.Left="146" Canvas.Top="57" Width="40" Height="22" Fill="#6F675C" Opacity="0.28"/>
-          <!-- 眼睛: 死黑豆眼, 微外八 4度, 无高光 -->
           <Ellipse Canvas.Left="53" Canvas.Top="82.5" Width="30" Height="27" Fill="#231E1B">
             <Ellipse.RenderTransform><RotateTransform Angle="-4" CenterX="68" CenterY="96"/></Ellipse.RenderTransform>
           </Ellipse>
           <Ellipse Canvas.Left="157" Canvas.Top="82.5" Width="30" Height="27" Fill="#231E1B">
             <Ellipse.RenderTransform><RotateTransform Angle="4" CenterX="172" CenterY="96"/></Ellipse.RenderTransform>
           </Ellipse>
-          <!-- 脏粉鼻 + 人中线 -->
           <Path Data="M114 110 Q120 107 126 110 Q128 115 120 120 Q112 115 114 110 Z" Fill="#D89C96" Stroke="#211D16" StrokeThickness="2"/>
           <Line X1="120" Y1="116" X2="120" Y2="124" Stroke="#C08880" StrokeThickness="2.5"/>
-          <!-- 嘴: 黑嘴 + 两大白方牙 + 中缝 (happy 龇牙) -->
           <Path Data="M74 116 L166 116 C166 138 148 150 120 150 C92 150 74 138 74 116 Z" Fill="#171210"/>
           <Rectangle Canvas.Left="86" Canvas.Top="114" Width="68" Height="24" RadiusX="6" RadiusY="6" Fill="#FFFFFF" Stroke="#211D16" StrokeThickness="2.5"/>
           <Line X1="120" Y1="114" X2="120" Y2="138" Stroke="#211D16" StrokeThickness="2.5"/>
         </Canvas>
       </Viewbox>
-
       <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="6,0,10,0">
-        <TextBlock Text="CPU 后台整理工具" FontSize="24" FontWeight="Bold" Foreground="#FFD21F"/>
-        <TextBlock Text="扫描 · 清理 · 恢复 —— 全程自动备份，后悔可还原" FontSize="12" Foreground="#FFF6DC"/>
-        <TextBlock Text="鼠鼠版 v1.5.1（图形界面只是壳，核心逻辑与命令行版完全一致）" FontSize="10" Foreground="#8D8478"/>
+        <TextBlock x:Name="TitleMain" Text="鼠鼠cleaner" FontSize="26" FontWeight="Bold" Foreground="#FFD21F"/>
+        <TextBlock x:Name="TitleSub" Text="扫描 · 清理 · 恢复 —— 全程自动备份，后悔可还原" FontSize="12" Foreground="#FFF6DC"/>
+        <TextBlock x:Name="TitleHint" Text="图形界面只是壳，核心逻辑与命令行版一致" FontSize="10" Foreground="#8D8478"/>
       </StackPanel>
+      <Button x:Name="BtnLang" Grid.Column="2" Content="EN" Width="46" Height="30" Margin="0,0,14,0" VerticalAlignment="Center" Background="#FFD21F" Foreground="#211D16" FontWeight="Bold" BorderThickness="0"/>
     </Grid>
     </Border>
 
     <!-- 4 页 Tab -->
     <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0">
-      <!-- 页 1: 扫描 -->
-      <TabItem Header="🐹 1. 扫描（只读）">
+      <TabItem x:Name="TabScan" Header="🐹 1. 扫描（只读）">
         <Grid Margin="8">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
           </Grid.RowDefinitions>
-          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <Button x:Name="BtnScan" Content="开始扫描" Width="120" Height="36" Background="#F5A623" Foreground="#2C2C2C" FontWeight="Bold" BorderThickness="0"/>
-            <TextBlock x:Name="ScanHint" Text="  扫描只查看、不改任何设置，随便点" VerticalAlignment="Center" Foreground="#666"/>
+          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
+            <Image x:Name="ImgScan" Source="assets/rat_scan.jpg" Width="72" Height="72" Stretch="UniformToFill" Margin="0,0,10,0"/>
+            <StackPanel>
+              <Button x:Name="BtnScan" Content="开始扫描" Width="130" Height="36" Background="#FFD21F" Foreground="#211D16" FontWeight="Bold" BorderThickness="0"/>
+              <TextBlock x:Name="ScanHint" Text="扫描只查看、不改任何设置，随便点" Foreground="#666" Margin="0,4,0,0"/>
+            </StackPanel>
           </StackPanel>
-          <TextBox x:Name="ScanOutput" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11" VerticalScrollBarVisibility="Auto" Background="#1E1E1E" Foreground="#DDD" BorderThickness="0" Padding="8"/>
+          <ProgressBar x:Name="ScanProgress" Grid.Row="1" Height="10" Margin="0,0,0,6" Foreground="#FFD21F" Background="#E8DCC0" BorderThickness="0" Minimum="0" Maximum="100" Value="0"/>
+          <TextBox x:Name="ScanOutput" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11" VerticalScrollBarVisibility="Auto" Background="#1E1E1E" Foreground="#DDD" BorderThickness="0" Padding="8"/>
         </Grid>
       </TabItem>
 
-      <!-- 页 2: 处理建议 -->
-      <TabItem Header="📋 2. 处理建议">
+      <TabItem x:Name="TabPending" Header="📋 2. 处理建议">
         <Grid Margin="8">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
           </Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <Button x:Name="BtnLoadPending" Content="读取待处理清单" Width="140" Height="36" Background="#F5A623" Foreground="#2C2C2C" FontWeight="Bold" BorderThickness="0"/>
-            <TextBlock x:Name="PendingHint" Text="  显示扫描后需要处理的项目（未扫描或清单为空则无内容）" VerticalAlignment="Center" Foreground="#666"/>
+            <Image x:Name="ImgPending" Source="assets/rat_pending.jpg" Width="72" Height="72" Stretch="UniformToFill" Margin="0,0,10,0"/>
+            <StackPanel>
+              <Button x:Name="BtnLoadPending" Content="读取待处理清单" Width="150" Height="36" Background="#FFD21F" Foreground="#211D16" FontWeight="Bold" BorderThickness="0"/>
+              <TextBlock x:Name="PendingHint" Text="显示扫描后需要处理的项目（未扫描或清单为空则无内容）" Foreground="#666" Margin="0,4,0,0"/>
+            </StackPanel>
           </StackPanel>
-          <ListView x:Name="PendingList" Grid.Row="1" BorderThickness="1" BorderBrush="#DDD">
+          <ListView x:Name="PendingList" Grid.Row="1" BorderThickness="1" BorderBrush="#DDD" Background="#FFFDF4">
             <ListView.View>
               <GridView>
-                <GridViewColumn Header="项目" Width="240" DisplayMemberBinding="{Binding name_cn}"/>
-                <GridViewColumn Header="动作" Width="120" DisplayMemberBinding="{Binding action}"/>
+                <GridViewColumn Header="项目" Width="230" DisplayMemberBinding="{Binding name_cn}"/>
+                <GridViewColumn Header="动作" Width="110" DisplayMemberBinding="{Binding action}"/>
                 <GridViewColumn Header="状态" Width="90" DisplayMemberBinding="{Binding status}"/>
-                <GridViewColumn Header="说明" Width="320" DisplayMemberBinding="{Binding reason_cn}"/>
+                <GridViewColumn Header="说明" Width="330" DisplayMemberBinding="{Binding reason_cn}"/>
               </GridView>
             </ListView.View>
           </ListView>
         </Grid>
       </TabItem>
 
-      <!-- 页 3: 执行 -->
-      <TabItem Header="⚙️ 3. 执行（管理员）">
-        <Grid Margin="8">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-          </Grid.RowDefinitions>
-          <StackPanel Grid.Row="0" Margin="0,0,0,8">
-            <TextBlock Text="点击下面按钮，会把【处理建议】里的全部项目处理掉。" Foreground="#333" Margin="0,0,0,4"/>
-            <TextBlock Text="每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。" Foreground="#666" Margin="0,0,0,8"/>
-            <Button x:Name="BtnExec" Content="执行全部处理（需要管理员）" Width="240" Height="40" Background="#E74C3C" Foreground="White" FontWeight="Bold" BorderThickness="0"/>
-            <TextBlock x:Name="ExecHint" Text="" Foreground="#C0392B" Margin="0,6,0,0"/>
-          </StackPanel>
-          <TextBox x:Name="ExecOutput" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11" VerticalScrollBarVisibility="Auto" Background="#1E1E1E" Foreground="#DDD" BorderThickness="0" Padding="8"/>
-        </Grid>
-      </TabItem>
-
-      <!-- 页 4: 结果 -->
-      <TabItem Header="✅ 4. 结果与恢复">
+      <TabItem x:Name="TabExec" Header="⚙️ 3. 执行（管理员）">
         <Grid Margin="8">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
           </Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <Button x:Name="BtnResult" Content="查看最近处理结果" Width="150" Height="36" Background="#27AE60" Foreground="White" FontWeight="Bold" BorderThickness="0"/>
-            <Button x:Name="BtnRestore" Content="恢复最近一次处理" Width="150" Height="36" Background="#95A5A6" Foreground="White" FontWeight="Bold" BorderThickness="0" Margin="8,0,0,0"/>
-            <TextBlock x:Name="ResultHint" Text="  恢复会弹管理员窗口，选最新备份还原" VerticalAlignment="Center" Foreground="#666" Margin="8,0,0,0"/>
+            <Image x:Name="ImgExec" Source="assets/rat_exec.jpg" Width="72" Height="72" Stretch="UniformToFill" Margin="0,0,10,0"/>
+            <StackPanel VerticalAlignment="Center">
+              <TextBlock x:Name="ExecInfo1" Text="点击下面按钮，会把【处理建议】里的全部项目处理掉。" Foreground="#333"/>
+              <TextBlock x:Name="ExecInfo2" Text="每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。" Foreground="#666" Margin="0,4,0,0"/>
+              <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                <Button x:Name="BtnExec" Content="执行全部处理（需要管理员）" Width="230" Height="38" Background="#E74C3C" Foreground="White" FontWeight="Bold" BorderThickness="0"/>
+                <TextBlock x:Name="ExecHint" Text="" Foreground="#C0392B" VerticalAlignment="Center" Margin="10,0,0,0"/>
+              </StackPanel>
+            </StackPanel>
+          </StackPanel>
+          <TextBox x:Name="ExecOutput" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11" VerticalScrollBarVisibility="Auto" Background="#1E1E1E" Foreground="#DDD" BorderThickness="0" Padding="8"/>
+        </Grid>
+      </TabItem>
+
+      <TabItem x:Name="TabResult" Header="✅ 4. 结果与恢复">
+        <Grid Margin="8">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+            <Image x:Name="ImgResult" Source="assets/rat_result.jpg" Width="72" Height="72" Stretch="UniformToFill" Margin="0,0,10,0"/>
+            <StackPanel VerticalAlignment="Center">
+              <StackPanel Orientation="Horizontal">
+                <Button x:Name="BtnResult" Content="查看最近处理结果" Width="150" Height="36" Background="#27AE60" Foreground="White" FontWeight="Bold" BorderThickness="0"/>
+                <Button x:Name="BtnRestore" Content="恢复最近一次处理" Width="150" Height="36" Background="#95A5A6" Foreground="White" FontWeight="Bold" BorderThickness="0" Margin="8,0,0,0"/>
+              </StackPanel>
+              <TextBlock x:Name="ResultHint" Text="恢复会弹管理员窗口，选最新备份还原" Foreground="#666" Margin="0,4,0,0"/>
+            </StackPanel>
           </StackPanel>
           <TextBox x:Name="ResultOutput" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11" VerticalScrollBarVisibility="Auto" Background="#1E1E1E" Foreground="#DDD" BorderThickness="0" Padding="8"/>
         </Grid>
@@ -154,11 +220,17 @@ $xaml = @"
 $reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
 
-# ---------- 工具函数 ----------
-function Invoke-Output($sb) {
-    # 同步执行, 把 stdout+stderr 合并返回
-    $out = & $sb 2>&1 | Out-String
-    return $out
+# 鼠鼠页面形象图: 用绝对路径 (Image Source 相对路径按工作目录解析, 不可靠)
+foreach ($imgName in 'ImgScan','ImgPending','ImgExec','ImgResult') {
+    $imgCtrl = $window.FindName($imgName)
+    if ($imgCtrl) {
+        $imgFile = Join-Path $script:Root ("assets/" + $imgName.Substring(3) + ".jpg")
+        if (Test-Path $imgFile) {
+            $bi = New-Object System.Windows.Media.Imaging.BitmapImage
+            $bi.BeginInit(); $bi.UriSource = ([uri]$imgFile); $bi.CacheOption = 'OnLoad'; $bi.EndInit()
+            $imgCtrl.Source = $bi
+        }
+    }
 }
 
 function Get-PendingItems {
@@ -169,96 +241,125 @@ function Get-PendingItems {
     return @($p.actions)
 }
 
-# ---------- 事件: 扫描 ----------
+# ---------- 语言切换 ----------
+$window.FindName('BtnLang').Add_Click({
+    if ($script:Lang -eq 'zh') { $script:Lang = 'en' } else { $script:Lang = 'zh' }
+    Apply-Language
+})
+
+# ---------- 扫描 (后台 job + 进度条动画) ----------
+$script:ScanTimer = $null
 $window.FindName('BtnScan').Add_Click({
     $btn = $window.FindName('BtnScan')
     $out = $window.FindName('ScanOutput')
+    $prog = $window.FindName('ScanProgress')
     $btn.IsEnabled = $false
-    $out.Text = '正在扫描...'
-    try {
-        $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$script:Root\cpu-cleaner.ps1`" -Mode scan"
-        $text = cmd /c $cmd 2>&1 | Out-String
-        $out.Text = $text
-    } catch {
-        $out.Text = "扫描出错: $($_.Exception.Message)"
-    } finally {
-        $btn.IsEnabled = $true
-    }
+    $out.Text = (Get-Text 'Scanning')
+    $prog.Value = 0
+
+    # 进度条动画 (UI 线程定时推进)
+    $script:ScanTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+    $script:ScanTimer.Add_Tick({
+        if ($prog.Value -lt 90) { $prog.Value += (Get-Random -Minimum 2 -Maximum 6) }
+        if ($prog.Value -gt 90) { $prog.Value = 90 }
+    })
+    $script:ScanTimer.Start()
+
+    # 后台 job 跑 scan
+    $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$script:Root\cpu-cleaner.ps1`" -Mode scan"
+    $job = Start-Job -ScriptBlock { param($c) cmd /c $c 2>&1 | Out-String } -ArgumentList $cmd
+
+    # 轮询 job 完成 (UI 不卡: 用第二个 timer)
+    $checkTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $checkTimer.Interval = [TimeSpan]::FromMilliseconds(800)
+    $checkTimer.Add_Tick({
+        if ($job.State -eq 'Completed') {
+            $checkTimer.Stop()
+            $script:ScanTimer.Stop()
+            $result = Receive-Job $job
+            Remove-Job $job -Force
+            $prog.Value = 100
+            $out.Text = $result
+            $btn.IsEnabled = $true
+        }
+    })
+    $checkTimer.Start()
 })
 
-# ---------- 事件: 读取处理建议 ----------
+# ---------- 读取处理建议 (修复: 兜底提示 + 强制刷新) ----------
 $window.FindName('BtnLoadPending').Add_Click({
     $list = $window.FindName('PendingList')
     $hint = $window.FindName('PendingHint')
-    $items = Get-PendingItems
+    $items = @(Get-PendingItems)
     if ($items.Count -eq 0) {
-        $hint.Text = '  没有待处理项目 —— 请先到【1. 扫描】页扫描（或已经全部处理完）'
+        $hint.Text = (Get-Text 'PendingNone')
+        $list.ItemsSource = $null
+        $list.Items.Clear()
     } else {
-        $hint.Text = "  共 $($items.Count) 项待处理。到【3. 执行】页一键处理。"
+        $hint.Text = ((Get-Text 'PendingCount') -f $items.Count)
+        $list.ItemsSource = $null
+        $list.ItemsSource = $items
+        $list.Items.Refresh()
     }
-    $list.ItemsSource = $items
 })
 
-# ---------- 事件: 执行全部处理 ----------
+# ---------- 执行全部处理 ----------
 $window.FindName('BtnExec').Add_Click({
     $hint = $window.FindName('ExecHint')
     $out = $window.FindName('ExecOutput')
-    $items = Get-PendingItems
+    $items = @(Get-PendingItems)
     if ($items.Count -eq 0) {
-        $hint.Text = '没有待处理项目，先扫描。'
+        $hint.Text = (Get-Text 'ExecEmpty')
         return
     }
-    $hint.Text = "将处理 $($items.Count) 项。已请求管理员权限，请在弹窗点【是】..."
+    $hint.Text = ((Get-Text 'ExecStart') -f $items.Count)
     try {
-        # 提权运行 CLI 的 clean -YesToAll (复用核心逻辑, 不重复实现)
-        $ps = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$script:Root\cpu-cleaner.ps1`" -Mode clean -YesToAll"
         Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$script:Root\cpu-cleaner.ps1",'-Mode','clean','-YesToAll' -Wait
-        $hint.Text = '处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
-        $out.Text = '执行完成（详见管理员窗口输出）。建议重启电脑。'
+        $hint.Text = (Get-Text 'ExecDone')
+        $out.Text = (Get-Text 'ExecDone')
     } catch {
-        $hint.Text = "执行出错或被取消: $($_.Exception.Message)"
+        $hint.Text = "ERR: $($_.Exception.Message)"
     }
 })
 
-# ---------- 事件: 查看最近结果 ----------
+# ---------- 查看最近结果 ----------
 $window.FindName('BtnResult').Add_Click({
     $out = $window.FindName('ResultOutput')
     $backupRoot = Join-Path $script:Root 'backups'
-    if (-not (Test-Path $backupRoot)) { $out.Text = '还没有备份记录（还没处理过）。'; return }
+    if (-not (Test-Path $backupRoot)) { $out.Text = (Get-Text 'NoBackup'); return }
     $latest = Get-ChildItem $backupRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $latest) { $out.Text = '还没有备份记录。'; return }
+    if (-not $latest) { $out.Text = (Get-Text 'NoBackup'); return }
     $mf = Join-Path $latest.FullName 'manifest.json'
-    if (-not (Test-Path $mf)) { $out.Text = "备份目录 $($latest.Name) 没有 manifest.json"; return }
+    if (-not (Test-Path $mf)) { $out.Text = "manifest not found: $mf"; return }
     $man = Get-Content $mf -Raw -Encoding UTF8 | ConvertFrom-Json
-    $lines = @("最近处理: $($latest.Name)", '')
+    $lines = @("latest: $($latest.Name)", '')
     $ok = 0; $bad = 0
     foreach ($m in $man) {
-        $verified = if ($m.verified) { '✓' } else { '✗' }
-        $lines += "  $verified [$($m.type)] $($m.name)"
+        $v = if ($m.verified) { 'OK' } else { 'FAIL' }
+        $lines += "  [$v] $($m.type) $($m.name)"
         if ($m.verified) { $ok++ } else { $bad++ }
     }
-    $lines += ''
-    $lines += "成功 $ok 项, 失败 $bad 项"
-    $lines += ''
-    $lines += "恢复方法: 点【恢复最近一次处理】按钮, 或命令行:"
-    $lines += "  cpu-cleaner.ps1 -Mode restore -BackupDir `".\backups\$($latest.Name)`""
+    $lines += ''; $lines += "success $ok, failed $bad"
+    $lines += ''; $lines += "restore: cpu-cleaner.ps1 -Mode restore -BackupDir `".\backups\$($latest.Name)`""
     $out.Text = ($lines -join "`r`n")
 })
 
-# ---------- 事件: 恢复最近一次处理 ----------
+# ---------- 恢复最近一次处理 ----------
 $window.FindName('BtnRestore').Add_Click({
     $backupRoot = Join-Path $script:Root 'backups'
     $latest = Get-ChildItem $backupRoot -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $latest) {
-        [System.Windows.MessageBox]::Show('还没有备份，无需恢复。', '鼠鼠提示', 'OK', 'Information') | Out-Null
+        [System.Windows.MessageBox]::Show((Get-Text 'RestoreNone'), (Get-Text 'AppName'), 'OK', 'Information') | Out-Null
         return
     }
     try {
         Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"$script:Root\cpu-cleaner.ps1",'-Mode','restore','-BackupDir',"$script:Root\backups\$($latest.Name)" -Wait
-        [System.Windows.MessageBox]::Show("已恢复 $($latest.Name)。详见管理员窗口。", '鼠鼠提示', 'OK', 'Information') | Out-Null
+        [System.Windows.MessageBox]::Show(((Get-Text 'RestoreOk') -f $latest.Name), (Get-Text 'AppName'), 'OK', 'Information') | Out-Null
     } catch {
-        [System.Windows.MessageBox]::Show("恢复出错或被取消: $($_.Exception.Message)", '鼠鼠提示', 'OK', 'Warning') | Out-Null
+        [System.Windows.MessageBox]::Show(((Get-Text 'RestoreErr') -f $_.Exception.Message), (Get-Text 'AppName'), 'OK', 'Warning') | Out-Null
     }
 })
 
+Apply-Language
 $window.ShowDialog() | Out-Null
