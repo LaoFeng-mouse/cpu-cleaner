@@ -22,7 +22,112 @@ function Test-HitMatcherEvidenceShape {
         'process'   { @('process_name','process_path') }
         default     { @() }
     }
-    return $Hit.matched_field -in $allowedFields
+    if ($Hit.matched_field -notin $allowedFields) { return $false }
+    if ($Hit.matched_type -eq 'path' -and $Hit.matched_field -notin @('autostart_value','task_path','process_path')) {
+        return $false
+    }
+    return $true
+}
+
+function Get-StrictNonBlankStringProperty($Object, [string]$PropertyName) {
+    if ($null -eq $Object -or $Object.PSObject.Properties.Name -notcontains $PropertyName) { return $null }
+    $value = $Object.$PropertyName
+    if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { return $null }
+    return $value
+}
+
+function Test-PositiveScalarProcessId($Value) {
+    $integerTypes = @([byte],[sbyte],[int16],[uint16],[int32],[uint32],[int64])
+    $isInteger = $false
+    foreach ($integerType in $integerTypes) {
+        if ($Value -is $integerType) { $isInteger = $true; break }
+    }
+    if (-not $isInteger) { return $false }
+    return ([int64]$Value -gt 0 -and [int64]$Value -le [int32]::MaxValue)
+}
+
+function Get-CurrentPendingMatchValue($Pending) {
+    $hitType = Get-StrictNonBlankStringProperty $Pending 'hit_type'
+    $matchedField = Get-StrictNonBlankStringProperty $Pending 'matched_field'
+    if ($null -eq $hitType -or $null -eq $matchedField) { return $null }
+
+    switch ($hitType) {
+        'service' {
+            $serviceName = Get-StrictNonBlankStringProperty $Pending 'service_name'
+            if ($null -eq $serviceName) { return $null }
+            try { $services = @(Get-Service -Name $serviceName -ErrorAction SilentlyContinue) } catch { return $null }
+            if ($services.Count -ne 1 -or $null -eq $services[0]) { return $null }
+            $currentName = Get-StrictNonBlankStringProperty $services[0] 'Name'
+            if ($null -eq $currentName -or -not [string]::Equals($currentName, $serviceName, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+            if ($matchedField -eq 'service_name') { return $currentName }
+            if ($matchedField -eq 'service_display_name') { return Get-StrictNonBlankStringProperty $services[0] 'DisplayName' }
+            return $null
+        }
+        'autostart' {
+            $source = Get-StrictNonBlankStringProperty $Pending 'autostart_source'
+            $name = Get-StrictNonBlankStringProperty $Pending 'autostart_name'
+            if ($null -eq $source -or $null -eq $name) { return $null }
+            try { $keys = @(Get-ItemProperty -Path $source -ErrorAction SilentlyContinue) } catch { return $null }
+            if ($keys.Count -ne 1 -or $null -eq $keys[0]) { return $null }
+            $properties = @($keys[0].PSObject.Properties | Where-Object {
+                $_.Name -is [string] -and [string]::Equals($_.Name, $name, [System.StringComparison]::OrdinalIgnoreCase)
+            })
+            if ($properties.Count -ne 1) { return $null }
+            $currentName = [string]$properties[0].Name
+            if ($matchedField -eq 'autostart_name') { return $currentName }
+            if ($matchedField -eq 'autostart_value') {
+                try { $currentValue = $properties[0].Value } catch { return $null }
+                if ($currentValue -isnot [string] -or [string]::IsNullOrWhiteSpace($currentValue)) { return $null }
+                return $currentValue
+            }
+            return $null
+        }
+        'task' {
+            $fullTaskPath = Get-StrictNonBlankStringProperty $Pending 'task_path'
+            if ($null -eq $fullTaskPath -or -not $fullTaskPath.StartsWith('\')) { return $null }
+            $lastSeparator = $fullTaskPath.LastIndexOf('\')
+            if ($lastSeparator -lt 0 -or $lastSeparator -ge ($fullTaskPath.Length - 1)) { return $null }
+            $taskFolder = $fullTaskPath.Substring(0, $lastSeparator + 1)
+            $taskName = $fullTaskPath.Substring($lastSeparator + 1)
+            if ([string]::IsNullOrWhiteSpace($taskFolder) -or [string]::IsNullOrWhiteSpace($taskName)) { return $null }
+            try { $tasks = @(Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue) } catch { return $null }
+            if ($tasks.Count -ne 1 -or $null -eq $tasks[0]) { return $null }
+            $currentName = Get-StrictNonBlankStringProperty $tasks[0] 'TaskName'
+            $currentFolder = Get-StrictNonBlankStringProperty $tasks[0] 'TaskPath'
+            if ($null -eq $currentName -or $null -eq $currentFolder) { return $null }
+            $currentFullPath = $currentFolder + $currentName
+            if (-not [string]::Equals($currentFullPath, $fullTaskPath, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+            if ($matchedField -eq 'task_name') { return $currentName }
+            if ($matchedField -eq 'task_path') { return $currentFullPath }
+            return $null
+        }
+        'process' {
+            if ($Pending.PSObject.Properties.Name -notcontains 'process_id' -or -not (Test-PositiveScalarProcessId $Pending.process_id)) { return $null }
+            $processId = [int]$Pending.process_id
+            try { $processes = @(Get-Process -Id $processId -ErrorAction SilentlyContinue) } catch { return $null }
+            if ($processes.Count -ne 1 -or $null -eq $processes[0]) { return $null }
+            if ($processes[0].PSObject.Properties.Name -contains 'Id') {
+                if (-not (Test-PositiveScalarProcessId $processes[0].Id) -or [int]$processes[0].Id -ne $processId) { return $null }
+            }
+            if ($matchedField -eq 'process_name') {
+                $storedName = Get-StrictNonBlankStringProperty $Pending 'process_name'
+                $currentName = Get-StrictNonBlankStringProperty $processes[0] 'Name'
+                if ($null -eq $storedName -or $null -eq $currentName) { return $null }
+                if (-not [string]::Equals((Normalize-ProcessName $currentName), (Normalize-ProcessName $storedName), [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+                return $currentName
+            }
+            if ($matchedField -eq 'process_path') {
+                $storedPath = Get-StrictNonBlankStringProperty $Pending 'process_path'
+                if ($null -eq $storedPath) { return $null }
+                try { $currentPath = $processes[0].Path } catch { return $null }
+                if ($currentPath -isnot [string] -or [string]::IsNullOrWhiteSpace($currentPath)) { return $null }
+                if (-not [string]::Equals($currentPath, $storedPath, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+                return $currentPath
+            }
+            return $null
+        }
+        default { return $null }
+    }
 }
 
 function Get-PendingIdentityKey($Item) {
@@ -175,25 +280,53 @@ function Save-PendingActions($Hits, $Suspicious) {
 # pending_actions.json 在 scan 与管理员 clean 之间可能被人为修改,
 # clean 必须按当前特征库重新确认: id 存在 / tested=true / safe=true / action 匹配 / target 匹配
 function Test-PendingActionAuthorized($p, $profiles) {
-    # 1. id 必须存在于当前特征库 (防伪造 id)
-    $rule = @($profiles.profiles | Where-Object { $_.id -eq $p.id }) | Select-Object -First 1
-    if (-not $rule) { return $false }
-    # 2. 证据纪律: 未实测规则禁止危险动作 (Schema 层已保证, 纵深防御)
-    if ($rule.evidence -and -not $rule.evidence.tested) { return $false }
-    # 3. safe 强制规则
-    if (-not $rule.safe) { return $false }
-    # 4. action 必须等于规则允许该命中类型的动作 (防改 action)
-    if ($p.action -ne (Get-ActionFor $rule.actions $p.hit_type)) { return $false }
-    # 5. target 必须确实是规则 detect 的对象 (与 Match-Profiles 同款匹配语义; v1.6.0 支持 match_type)
-    $det = $rule.detect
-    $targetOk = $false
-    switch ($p.hit_type) {
-        'service'   { $targetOk = $p.service_name -and (@($det.services | Where-Object { Test-DetectMatch $p.service_name $_ }).Count -gt 0) }
-        'autostart' { $targetOk = $p.autostart_name -and (@($det.autostarts | Where-Object { Test-DetectMatch $p.autostart_name $_ }).Count -gt 0) }
-        'task'      { $targetOk = $p.task_path -and (@($det.tasks | Where-Object { Test-DetectMatch $p.task_path $_ }).Count -gt 0) }
-        'process'   { $targetOk = $p.process_name -and (@($det.processes | Where-Object { Test-ProcessDetectMatch $p.process_name $_ }).Count -gt 0) }
+    if ($null -eq $p -or $null -eq $profiles) { return $false }
+    foreach ($propertyName in @('id','hit_type','action','status','matched_pattern','matched_type','matched_field')) {
+        if ($null -eq (Get-StrictNonBlankStringProperty $p $propertyName)) { return $false }
     }
-    return $targetOk
+    if ($p.status -cnotin @('pending','failed')) { return $false }
+    if ($p.action -cnotin $script:DangerousActions) { return $false }
+    if (-not (Test-HitMatcherEvidenceShape $p)) { return $false }
+
+    if ($profiles.PSObject.Properties.Name -notcontains 'profiles') { return $false }
+    $rules = @($profiles.profiles | Where-Object {
+        $_ -and $_.PSObject.Properties.Name -contains 'id' -and
+        $_.id -is [string] -and -not [string]::IsNullOrWhiteSpace($_.id) -and $_.id -ceq $p.id
+    })
+    if ($rules.Count -ne 1) { return $false }
+    $rule = $rules[0]
+
+    if ($rule.PSObject.Properties.Name -notcontains 'safe' -or $rule.safe -isnot [bool] -or $rule.safe -ne $true) { return $false }
+    if ($rule.PSObject.Properties.Name -notcontains 'evidence' -or $null -eq $rule.evidence) { return $false }
+    if ($rule.evidence.PSObject.Properties.Name -notcontains 'tested' -or $rule.evidence.tested -isnot [bool] -or $rule.evidence.tested -ne $true) { return $false }
+
+    $declaredAction = Get-ActionFor $rule.actions $p.hit_type
+    if ($declaredAction -isnot [string] -or [string]::IsNullOrWhiteSpace($declaredAction)) { return $false }
+    if ($declaredAction -cnotin $script:DangerousActions -or $p.action -cne $declaredAction) { return $false }
+
+    if ($rule.PSObject.Properties.Name -notcontains 'detect' -or $null -eq $rule.detect) { return $false }
+    $detectProperty = switch ($p.hit_type) {
+        'service' { 'services' }
+        'autostart' { 'autostarts' }
+        'task' { 'tasks' }
+        'process' { 'processes' }
+        default { return $false }
+    }
+    if ($rule.detect.PSObject.Properties.Name -notcontains $detectProperty) { return $false }
+    $sameMatchers = @($rule.detect.$detectProperty | Where-Object {
+        $normalized = Normalize-DetectItem $_
+        $normalized.match -is [string] -and $normalized.type -is [string] -and
+        $normalized.match -ceq $p.matched_pattern -and $normalized.type -ceq $p.matched_type
+    })
+    if ($sameMatchers.Count -lt 1) { return $false }
+
+    $currentValue = Get-CurrentPendingMatchValue $p
+    if ($currentValue -isnot [string] -or [string]::IsNullOrWhiteSpace($currentValue)) { return $false }
+    $savedMatcher = [pscustomobject]@{ match = $p.matched_pattern; type = $p.matched_type }
+    if ($p.hit_type -eq 'process' -and $p.matched_field -eq 'process_name') {
+        return [bool](Test-ProcessDetectMatch $currentValue $savedMatcher)
+    }
+    return [bool](Test-DetectMatch $currentValue $savedMatcher)
 }
 
 # v1.2: 服务启动类型映射 (sc.exe 参数 vs StartType 枚举)

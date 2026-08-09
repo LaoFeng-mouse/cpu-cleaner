@@ -87,7 +87,7 @@ Describe '进程标准化匹配保持字面语义' {
 
         Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
         $pending.process_name = 'foo*bar.exe'
-        Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
     }
 
     It 'Match-Profiles 对 regex 使用标准化后的进程名' {
@@ -116,11 +116,49 @@ Describe '进程标准化匹配保持字面语义' {
         $profiles = [pscustomobject]@{ profiles = @($rule) }
         $pending = [pscustomobject]@{ id = 'process-regex'; hit_type = 'process'; action = 'investigate'; process_name = 'foo.exe' }
 
-        Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
     }
 }
 
 Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
+    It 'path 证据只允许真实路径字段且语义无效命中只保存为 observation' {
+        $validFields = @(
+            [pscustomobject]@{ hit_type='autostart'; matched_pattern='C:\Apps'; matched_type='path'; matched_field='autostart_value' },
+            [pscustomobject]@{ hit_type='task'; matched_pattern='\Vendor'; matched_type='path'; matched_field='task_path' },
+            [pscustomobject]@{ hit_type='process'; matched_pattern='C:\Apps'; matched_type='path'; matched_field='process_path' }
+        )
+        foreach ($evidence in $validFields) {
+            Test-HitMatcherEvidenceShape $evidence | Should -BeTrue
+        }
+        foreach ($case in @(
+            @{ hit_type='service'; field='service_name' },
+            @{ hit_type='service'; field='service_display_name' },
+            @{ hit_type='autostart'; field='autostart_name' },
+            @{ hit_type='task'; field='task_name' },
+            @{ hit_type='process'; field='process_name' }
+        )) {
+            $evidence = [pscustomobject]@{ hit_type=$case.hit_type; matched_pattern='C:\Apps'; matched_type='path'; matched_field=$case.field }
+            Test-HitMatcherEvidenceShape $evidence | Should -BeFalse -Because ($case.hit_type + '/' + $case.field)
+        }
+
+        $oldPendingFile = $script:PendingFile
+        try {
+            $script:PendingFile = Join-Path $TestDrive 'invalid-path-pending.json'
+            $hit = [pscustomobject]@{
+                id='invalid-path'; vendor='T'; name_cn='Invalid'; action='disable_service'; hit_type='service'; detail='Svc'; reason_cn='r'
+                service_name='Svc'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
+                safe=$true; evidence=[pscustomobject]@{tested=$true}
+                matched_pattern='Svc'; matched_type='path'; matched_field='service_name'
+            }
+            Save-PendingActions -Hits @($hit) -Suspicious @()
+            $saved = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            @($saved.actions).Count | Should -Be 0
+            @($saved.observations).Count | Should -Be 1
+        } finally {
+            $script:PendingFile = $oldPendingFile
+        }
+    }
+
     It 'exact 危险动作无需 allow_auto 保留' {
         $tmp = Join-Path $TestDrive 's3a.json'
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"t1","vendor":"T","name_cn":"测试","risk":"high","safe":true,"reason_cn":"r","detect":{"services":[{"match":"S1","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"}}]}', (New-Object System.Text.UTF8Encoding($false)))
@@ -430,7 +468,7 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
         $rule = @($profiles.profiles | Where-Object { $_.id -eq 'lenovo-serviceas' }) | Select-Object -First 1
         $rule | Should -Not -BeNullOrEmpty
         $pending = [pscustomobject]@{ rule_id = 'lenovo-serviceas'; hit_type = 'service'; action = 'disable_service'; service_name = 'LenovoServiceAS'; autostart_name = ''; task_path = ''; process_name = ''; id = 'lenovo-serviceas' }
-        Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
         $pending2 = [pscustomobject]@{ rule_id = 'lenovo-serviceas'; hit_type = 'service'; action = 'disable_service'; service_name = 'HackerService'; autostart_name = ''; task_path = ''; process_name = ''; id = 'lenovo-serviceas' }
         Test-PendingActionAuthorized $pending2 $profiles | Should -BeFalse
     }
