@@ -1,5 +1,6 @@
 ﻿# Pester 测试: 特征库加载与校验
-$src = Get-Content 'D:\34615\CPU后台整理工具\cpu-cleaner.ps1' -Raw -Encoding UTF8
+$projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$src = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
 $idx = $src.IndexOf("switch (`$Mode)")
 $defs = $src.Substring(0, $idx)
 Invoke-Expression $defs

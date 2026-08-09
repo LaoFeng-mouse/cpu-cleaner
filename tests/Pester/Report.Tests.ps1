@@ -1,10 +1,11 @@
 ﻿# Pester 测试: 报告输出 (中文 / HTML 结构)
-$src = Get-Content 'D:\34615\CPU后台整理工具\cpu-cleaner.ps1' -Raw -Encoding UTF8
+$projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$src = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
 $idx = $src.IndexOf("switch (`$Mode)")
 $defs = $src.Substring(0, $idx)
 Invoke-Expression $defs
 # Pester 环境下 $script:Root 会解析到 tests\Pester\, 显式指回项目根
-$script:Root = 'D:\34615\CPU后台整理工具'
+$script:Root = $projectRoot
 $script:ProfileFile = Join-Path $script:Root 'bloatware-profiles.json'
 $script:PendingFile = Join-Path $script:Root 'pending_actions.json'
 
