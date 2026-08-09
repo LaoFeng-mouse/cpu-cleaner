@@ -1,0 +1,8 @@
+# 机器相关文件，不入库
+backups/
+pending_actions.json
+report_*.html
+
+# 临时文件
+*.tmp
+*.bak.*
