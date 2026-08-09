@@ -88,11 +88,12 @@ function Test-DetectMatch($target, $pattern, $Context = $null) {
 
 function Test-ProcessDetectMatch($target, $pattern, $Context = $null) {
     $n = Normalize-DetectItem $pattern
+    $normalizedTarget = Normalize-ProcessName $target
+    $matchPattern = $n
     if ($n.type -in @('exact','contains')) {
-        $normalizedPattern = [pscustomobject]@{ match = Normalize-ProcessName $n.match; type = $n.type }
-        return Test-DetectMatch (Normalize-ProcessName $target) $normalizedPattern -Context $Context
+        $matchPattern = [pscustomobject]@{ match = Normalize-ProcessName $n.match; type = $n.type }
     }
-    return Test-DetectMatch $target $n -Context $Context
+    return Test-DetectMatch $normalizedTarget $matchPattern -Context $Context
 }
 
 # 规则某命中类型对应的 detect 匹配类型集合 (用于执行闸门)

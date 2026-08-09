@@ -89,6 +89,35 @@ Describe '进程标准化匹配保持字面语义' {
         $pending.process_name = 'foo*bar.exe'
         Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
     }
+
+    It 'Match-Profiles 对 regex 使用标准化后的进程名' {
+        $tmp = Join-Path $env:TEMP ("s3_process_regex_" + [guid]::NewGuid().ToString('N') + ".json")
+        $originalProfileFile = $script:ProfileFile
+        try {
+            [System.IO.File]::WriteAllText($tmp, '{"schema_version":3,"profiles":[{"id":"process-regex","vendor":"T","name_cn":"进程正则匹配","risk":"high","safe":true,"reason_cn":"r","evidence":{"tested":true},"execution":{"allow_auto":true},"detect":{"services":[],"processes":[{"match":"^foo$","type":"regex"}],"autostarts":[],"tasks":[]},"actions":{"process":"investigate"}}]}', (New-Object System.Text.UTF8Encoding($false)))
+            $script:ProfileFile = $tmp
+
+            $hits = Match-Profiles -Services @() -AutoStarts @() -Tasks @() -TopProcs @([pscustomobject]@{ Name = 'foo.exe'; PID = 3; 'CPU%' = 1; Path = 'C:\foo.exe' })
+
+            @($hits).Count | Should -Be 1
+        } finally {
+            $script:ProfileFile = $originalProfileFile
+            Remove-Item $tmp -ErrorAction SilentlyContinue
+        }
+    }
+
+    It '授权校验对 regex 使用标准化后的进程名' {
+        $rule = [pscustomobject]@{
+            id = 'process-regex'; safe = $true
+            evidence = [pscustomobject]@{ tested = $true }
+            detect = [pscustomobject]@{ services = @(); processes = @([pscustomobject]@{ match = '^foo$'; type = 'regex' }); autostarts = @(); tasks = @() }
+            actions = [pscustomobject]@{ process = 'investigate' }
+        }
+        $profiles = [pscustomobject]@{ profiles = @($rule) }
+        $pending = [pscustomobject]@{ id = 'process-regex'; hit_type = 'process'; action = 'investigate'; process_name = 'foo.exe' }
+
+        Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
+    }
 }
 
 Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
