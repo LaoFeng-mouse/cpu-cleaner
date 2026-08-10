@@ -380,11 +380,12 @@ $window.FindName('BtnClearAll').Add_Click({
 })
 
 # ---------- 处理已勾选项目 (v1.5.5: 勾选子集 → 临时清单 → clean -PendingFileArg) ----------
-$legacyBtnExec = $window.FindName('BtnExec')
-if ($legacyBtnExec) { $legacyBtnExec.Add_Click({
-    $hint = $window.FindName('ExecHint')
-    $out = $window.FindName('ExecOutput')
-    $list = $window.FindName('PendingList')
+function Invoke-GuiCheckedExecution {
+    param(
+        $List = $window.FindName('PendingList'),
+        $Hint = $window.FindName('ExecHint'),
+        $Out = $window.FindName('ExecOutput')
+    )
     $checked = @($list.Items | Where-Object { $_.IsChecked -and $_.CanExecute })
     if ($checked.Count -eq 0) {
         $hint.Text = (Get-Text 'ExecEmpty')
@@ -440,7 +441,12 @@ if ($legacyBtnExec) { $legacyBtnExec.Add_Click({
             Remove-Item -LiteralPath $tmpPending -Force -ErrorAction SilentlyContinue
         }
     }
-}) }
+}
+
+$legacyBtnExec = $window.FindName('BtnExec')
+if ($legacyBtnExec) {
+    $legacyBtnExec.Add_Click({ Invoke-GuiCheckedExecution })
+}
 
 # ---------- 查看最近结果 ----------
 $legacyBtnResult = $window.FindName('BtnResult')
