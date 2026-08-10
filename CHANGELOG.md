@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 安全
+- Schema 3.0 matcher provenance 贯穿 scan hit、pending v2 与管理员 clean：记录并重验 `matched_pattern` / `matched_type` / `matched_field`，危险动作只取决于实际命中的 `exact` 或路径字段上的 `path`；`contains` / `regex` 只调查，`execution.allow_auto` 不再提供豁免
+- `exact` / `contains` / `path` 统一为 `OrdinalIgnoreCase` 字面语义，只有 `regex` 解释表达式；管理员态按当前对象重验同一 matcher、同一字段及服务/自启/任务/进程身份，并在备份或 mutation 前最终复核。自启源限制为标准 HKLM/HKCU Run 键
+- pending 清单要求整数 `pending_schema_version: 2`；旧版、缺失、字符串或数组版本均要求重新 scan，CLI 与 GUI 都不自动升级。管理员 clean 还拒绝重复键、超过 5 MiB、深度超过 64、非法 UTF-8 或读取期间变化的 JSON 文件
+- 本次自动测试全部使用 Mock 或非破坏性夹具，不代表已在真实用户机器执行停服务、删除注册表自启项或禁用任务；实际 destructive clean 仍需管理员权限和用户确认
+
 ### 计划
 - 特征库数字签名验证（profiles.json.sig + 内置公钥）：SHA256 只能防下载损坏/镜像不一致/单文件篡改，攻击者同时控制 JSON 与 SHA256 下载地址时可整体替换——真正身份验证需要签名
 - 多品牌规则实测积累：当前 23 条规则中 Lenovo 11 条全实测，非联想规则大多 tested=false→investigate（正确但价值有限）。10 分方向是逐台实机积累 Dell/HP/ASUS/Xiaomi/Acer/MSI/Huawei 规则（每台机器扫描→人工确认→测试禁用/恢复→补 evidence 实测字段）。技术框架已跑在数据前面，**找机器实测的价值 > 继续加功能**

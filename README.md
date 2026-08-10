@@ -14,16 +14,17 @@
 
 ## 能力边界（实话实说）
 
-- 当前拥有 **tested=true（实测）且可自动处理** 的高价值规则，绝大部分来自联想 ThinkBook 16p G6 ADR (21U0)，且很多是 tested_count=1 的单机实测
+- 当前拥有 **tested=true（实测）且命中 exact/path 窄 matcher 后可处理** 的高价值规则，绝大部分来自联想 ThinkBook 16p G6 ADR (21U0)，且很多是 tested_count=1 的单机实测
 - 华为 / Dell / HP / ASUS / 小米等品牌已写入特征库，但大多是 tested=false → 动作降级为 investigate（只报告、不自动处理）
 - 因此更准确的定位是：**联想部分机型已具备实战能力的 Windows 后台诊断工具 + 其他品牌的实验性识别框架**，尚不能宣称"任何品牌电脑都可以安全清理"
 - 多品牌实测覆盖是持续积累方向（扫描→人工确认→补 evidence 实测字段，见 CHANGELOG Unreleased 计划）
+- 自动测试全部使用 Mock 或非破坏性夹具；这不等于已在真实用户机器上执行过停服务、删除注册表自启项或禁用计划任务。实际 destructive clean 仍需管理员权限和用户确认
 
 ```
 ├── gui-cleaner.ps1          鼠鼠风格图形界面（WPF，双击 bat 或命令行启动）
 ├── 鼠鼠版-图形界面.bat       图形界面入口（双击即用，不会命令行也能操作）
 ├── cpu-cleaner.ps1        主程序（scan / clean / restore / update 四模式）
-├── bloatware-profiles.json  预装软件特征库（Schema 2.0，可自行扩展）
+├── bloatware-profiles.json  预装软件特征库（Schema 3.0，可自行扩展）
 ├── 1-扫描.bat / 2-清理.bat / 3-恢复.bat   双击启动器（不会命令行的人用）
 ├── 零基础操作指南.md       给完全不会命令行的人的图文步骤
 ├── 命令行入门操作指南.md    从"怎么打开命令行"教起的操作步骤
@@ -94,6 +95,11 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 - 默认只读：scan 不修改任何设置
 - 双重确认：clean 先显示完整清单（名字/动作/原因），输入编号或 all 才执行，可随时 q 退出
 - **safe 强制规则：特征库标 safe=false 的条目只报告、永不进入待办队列，即使 -YesToAll 也拒绝执行**
+- **逐命中授权：每个 scan hit 记录 `matched_pattern` / `matched_type` / `matched_field`；危险动作只由实际命中的 `exact` 或 `path` matcher 授权。`contains` / `regex`（以及 `publisher` / `sha256`）只调查，`execution.allow_auto=true` 不能绕过**
+- **字面匹配：`exact` / `contains` / `path` 都按 `OrdinalIgnoreCase` 做大小写不敏感的字面比较，`*`、`?`、`[]` 没有通配含义；`regex` 是唯一表达式类型，`path` 只允许命中实际路径字段**
+- **pending v2：scan 写入整数 `pending_schema_version: 2`。旧版、缺失版本、字符串或数组版本都必须重新 scan，不自动升级；GUI 生成执行子集时同样拒绝不兼容清单**
+- **管理员态重验：clean 按当前特征库、同一 matcher、同一字段和当前系统对象重新确认服务、自启、任务或进程身份；自启仅允许标准 Run 键。用户选定后、任何备份或系统变更前还会最终复核一次**
+- **敌对清单防护：管理员 clean 拒绝重复 JSON 键、超过 5 MiB、容器深度超过 64、非法 UTF-8 或读取期间变化的 pending 文件，并在同一受保护文件句柄上完成检查与读取**
 - **执行后验证：每个动作执行完重新读取真实状态确认（服务 StartType / 注册表值 / 任务 State），验证通过才标记 success，否则 failed**
 - **状态机：pending → success / failed / skipped / manual_required；重跑只处理 pending 和 failed，其余自动跳过（幂等）**
 - 自动备份：每个处理动作备份到 `backups\时间戳\`，服务备份含启动类型（sc 格式）/原运行状态/DelayedAutoStart，reg 文件 / 任务 XML / manifest 一应俱全
@@ -150,9 +156,9 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ---
 
-## 特征库扩展（Schema 2.0）
+## 特征库扩展（Schema 3.0）
 
-`bloatware-profiles.json` 是纯数据文件（schema_version=2），发现新机型/新软件往里加一条即可，不用改代码：
+`bloatware-profiles.json` 是纯数据文件（`schema_version=3`），发现新机型/新软件往里加一条即可，不用改代码：
 
 ```json
 {
@@ -162,9 +168,9 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
   "risk": "high | medium | low",
   "safe": true,                   // false = 只报告, 永不进执行队列
   "reason_cn": "处理原因（会显示在报告和确认清单里）",
-  "detect": {                     // 每种检测对象的匹配关键词
-    "services":  ["LeMCPManagerService"],
-    "processes": ["mcpman.exe"],
+  "detect": {                     // 每种检测对象的 matcher
+    "services":  [{"match": "LeMCPManagerService", "type": "exact"}],
+    "processes": [{"match": "mcpman.exe", "type": "contains"}],
     "autostarts": [],
     "tasks": []
   },
@@ -181,12 +187,15 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 }
 ```
 
+matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sha256`。危险动作只接受实际命中的 `exact`，或命中 `autostart_value` / `task_path` / `process_path` 的 `path`；其余命中保留为观察项。
+
 **程序启动时自动校验，错误规则直接拒绝加载：**
-- schema_version 必须 = 2（过低/过高都拒绝；无字段的 v1 旧格式自动转换）
+- 当前特征库格式为 Schema 3.0；Schema 2.0 可在加载时迁移，未来版本拒绝加载。此规则与不自动迁移的 pending 清单版本无关
 - id 必须存在且唯一
 - risk 必须是 high/medium/low
 - action 必须是 disable_service / remove_autostart / disable_task / uninstall / investigate / none
 - detect 不能全空（四类至少一个关键词）
+- detect matcher 的 match 必须非空、type 必须合法；`execution.allow_auto` 若存在必须是布尔值，但不参与危险动作授权
 - **safe=false 的规则只能配 none/investigate，配了危险动作（disable/remove/uninstall）直接拒绝**
 
 **动作类型说明：**
@@ -223,6 +232,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ## 版本记录
 
+- Unreleased（Schema 3.0 matcher provenance 安全加固）：scan 到管理员 clean 全链路保存并重验实际 matcher/字段；pending 格式升级为 v2 并拒绝自动迁移旧清单；收紧自启源、对象身份、执行前最终复核及敌对 JSON/文件竞态防护。未发布新版本
 - 2026-08-09 v1.7.0（模块化拆分）：cpu-cleaner.ps1 1539 行 → 主脚本 ~90 行 + src/Core/ 7 个域文件（Utils/ProfileEngine/Scanner/RiskEngine/ReportEngine/ActionEngine/BackupManager），dot-source 保持作用域共享；run-unit/CI analyzer 适配；测试 85+14 项。
 - 2026-08-09 v1.6.0（Schema 3.0 match_type）：detect 从字符串子串升级为显式 match_type（exact/contains/regex/path/publisher/sha256），**执行闸门**——危险动作必须是窄匹配（exact/path）才能自动执行，contains/regex 宽匹配默认降级 investigate（识别保留、执行收紧），实机验证过的规则可显式 execution.allow_auto=true 豁免；旧特征库加载自动迁移 v3（11 条联想实测规则保留自动资格）；测试 85+14 项。
 - 2026-08-09 v1.5.7（CPU 采样升级）：2 秒单次采样 → 5×3 秒多次采样（平均/峰值/持续占用/子进程数），区分「瞬间吃一下」vs「持续后台发疯」；评分新增 +10 持续占用；文本/HTML 报告 Top CPU 表加 平均%/峰值%/持续/子进程 列。
