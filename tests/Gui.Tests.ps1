@@ -613,6 +613,77 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.Directory]::Delete($tmpRoot, $true)
     }
 
+    It '混合 matcher 按 pending v2 provenance 展示且观察项保持不可执行' {
+        $tmpRoot = Join-Path $TestDrive ('gui-mixed-view-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $pending = [pscustomobject]@{
+            pending_schema_version = [int64]2
+            actions = @([pscustomobject]@{
+                id='mixed'; name_cn='精确服务'; hit_type='service'; action='disable_service'; status='pending'
+                service_name='ExactService'; matched_pattern='ExactService'; matched_type='exact'; matched_field='service_name'; reason_cn='narrow'
+            })
+            observations = @([pscustomobject]@{
+                id='mixed'; name_cn='联想观察项'; hit_type='service'; action='investigate'; status='观察'
+                service_name='LenovoOtherService'; matched_pattern='Lenovo'; matched_type='contains'; matched_field='service_name'; obs_reason='宽匹配，只观察'
+            })
+            suspicious = @()
+        }
+        [System.IO.File]::WriteAllText(
+            (Join-Path $tmpRoot 'pending_actions.json'),
+            (ConvertTo-Json -InputObject $pending -Depth 6),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try {
+            $items = @(Get-PendingViewItems)
+            $items.Count | Should -Be 2
+            $items[0].CanExecute | Should -BeTrue
+            $items[0].IsChecked | Should -BeTrue
+            $items[0].matcher_detail | Should -Match 'exact'
+            $items[1].CanExecute | Should -BeFalse
+            $items[1].IsChecked | Should -BeFalse
+            $items[1].matcher_detail | Should -Match 'contains'
+
+            $list = $script:Win.FindName('PendingList')
+            $list.ItemsSource = $items
+            Set-AllChecked $list $true
+            @($list.Items | Where-Object { -not $_.CanExecute -and $_.IsChecked }).Count | Should -Be 0
+        } finally {
+            $script:Root = $oldRoot
+        }
+    }
+
+    It 'review 加载非 v2 pending 时失败关闭且不绑定清单' {
+        $tmpRoot = Join-Path $TestDrive ('gui-stale-review-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        [System.IO.File]::WriteAllText(
+            (Join-Path $tmpRoot 'pending_actions.json'),
+            '{"pending_schema_version":1,"actions":[],"observations":[],"suspicious":[]}',
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try {
+            $list = $script:Win.FindName('PendingList')
+            $list.ItemsSource = @([pscustomobject]@{ name_cn='旧数据' })
+            Set-GuiState results -Force
+
+            $script:Win.FindName('BtnOpenReview').RaiseEvent(
+                [System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)
+            )
+
+            $script:GuiState | Should -Be 'error'
+            $script:Win.FindName('ErrorSummaryText').Text | Should -Be '待处理清单已过期，必须重新扫描。'
+            $script:Win.FindName('ErrorMutationText').Text | Should -Be '没有执行任何系统修改。'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Match '重新运行 scan'
+        } finally {
+            $script:Root = $oldRoot
+        }
+    }
+
     It '全选跳过 CanExecute=false (观察项不被全选勾上, v1.5.6)' {
         $items = @(
             [pscustomobject]@{ CanExecute = $true;  IsChecked = $false },

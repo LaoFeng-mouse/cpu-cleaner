@@ -369,6 +369,9 @@ function Get-PendingViewItems {
             restorable_label  = '可恢复'
             status            = $i.status
             reason_cn         = $i.reason_cn
+            matcher_detail    = Format-GuiMatcherDetail $i
+            matched_type      = [string]$i.matched_type
+            matched_field     = [string]$i.matched_field
             _raw              = $i
         }
     }
@@ -386,6 +389,9 @@ function Get-PendingViewItems {
             restorable_label  = '不可自动'
             status            = '观察'
             reason_cn         = $obsReason
+            matcher_detail    = Format-GuiMatcherDetail $i
+            matched_type      = [string]$i.matched_type
+            matched_field     = [string]$i.matched_field
             _raw              = $i
         }
     }
@@ -630,12 +636,22 @@ function Start-GuiScan {
 $window.FindName('BtnStartScan').Add_Click({ Start-GuiScan })
 $window.FindName('BtnRetry').Add_Click({ Start-GuiScan })
 $window.FindName('BtnOpenReview').Add_Click({
-    $items = @(Get-PendingViewItems)
-    $list = $window.FindName('PendingList')
-    $list.ItemsSource = $null
-    $list.ItemsSource = $items
-    $list.Items.Refresh()
-    Set-GuiState review
+    try {
+        $pendingPath = Join-Path $script:Root 'pending_actions.json'
+        $pending = Get-Content $pendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $null = Get-GuiPendingSchemaVersion $pending
+        $items = @(Get-PendingViewItems)
+        $list = $window.FindName('PendingList')
+        $list.ItemsSource = $null
+        $list.ItemsSource = $items
+        $list.Items.Refresh()
+        Set-GuiState review
+    } catch {
+        $window.FindName('ErrorSummaryText').Text = '待处理清单已过期，必须重新扫描。'
+        $window.FindName('ErrorMutationText').Text = '没有执行任何系统修改。'
+        $window.FindName('ErrorDetailText').Text = $_.Exception.Message
+        Set-GuiState error
+    }
 })
 
 # ---------- 读取处理建议 (v1.5.5: 勾选视图 — 风险/实测/建议标签 + 默认勾选 + 全选/清空) ----------
