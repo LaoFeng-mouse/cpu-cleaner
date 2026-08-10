@@ -245,57 +245,76 @@ Describe 'GUI 壳 (无窗口)' {
         $script:Win.FindName('ErrorPanel').Visibility.ToString() | Should -Be 'Visible'
     }
 
-    It '扫描轮询: Completed 恢复按钮并置进度 100' {
-        $btn = [pscustomobject]@{ IsEnabled = $false }
-        $prog = [pscustomobject]@{ Value = 0 }
-        $out = [pscustomobject]@{ Text = '' }
-        $t1 = New-FakeTimer
-        $t2 = New-FakeTimer
-        $job = [pscustomobject]@{ State = 'Completed' }
-        $done = Complete-ScanPoll -job $job -checkTimer $t1 -scanTimer $t2 -btn $btn -prog $prog -out $out
-        $done | Should -Be $true
-        $btn.IsEnabled | Should -Be $true
-        $prog.Value | Should -Be 100
-        $t1.Stopped | Should -Be $true
-        $t2.Stopped | Should -Be $true
+    It 'starts a direct streaming scan job without fake numeric progress' {
+        $source = Get-Content (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw -Encoding UTF8
+        $source | Should -Match 'function Start-GuiScan'
+        $source | Should -Match '& powershell\.exe -NoProfile -ExecutionPolicy Bypass -File \$scriptPath -Mode scan 2>&1'
+        $source | Should -Match '\$script:ScanTranscript'
+        $source | Should -Match '\$script:ScanJob = Start-Job'
+        $source | Should -Match 'Receive-GuiScanOutput \$script:ScanJob'
+        $source | Should -Not -Match 'Get-Random'
+        $source | Should -Not -Match 'Value\s*\+='
+        $source | Should -Not -Match 'cmd\s+/c'
     }
 
-    It '扫描轮询: Failed 恢复按钮并提示失败 (v1.5.3 修复)' {
-        $btn = [pscustomobject]@{ IsEnabled = $false }
-        $prog = [pscustomobject]@{ Value = 0 }
-        $out = [pscustomobject]@{ Text = '' }
-        $t1 = New-FakeTimer
-        $t2 = New-FakeTimer
-        $job = [pscustomobject]@{ State = 'Failed' }
-        $done = Complete-ScanPoll -job $job -checkTimer $t1 -scanTimer $t2 -btn $btn -prog $prog -out $out
-        $done | Should -Be $true
-        $btn.IsEnabled | Should -Be $true
-        ($out.Text -match '扫描失败') | Should -Be $true
+    It 'wires start, retry, and review navigation to shared functions' {
+        $source = Get-Content (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw -Encoding UTF8
+        $source | Should -Match "BtnStartScan'\)\.Add_Click\(\{\s*Start-GuiScan\s*\}\)"
+        $source | Should -Match "BtnRetry'\)\.Add_Click\(\{\s*Start-GuiScan\s*\}\)"
+        $source | Should -Match "BtnOpenReview'\)\.Add_Click"
+        $source | Should -Match 'Get-PendingViewItems'
+        $source | Should -Match 'Set-GuiState review'
     }
 
-    It '扫描轮询: Stopped 同样收尾' {
-        $btn = [pscustomobject]@{ IsEnabled = $false }
-        $prog = [pscustomobject]@{ Value = 0 }
-        $out = [pscustomobject]@{ Text = '' }
-        $t1 = New-FakeTimer
-        $t2 = New-FakeTimer
-        $job = [pscustomobject]@{ State = 'Stopped' }
-        $done = Complete-ScanPoll -job $job -checkTimer $t1 -scanTimer $t2 -btn $btn -prog $prog -out $out
-        $done | Should -Be $true
-        $btn.IsEnabled | Should -Be $true
+    It 'completed scan stops timers, loads result counts, and enters results' {
+        Mock Receive-Job { 'scan complete' }
+        Mock Remove-Job {}
+        Mock Get-PendingViewItems {
+            @([pscustomobject]@{CanExecute=$true},[pscustomobject]@{CanExecute=$false})
+        }
+        Set-GuiState scanning -Force
+        $checkTimer = New-FakeTimer
+        $scanTimer = New-FakeTimer
+        $done = Complete-ScanPoll -job ([pscustomobject]@{State='Completed'}) -checkTimer $checkTimer -scanTimer $scanTimer
+        $done | Should -BeTrue
+        $checkTimer.Stopped | Should -BeTrue
+        $scanTimer.Stopped | Should -BeTrue
+        $script:GuiState | Should -Be 'results'
+        $script:Win.FindName('ScanProgress').IsIndeterminate | Should -BeFalse
+        $script:Win.FindName('ResultSummaryText').Text | Should -Match '1'
     }
 
-    It '扫描轮询: Running 不处理 (按钮保持禁用)' {
-        $btn = [pscustomobject]@{ IsEnabled = $false }
-        $prog = [pscustomobject]@{ Value = 0 }
-        $out = [pscustomobject]@{ Text = '' }
+    It 'failed scan enters error and states that no mutation occurred' {
+        Mock Receive-Job { 'scanner failed' }
+        Mock Remove-Job {}
+        Set-GuiState scanning -Force
+        Complete-ScanPoll -job ([pscustomobject]@{State='Failed'}) -checkTimer (New-FakeTimer) -scanTimer (New-FakeTimer) | Should -BeTrue
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '未修改'
+    }
+
+    It 'stopped scan enters error and stops both timers' {
+        Mock Receive-Job { 'scanner stopped' }
+        Mock Remove-Job {}
         $t1 = New-FakeTimer
         $t2 = New-FakeTimer
-        $job = [pscustomobject]@{ State = 'Running' }
-        $done = Complete-ScanPoll -job $job -checkTimer $t1 -scanTimer $t2 -btn $btn -prog $prog -out $out
-        $done | Should -Be $false
-        $btn.IsEnabled | Should -Be $false
-        $t1.Stopped | Should -Be $false
+        Set-GuiState scanning -Force
+        $done = Complete-ScanPoll -job ([pscustomobject]@{State='Stopped'}) -checkTimer $t1 -scanTimer $t2
+        $done | Should -BeTrue
+        $t1.Stopped | Should -BeTrue
+        $t2.Stopped | Should -BeTrue
+        $script:GuiState | Should -Be 'error'
+    }
+
+    It 'running scan remains scanning and leaves timers active' {
+        $t1 = New-FakeTimer
+        $t2 = New-FakeTimer
+        Set-GuiState scanning -Force
+        $done = Complete-ScanPoll -job ([pscustomobject]@{State='Running'}) -checkTimer $t1 -scanTimer $t2
+        $done | Should -BeFalse
+        $script:GuiState | Should -Be 'scanning'
+        $t1.Stopped | Should -BeFalse
+        $t2.Stopped | Should -BeFalse
     }
 
     It 'clean 结果统计 success/failed/skipped/manual' {

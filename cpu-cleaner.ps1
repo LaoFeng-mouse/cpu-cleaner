@@ -58,16 +58,16 @@ foreach ($f in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','
 # ---------- 主流程 ----------
 switch ($Mode) {
     'scan' {
-        Write-Step '扫描系统 (只读, 不修改任何设置)...'
-        $sys = Get-SystemInfo
-        $procs = Get-TopProcesses 12
+        Write-Step '读取系统信息...';       $sys = Get-SystemInfo
+        Write-Step '检查高占用进程...';     $procs = Get-TopProcesses 12
         $susp = Get-SuspiciousProcesses $procs
-        $svcs = Get-ServicesInfo
-        $autos = Get-AutoStart
-        $tasks = Get-TasksInfo
-        $hits = Match-Profiles -Services $svcs -AutoStarts $autos -Tasks $tasks -TopProcs $procs
+        Write-Step '检查系统服务...';       $svcs = Get-ServicesInfo
+        Write-Step '检查启动项...';         $autos = Get-AutoStart
+        Write-Step '检查计划任务...';       $tasks = Get-TasksInfo
+        Write-Step '匹配安全规则...';       $hits = Match-Profiles -Services $svcs -AutoStarts $autos -Tasks $tasks -TopProcs $procs
         $autoStartNames = Get-AutoStartProcessNames $autos
 
+        Write-Step '生成扫描报告...'
         $report = Write-ScanReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -Services $svcs -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames
         Write-Host $report
 

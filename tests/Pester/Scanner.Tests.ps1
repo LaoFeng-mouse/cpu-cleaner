@@ -73,4 +73,17 @@ Describe '扫描器与评分' {
         $r = Get-ProcessRiskScore -proc $top[0] -ProfileHits @() -AutoStartNames @() -TopProcs $top
         ($r.Reasons -match '持续占用') | Should -Be $false
     }
+    It 'emits scan phases in the same order as the read-only pipeline' {
+        $source = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
+        $markers = @(
+            '读取系统信息', '检查高占用进程', '检查系统服务', '检查启动项',
+            '检查计划任务', '匹配安全规则', '生成扫描报告'
+        )
+        $last = -1
+        foreach ($marker in $markers) {
+            $index = $source.IndexOf($marker, [System.StringComparison]::Ordinal)
+            $index | Should -BeGreaterThan $last
+            $last = $index
+        }
+    }
 }

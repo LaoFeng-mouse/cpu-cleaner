@@ -414,17 +414,63 @@ function Merge-PendingStatus($SubsetPath) {
 
 # v1.5.3: 扫描 job 收尾统一处理 — Completed 成功 / Failed / Stopped 都要恢复 UI
 # 返回 $true 表示 job 已结束 (轮询 timer 应停止), $false 表示仍在运行
+$script:ScanPhaseMarkers = @(
+    '读取系统信息', '检查高占用进程', '检查系统服务', '检查启动项',
+    '检查计划任务', '匹配安全规则', '生成扫描报告'
+)
+$script:ScanTranscript = ''
+
+function Add-GuiScanOutput {
+    param([object[]]$Lines)
+    foreach ($line in @($Lines)) {
+        if ($null -eq $line) { continue }
+        $text = [string]$line
+        if ([string]::IsNullOrEmpty($script:ScanTranscript)) {
+            $script:ScanTranscript = $text
+        } else {
+            $script:ScanTranscript += "`r`n$text"
+        }
+        foreach ($marker in $script:ScanPhaseMarkers) {
+            if ($text.IndexOf($marker, [System.StringComparison]::Ordinal) -ge 0) {
+                $window.FindName('ScanPhaseText').Text = $marker
+                break
+            }
+        }
+    }
+    $window.FindName('ScanOutput').Text = $script:ScanTranscript
+}
+
+function Receive-GuiScanOutput {
+    param($job)
+    try { $lines = @(Receive-Job $job -ErrorAction SilentlyContinue) }
+    catch { $lines = @($_.Exception.Message) }
+    Add-GuiScanOutput -Lines $lines
+    return $lines
+}
+
 function Complete-ScanPoll {
-    param($job, $checkTimer, $scanTimer, $btn, $prog, $out)
+    param($job, $checkTimer, $scanTimer)
     if ($job.State -notin @('Completed','Failed','Stopped')) { return $false }
-    $checkTimer.Stop()
-    $scanTimer.Stop()
-    try { $result = Receive-Job $job -ErrorAction SilentlyContinue } catch { $result = '' }
+    $checkTimer.Stop(); $scanTimer.Stop()
+    try {
+        $null = Receive-GuiScanOutput $job
+        $result = $script:ScanTranscript
+    } catch { $result = $_.Exception.Message }
     try { Remove-Job $job -Force -ErrorAction SilentlyContinue } catch {}
-    $prog.Value = 100
-    if ($job.State -eq 'Completed') { $out.Text = $result }
-    else { $out.Text = "扫描失败 (后台任务状态: $($job.State))`r`n$result" }
-    $btn.IsEnabled = $true
+    $window.FindName('ScanProgress').IsIndeterminate = $false
+    $window.FindName('BtnStartScan').IsEnabled = $true
+    $window.FindName('ScanOutput').Text = [string]$result
+    if ($job.State -eq 'Completed') {
+        $items = @(Get-PendingViewItems)
+        $summary = Get-GuiItemSummary $items
+        $window.FindName('ResultSummaryText').Text = ('{0} 项可以安全处理，{1} 项建议观察' -f $summary.executable, $summary.observation)
+        Set-GuiState results
+    } else {
+        $window.FindName('ErrorSummaryText').Text = "扫描失败：$($job.State)"
+        $window.FindName('ErrorMutationText').Text = '扫描阶段未修改任何系统设置。'
+        $window.FindName('ErrorDetailText').Text = [string]$result
+        Set-GuiState error
+    }
     return $true
 }
 
@@ -447,40 +493,49 @@ $window.FindName('BtnLang').Add_Click({
     Apply-Language
 })
 
-# ---------- 扫描 (后台 job + 进度条动画) ----------
+# ---------- 扫描 (后台 job + 真实阶段输出) ----------
 $script:ScanTimer = $null
-$legacyBtnScan = $window.FindName('BtnScan')
-if ($legacyBtnScan) { $legacyBtnScan.Add_Click({
-    $btn = $window.FindName('BtnScan')
-    $out = $window.FindName('ScanOutput')
-    $prog = $window.FindName('ScanProgress')
-    $btn.IsEnabled = $false
-    $out.Text = (Get-Text 'Scanning')
-    $prog.Value = 0
+$script:ScanCheckTimer = $null
+$script:ScanJob = $null
+function Start-GuiScan {
+    Set-GuiState scanning
+    $window.FindName('ScanProgress').IsIndeterminate = $true
+    $window.FindName('ScanPhaseText').Text = '正在检查服务、启动项、计划任务和进程'
+    $window.FindName('ScanOutput').Text = (Get-Text 'Scanning')
+    $window.FindName('BtnStartScan').IsEnabled = $false
+    $script:ScanTranscript = ''
 
-    # 进度条动画 (UI 线程定时推进)
+    $script:ScanJob = Start-Job -ScriptBlock {
+        param($scriptPath)
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode scan 2>&1
+    } -ArgumentList (Join-Path $script:Root 'cpu-cleaner.ps1')
+
     $script:ScanTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(200)
     $script:ScanTimer.Add_Tick({
-        if ($prog.Value -lt 90) { $prog.Value += (Get-Random -Minimum 2 -Maximum 6) }
-        if ($prog.Value -gt 90) { $prog.Value = 90 }
+        $null = Receive-GuiScanOutput $script:ScanJob
     })
     $script:ScanTimer.Start()
 
-    # 后台 job 跑 scan
-    $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$script:Root\cpu-cleaner.ps1`" -Mode scan"
-    $job = Start-Job -ScriptBlock { param($c) cmd /c $c 2>&1 | Out-String } -ArgumentList $cmd
-
-    # 轮询 job 完成 (UI 不卡: 用第二个 timer; v1.5.3: Completed/Failed/Stopped 都收尾)
-    $checkTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $checkTimer.Interval = [TimeSpan]::FromMilliseconds(800)
-    $checkTimer.Add_Tick({
-        if (Complete-ScanPoll -job $job -checkTimer $checkTimer -scanTimer $script:ScanTimer -btn $btn -prog $prog -out $out) {
-            $checkTimer.Stop()
-        }
+    $script:ScanCheckTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:ScanCheckTimer.Interval = [TimeSpan]::FromMilliseconds(800)
+    $script:ScanCheckTimer.Add_Tick({
+        $null = Receive-GuiScanOutput $script:ScanJob
+        $null = Complete-ScanPoll -job $script:ScanJob -checkTimer $script:ScanCheckTimer -scanTimer $script:ScanTimer
     })
-    $checkTimer.Start()
-}) }
+    $script:ScanCheckTimer.Start()
+}
+
+$window.FindName('BtnStartScan').Add_Click({ Start-GuiScan })
+$window.FindName('BtnRetry').Add_Click({ Start-GuiScan })
+$window.FindName('BtnOpenReview').Add_Click({
+    $items = @(Get-PendingViewItems)
+    $list = $window.FindName('PendingList')
+    $list.ItemsSource = $null
+    $list.ItemsSource = $items
+    $list.Items.Refresh()
+    Set-GuiState review
+})
 
 # ---------- 读取处理建议 (v1.5.5: 勾选视图 — 风险/实测/建议标签 + 默认勾选 + 全选/清空) ----------
 $legacyBtnLoadPending = $window.FindName('BtnLoadPending')
