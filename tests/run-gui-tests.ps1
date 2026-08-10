@@ -4,5 +4,12 @@ $ErrorActionPreference = 'Stop'
 $env:SHUSHU_CLEANER_TEST = '1'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Import-Module Pester -RequiredVersion 5.9.0
-$r = Invoke-Pester (Join-Path $PSScriptRoot 'Gui.Tests.ps1') -PassThru
+$config = New-PesterConfiguration
+$config.Run.Path = @(
+    (Join-Path $PSScriptRoot 'GuiPresentation.Tests.ps1'),
+    (Join-Path $PSScriptRoot 'Gui.Tests.ps1')
+)
+$config.Run.PassThru = $true
+$config.Output.Verbosity = 'Detailed'
+$r = Invoke-Pester -Configuration $config
 if ($r.FailedCount -gt 0) { throw "GUI tests failed: $($r.FailedCount)" }
