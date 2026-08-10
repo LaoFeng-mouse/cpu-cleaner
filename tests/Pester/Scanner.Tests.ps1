@@ -75,13 +75,21 @@ Describe '扫描器与评分' {
     }
     It 'emits scan phases in the same order as the read-only pipeline' {
         $source = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
-        $markers = @(
-            '读取系统信息', '检查高占用进程', '检查系统服务', '检查启动项',
-            '检查计划任务', '匹配安全规则', '生成扫描报告'
+        $expected = @(
+            @{ Marker='读取系统信息'; Operation='\$sys\s*=\s*Get-SystemInfo' },
+            @{ Marker='检查高占用进程'; Operation='\$procs\s*=\s*Get-TopProcesses\s+12' },
+            @{ Marker='检查系统服务'; Operation='\$svcs\s*=\s*Get-ServicesInfo' },
+            @{ Marker='检查启动项'; Operation='\$autos\s*=\s*Get-AutoStart' },
+            @{ Marker='检查计划任务'; Operation='\$tasks\s*=\s*Get-TasksInfo' },
+            @{ Marker='匹配安全规则'; Operation='\$hits\s*=\s*Match-Profiles' },
+            @{ Marker='生成扫描报告'; Operation='\$report\s*=\s*Write-ScanReport' }
         )
         $last = -1
-        foreach ($marker in $markers) {
-            $index = $source.IndexOf($marker, [System.StringComparison]::Ordinal)
+        foreach ($phase in $expected) {
+            [regex]::Matches($source, [regex]::Escape($phase.Marker)).Count | Should -Be 1
+            $adjacent = "Write-Step\s+'{0}\.\.\.'(?:;|\r?\n)\s*{1}" -f [regex]::Escape($phase.Marker), $phase.Operation
+            $source | Should -Match $adjacent
+            $index = $source.IndexOf($phase.Marker, [System.StringComparison]::Ordinal)
             $index | Should -BeGreaterThan $last
             $last = $index
         }

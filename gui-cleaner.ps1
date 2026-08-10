@@ -25,6 +25,8 @@ $script:I18N = @{
         AppName='鼠鼠cleaner'; SubTitle='扫描 · 清理 · 恢复 —— 全程自动备份，后悔可还原'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
         TabScan='🐹 1. 扫描（只读）'; TabPending='📋 2. 处理建议'; TabExec='⚙️ 3. 执行（管理员）'; TabResult='✅ 4. 结果与恢复'
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
+        ScanPhaseInitial='正在检查服务、启动项、计划任务和进程'; ScanPhaseSystemInfo='读取系统信息'; ScanPhaseProcesses='检查高占用进程'; ScanPhaseServices='检查系统服务'; ScanPhaseAutoStart='检查启动项'; ScanPhaseTasks='检查计划任务'; ScanPhaseRules='匹配安全规则'; ScanPhaseReport='生成扫描报告'
+        ScanResultSummary='{0} 项可以安全处理，{1} 项建议观察'; ScanErrorSummary='扫描失败：{0}'; ScanNoMutation='扫描阶段未修改任何系统设置。'; ScanStatusStart='启动'; ScanStatusOutput='输出读取'; ScanStatusResults='结果处理'
         BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
         SelectAll='全选'; ClearAll='清空'
         ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
@@ -45,6 +47,8 @@ $script:I18N = @{
         AppName='Shushu Cleaner'; SubTitle='Scan · Clean · Restore — auto backup, undo anytime'; Hint0='GUI is a shell; core logic is identical to CLI'
         TabScan='🐹 1. Scan (read-only)'; TabPending='📋 2. Recommendations'; TabExec='⚙️ 3. Execute (admin)'; TabResult='✅ 4. Result & Restore'
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
+        ScanPhaseInitial='Checking services, startup items, scheduled tasks, and processes'; ScanPhaseSystemInfo='Reading system information'; ScanPhaseProcesses='Checking high-usage processes'; ScanPhaseServices='Checking system services'; ScanPhaseAutoStart='Checking startup items'; ScanPhaseTasks='Checking scheduled tasks'; ScanPhaseRules='Matching safety rules'; ScanPhaseReport='Generating scan report'
+        ScanResultSummary='{0} safe item(s), {1} observation(s)'; ScanErrorSummary='Scan failed: {0}'; ScanNoMutation='The scan did not change any system settings.'; ScanStatusStart='startup'; ScanStatusOutput='output read'; ScanStatusResults='result processing'
         BtnLoad='Load Pending Items'; PendingHint='Risk & evidence shown; check items to process (unverified = observe only, unchecked)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Check items, then go to tab 3.'
         SelectAll='Select All'; ClearAll='Clear'
         ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
@@ -418,60 +422,145 @@ $script:ScanPhaseMarkers = @(
     '读取系统信息', '检查高占用进程', '检查系统服务', '检查启动项',
     '检查计划任务', '匹配安全规则', '生成扫描报告'
 )
+$script:ScanPhaseTextKeys = @{
+    '读取系统信息' = 'ScanPhaseSystemInfo'
+    '检查高占用进程' = 'ScanPhaseProcesses'
+    '检查系统服务' = 'ScanPhaseServices'
+    '检查启动项' = 'ScanPhaseAutoStart'
+    '检查计划任务' = 'ScanPhaseTasks'
+    '匹配安全规则' = 'ScanPhaseRules'
+    '生成扫描报告' = 'ScanPhaseReport'
+}
+$script:ScanTranscriptLimit = 65536
 $script:ScanTranscript = ''
 
 function Add-GuiScanOutput {
     param([object[]]$Lines)
+    $added = $false
     foreach ($line in @($Lines)) {
         if ($null -eq $line) { continue }
+        $added = $true
         $text = [string]$line
         if ([string]::IsNullOrEmpty($script:ScanTranscript)) {
             $script:ScanTranscript = $text
         } else {
             $script:ScanTranscript += "`r`n$text"
         }
+        if ($script:ScanTranscript.Length -gt $script:ScanTranscriptLimit) {
+            $script:ScanTranscript = $script:ScanTranscript.Substring($script:ScanTranscript.Length - $script:ScanTranscriptLimit)
+        }
         foreach ($marker in $script:ScanPhaseMarkers) {
             if ($text.IndexOf($marker, [System.StringComparison]::Ordinal) -ge 0) {
-                $window.FindName('ScanPhaseText').Text = $marker
+                $window.FindName('ScanPhaseText').Text = Get-Text $script:ScanPhaseTextKeys[$marker]
                 break
             }
         }
     }
-    $window.FindName('ScanOutput').Text = $script:ScanTranscript
+    if ($added) { $window.FindName('ScanOutput').Text = $script:ScanTranscript }
 }
 
 function Receive-GuiScanOutput {
     param($job)
-    try { $lines = @(Receive-Job $job -ErrorAction SilentlyContinue) }
-    catch { $lines = @($_.Exception.Message) }
+    $lines = @(Read-GuiBackgroundJob $job)
     Add-GuiScanOutput -Lines $lines
     return $lines
+}
+
+function Read-GuiBackgroundJob {
+    param($Job)
+    return @(Receive-Job $Job -ErrorAction SilentlyContinue)
+}
+
+function Invoke-GuiBackgroundJobStop {
+    param($Job)
+    Stop-Job $Job -ErrorAction SilentlyContinue
+}
+
+function Invoke-GuiBackgroundJobRemoval {
+    param($Job)
+    Remove-Job $Job -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-GuiTimerStop {
+    param($Timer)
+    if ($null -ne $Timer) {
+        try { $Timer.Stop() } catch { $null = $_ }
+    }
+}
+
+function Invoke-GuiScanJobRemoval {
+    param($Job)
+    if ($null -eq $Job) { return }
+    if ($Job.State -notin @('Completed','Failed','Stopped')) {
+        try { Invoke-GuiBackgroundJobStop $Job } catch { $null = $_ }
+    }
+    try { Invoke-GuiBackgroundJobRemoval $Job } catch { $null = $_ }
+}
+
+function Invoke-GuiScanResourceCleanup {
+    param($Job, $CheckTimer, $ScanTimer)
+    Invoke-GuiTimerStop $CheckTimer
+    Invoke-GuiTimerStop $ScanTimer
+    Invoke-GuiScanJobRemoval $Job
+    $script:ScanJob = $null
+    $script:ScanCheckTimer = $null
+    $script:ScanTimer = $null
+}
+
+function Show-GuiScanError {
+    param([string]$Status, [string]$Detail)
+    $window.FindName('ScanProgress').IsIndeterminate = $false
+    $window.FindName('BtnStartScan').IsEnabled = $true
+    $window.FindName('ErrorSummaryText').Text = ((Get-Text 'ScanErrorSummary') -f $Status)
+    $window.FindName('ErrorMutationText').Text = (Get-Text 'ScanNoMutation')
+    $window.FindName('ErrorDetailText').Text = $Detail
+    Set-GuiState error
 }
 
 function Complete-ScanPoll {
     param($job, $checkTimer, $scanTimer)
     if ($job.State -notin @('Completed','Failed','Stopped')) { return $false }
-    $checkTimer.Stop(); $scanTimer.Stop()
+    Invoke-GuiTimerStop $checkTimer
+    Invoke-GuiTimerStop $scanTimer
+    $result = $script:ScanTranscript
     try {
         $null = Receive-GuiScanOutput $job
         $result = $script:ScanTranscript
-    } catch { $result = $_.Exception.Message }
-    try { Remove-Job $job -Force -ErrorAction SilentlyContinue } catch {}
-    $window.FindName('ScanProgress').IsIndeterminate = $false
-    $window.FindName('BtnStartScan').IsEnabled = $true
-    $window.FindName('ScanOutput').Text = [string]$result
-    if ($job.State -eq 'Completed') {
-        $items = @(Get-PendingViewItems)
-        $summary = Get-GuiItemSummary $items
-        $window.FindName('ResultSummaryText').Text = ('{0} 项可以安全处理，{1} 项建议观察' -f $summary.executable, $summary.observation)
-        Set-GuiState results
-    } else {
-        $window.FindName('ErrorSummaryText').Text = "扫描失败：$($job.State)"
-        $window.FindName('ErrorMutationText').Text = '扫描阶段未修改任何系统设置。'
-        $window.FindName('ErrorDetailText').Text = [string]$result
-        Set-GuiState error
+        $window.FindName('ScanProgress').IsIndeterminate = $false
+        $window.FindName('BtnStartScan').IsEnabled = $true
+        $window.FindName('ScanOutput').Text = [string]$result
+        if ($job.State -eq 'Completed') {
+            $items = @(Get-PendingViewItems)
+            $summary = Get-GuiItemSummary $items
+            $window.FindName('ResultSummaryText').Text = ((Get-Text 'ScanResultSummary') -f $summary.executable, $summary.observation)
+            Set-GuiState results
+        } else {
+            Show-GuiScanError -Status ([string]$job.State) -Detail ([string]$result)
+        }
+    } catch {
+        $detail = if ([string]::IsNullOrEmpty($result)) { $_.Exception.ToString() } else { "$result`r`n$($_.Exception)" }
+        Show-GuiScanError -Status (Get-Text 'ScanStatusResults') -Detail $detail
+    } finally {
+        Invoke-GuiScanJobRemoval $job
+        $script:ScanJob = $null
+        $script:ScanCheckTimer = $null
+        $script:ScanTimer = $null
+        $window.FindName('ScanProgress').IsIndeterminate = $false
+        $window.FindName('BtnStartScan').IsEnabled = $true
     }
     return $true
+}
+
+function Invoke-GuiScanPoll {
+    param($job, $checkTimer, $scanTimer)
+    try {
+        $null = Receive-GuiScanOutput $job
+        return (Complete-ScanPoll -job $job -checkTimer $checkTimer -scanTimer $scanTimer)
+    } catch {
+        Invoke-GuiScanResourceCleanup -Job $job -CheckTimer $checkTimer -ScanTimer $scanTimer
+        Show-GuiScanError -Status (Get-Text 'ScanStatusOutput') -Detail $_.Exception.ToString()
+        return $true
+    }
 }
 
 # v1.5.3: clean 完成后读回 pending_actions.json 状态机统计 (不信任"进程结束=成功")
@@ -497,33 +586,45 @@ $window.FindName('BtnLang').Add_Click({
 $script:ScanTimer = $null
 $script:ScanCheckTimer = $null
 $script:ScanJob = $null
+$script:ScanJobScript = {
+    param($scriptPath)
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode scan 2>&1
+    $nativeExitCode = $LASTEXITCODE
+    if ($nativeExitCode -ne 0) { throw "Scanner process exited with code $nativeExitCode." }
+}
 function Start-GuiScan {
-    Set-GuiState scanning
-    $window.FindName('ScanProgress').IsIndeterminate = $true
-    $window.FindName('ScanPhaseText').Text = '正在检查服务、启动项、计划任务和进程'
-    $window.FindName('ScanOutput').Text = (Get-Text 'Scanning')
-    $window.FindName('BtnStartScan').IsEnabled = $false
-    $script:ScanTranscript = ''
+    $script:ScanJob = $null
+    $script:ScanCheckTimer = $null
+    $script:ScanTimer = $null
+    try {
+        Set-GuiState scanning
+        $window.FindName('ScanProgress').IsIndeterminate = $true
+        $window.FindName('ScanPhaseText').Text = (Get-Text 'ScanPhaseInitial')
+        $window.FindName('ScanOutput').Text = (Get-Text 'Scanning')
+        $window.FindName('BtnStartScan').IsEnabled = $false
+        $script:ScanTranscript = ''
 
-    $script:ScanJob = Start-Job -ScriptBlock {
-        param($scriptPath)
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode scan 2>&1
-    } -ArgumentList (Join-Path $script:Root 'cpu-cleaner.ps1')
+        $script:ScanJob = Start-Job -ScriptBlock $script:ScanJobScript -ArgumentList (Join-Path $script:Root 'cpu-cleaner.ps1')
 
-    $script:ScanTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(200)
-    $script:ScanTimer.Add_Tick({
-        $null = Receive-GuiScanOutput $script:ScanJob
-    })
-    $script:ScanTimer.Start()
+        $script:ScanTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+        $script:ScanTimer.Add_Tick({
+            $null = Invoke-GuiScanPoll -job $script:ScanJob -checkTimer $script:ScanCheckTimer -scanTimer $script:ScanTimer
+        })
+        $script:ScanTimer.Start()
 
-    $script:ScanCheckTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:ScanCheckTimer.Interval = [TimeSpan]::FromMilliseconds(800)
-    $script:ScanCheckTimer.Add_Tick({
-        $null = Receive-GuiScanOutput $script:ScanJob
-        $null = Complete-ScanPoll -job $script:ScanJob -checkTimer $script:ScanCheckTimer -scanTimer $script:ScanTimer
-    })
-    $script:ScanCheckTimer.Start()
+        $script:ScanCheckTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:ScanCheckTimer.Interval = [TimeSpan]::FromMilliseconds(800)
+        $script:ScanCheckTimer.Add_Tick({
+            $null = Invoke-GuiScanPoll -job $script:ScanJob -checkTimer $script:ScanCheckTimer -scanTimer $script:ScanTimer
+        })
+        $script:ScanCheckTimer.Start()
+        return $true
+    } catch {
+        Invoke-GuiScanResourceCleanup -Job $script:ScanJob -CheckTimer $script:ScanCheckTimer -ScanTimer $script:ScanTimer
+        Show-GuiScanError -Status (Get-Text 'ScanStatusStart') -Detail $_.Exception.ToString()
+        return $false
+    }
 }
 
 $window.FindName('BtnStartScan').Add_Click({ Start-GuiScan })

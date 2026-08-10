@@ -1,6 +1,6 @@
 ﻿$script:GuiStateNames = @('idle','scanning','results','review','executing','completed','error')
 $script:GuiTransitions = @{
-    idle      = @('scanning')
+    idle      = @('scanning','error')
     scanning  = @('results','error')
     results   = @('review','scanning','idle','error')
     review    = @('executing','results','idle','error')

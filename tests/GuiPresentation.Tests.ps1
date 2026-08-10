@@ -9,6 +9,7 @@ Describe 'GUI presentation model' {
 
     It 'allows only approved forward and recovery transitions' {
         Test-GuiStateTransition idle scanning | Should -BeTrue
+        Test-GuiStateTransition idle error | Should -BeTrue
         Test-GuiStateTransition scanning results | Should -BeTrue
         Test-GuiStateTransition results review | Should -BeTrue
         Test-GuiStateTransition review executing | Should -BeTrue
@@ -25,7 +26,7 @@ Describe 'GUI presentation model' {
     It 'matches the full approved transition matrix' {
         $states = @('idle','scanning','results','review','executing','completed','error')
         $approved = @{
-            idle      = @('scanning')
+            idle      = @('scanning','error')
             scanning  = @('results','error')
             results   = @('review','scanning','idle','error')
             review    = @('executing','results','idle','error')

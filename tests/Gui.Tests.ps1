@@ -11,7 +11,12 @@ Describe 'GUI 壳 (无窗口)' {
         function New-FakeTimer {
             $t = New-Object PSObject
             $t | Add-Member -MemberType NoteProperty -Name Stopped -Value $false
+            $t | Add-Member -MemberType NoteProperty -Name Started -Value $false
+            $t | Add-Member -MemberType NoteProperty -Name TickHandler -Value $null
+            $t | Add-Member -MemberType NoteProperty -Name Interval -Value $null
             $t | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.Stopped = $true }
+            $t | Add-Member -MemberType ScriptMethod -Name Start -Value { $this.Started = $true }
+            $t | Add-Member -MemberType ScriptMethod -Name Add_Tick -Value { param($handler); $this.TickHandler = $handler }
             return $t
         }
 
@@ -251,10 +256,199 @@ Describe 'GUI 壳 (无窗口)' {
         $source | Should -Match '& powershell\.exe -NoProfile -ExecutionPolicy Bypass -File \$scriptPath -Mode scan 2>&1'
         $source | Should -Match '\$script:ScanTranscript'
         $source | Should -Match '\$script:ScanJob = Start-Job'
-        $source | Should -Match 'Receive-GuiScanOutput \$script:ScanJob'
+        $source | Should -Match 'Invoke-GuiScanPoll -job \$script:ScanJob'
         $source | Should -Not -Match 'Get-Random'
         $source | Should -Not -Match 'Value\s*\+='
         $source | Should -Not -Match 'cmd\s+/c'
+    }
+
+    It 'native scanner exit 7 fails the job, enters error, and never loads stale pending' {
+        if ($null -eq $script:ScanJobScript) {
+            $script:ScanJobScript | Should -Not -BeNullOrEmpty
+            return
+        }
+        $childScript = Join-Path $env:TEMP ('shushu_scan_exit_' + [guid]::NewGuid().ToString('N') + '.ps1')
+        [System.IO.File]::WriteAllText($childScript, "Write-Output 'child-output'`r`nexit 7", [System.Text.UTF8Encoding]::new($true))
+        $job = $null
+        try {
+            $job = Start-Job -ScriptBlock $script:ScanJobScript -ArgumentList $childScript
+            Wait-Job $job | Out-Null
+            $job.State | Should -Be 'Failed'
+            Mock Get-PendingViewItems { throw 'stale pending must not be loaded' }
+            Set-GuiState scanning -Force
+            $script:ScanTranscript = ''
+            Complete-ScanPoll -job $job -checkTimer (New-FakeTimer) -scanTimer (New-FakeTimer) | Should -BeTrue
+            $script:GuiState | Should -Be 'error'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Match 'child-output'
+            Should -Invoke Get-PendingViewItems -Times 0 -Exactly
+        } finally {
+            if ($job -and (Get-Job -Id $job.Id -ErrorAction SilentlyContinue)) { Remove-Job $job -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $childScript -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'job creation failure leaves no stranded scanning state' {
+        Mock Start-Job { throw 'job creation failed' }
+        Mock Invoke-GuiBackgroundJobStop {}
+        Mock Invoke-GuiBackgroundJobRemoval {}
+        Set-GuiState idle -Force
+        Start-GuiScan | Should -BeFalse
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('BtnStartScan').IsEnabled | Should -BeTrue
+        $script:Win.FindName('ScanProgress').IsIndeterminate | Should -BeFalse
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '未修改'
+        Should -Invoke Invoke-GuiBackgroundJobStop -Times 0 -Exactly
+        Should -Invoke Invoke-GuiBackgroundJobRemoval -Times 0 -Exactly
+    }
+
+    It 'initial scanning render failure rolls back then enters recoverable error' {
+        $realWindow = $window
+        Set-GuiState idle -Force
+        $failingScanningPanel = New-OneShotFailingControl -RealControl $realWindow.FindName('ScanningPanel') -PropertyName Visibility
+        $window = New-GuiWindowProxy -RealWindow $realWindow -ReplacementName 'ScanningPanel' -Replacement $failingScanningPanel
+        Mock Start-Job { throw 'job must not start' }
+        try {
+            Start-GuiScan | Should -BeFalse
+            $script:GuiState | Should -Be 'error'
+            $realWindow.FindName('BtnStartScan').IsEnabled | Should -BeTrue
+            $realWindow.FindName('ScanProgress').IsIndeterminate | Should -BeFalse
+            Should -Invoke Start-Job -Times 0 -Exactly
+        } finally {
+            $window = $realWindow
+        }
+    }
+
+    It 'second timer creation failure stops the first timer and removes the running job' {
+        $fakeJob = [pscustomobject]@{ State='Running' }
+        $firstTimer = New-FakeTimer
+        $script:GuiTimerFactoryCalls = 0
+        Mock Start-Job { $fakeJob }
+        Mock New-Object {
+            $script:GuiTimerFactoryCalls++
+            if ($script:GuiTimerFactoryCalls -eq 1) { return $firstTimer }
+            throw 'timer creation failed'
+        } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+        Mock Invoke-GuiBackgroundJobStop {}
+        Mock Invoke-GuiBackgroundJobRemoval {}
+        Set-GuiState idle -Force
+        Start-GuiScan | Should -BeFalse
+        $firstTimer.Stopped | Should -BeTrue
+        Should -Invoke Invoke-GuiBackgroundJobStop -Times 1 -Exactly
+        Should -Invoke Invoke-GuiBackgroundJobRemoval -Times 1 -Exactly
+        $script:GuiState | Should -Be 'error'
+    }
+
+    It 'output drain failure is not suppressed' {
+        Mock Read-GuiBackgroundJob { throw 'drain failed' }
+        { Receive-GuiScanOutput ([pscustomobject]@{State='Running'}) } | Should -Throw '*drain failed*'
+    }
+
+    It 'poll drain failure stops resources and enters recoverable error' {
+        $job = [pscustomobject]@{ State='Running' }
+        $checkTimer = New-FakeTimer
+        $scanTimer = New-FakeTimer
+        Mock Read-GuiBackgroundJob { throw 'drain failed' }
+        Mock Invoke-GuiBackgroundJobStop {}
+        Mock Invoke-GuiBackgroundJobRemoval {}
+        Set-GuiState scanning -Force
+        Invoke-GuiScanPoll -job $job -checkTimer $checkTimer -scanTimer $scanTimer | Should -BeTrue
+        $checkTimer.Stopped | Should -BeTrue
+        $scanTimer.Stopped | Should -BeTrue
+        Should -Invoke Invoke-GuiBackgroundJobStop -Times 1 -Exactly
+        Should -Invoke Invoke-GuiBackgroundJobRemoval -Times 1 -Exactly
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorDetailText').Text | Should -Match 'drain failed'
+    }
+
+    It 'pending load failure cleans up and enters recoverable error' {
+        Mock Read-GuiBackgroundJob { 'scan complete' }
+        Mock Invoke-GuiBackgroundJobRemoval {}
+        Mock Get-PendingViewItems { throw 'pending parse failed' }
+        $checkTimer = New-FakeTimer
+        $scanTimer = New-FakeTimer
+        Set-GuiState scanning -Force
+        Complete-ScanPoll -job ([pscustomobject]@{State='Completed'}) -checkTimer $checkTimer -scanTimer $scanTimer | Should -BeTrue
+        $checkTimer.Stopped | Should -BeTrue
+        $scanTimer.Stopped | Should -BeTrue
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('BtnStartScan').IsEnabled | Should -BeTrue
+        $script:Win.FindName('ScanProgress').IsIndeterminate | Should -BeFalse
+        $script:Win.FindName('ErrorDetailText').Text | Should -Match 'pending parse failed'
+    }
+
+    It 'results rendering failure rolls back then enters recoverable error' {
+        Mock Read-GuiBackgroundJob { 'scan complete' }
+        Mock Invoke-GuiBackgroundJobRemoval {}
+        Mock Get-PendingViewItems { @() }
+        $realWindow = $window
+        $failingSummary = New-OneShotFailingControl -RealControl $realWindow.FindName('ResultSummaryText') -PropertyName Text
+        $window = New-GuiWindowProxy -RealWindow $realWindow -ReplacementName 'ResultSummaryText' -Replacement $failingSummary
+        try {
+            Set-GuiState scanning -Force
+            Complete-ScanPoll -job ([pscustomobject]@{State='Completed'}) -checkTimer (New-FakeTimer) -scanTimer (New-FakeTimer) | Should -BeTrue
+            $script:GuiState | Should -Be 'error'
+            $realWindow.FindName('ErrorDetailText').Text | Should -Match 'Injected assignment failure'
+        } finally {
+            $window = $realWindow
+        }
+    }
+
+    It 'empty output poll leaves the visible transcript unchanged' {
+        $script:ScanTranscript = 'existing output'
+        $script:Win.FindName('ScanOutput').Text = 'visible sentinel'
+        Add-GuiScanOutput -Lines @()
+        $script:Win.FindName('ScanOutput').Text | Should -Be 'visible sentinel'
+    }
+
+    It 'localizes streamed phase text in English' {
+        $oldLang = $script:Lang
+        try {
+            $script:Lang = 'en'
+            $script:ScanTranscript = ''
+            Add-GuiScanOutput -Lines @('==> 检查系统服务...')
+            $script:Win.FindName('ScanPhaseText').Text | Should -Be 'Checking system services'
+        } finally {
+            $script:Lang = $oldLang
+        }
+    }
+
+    It 'localizes completed result counts in English' {
+        $oldLang = $script:Lang
+        try {
+            $script:Lang = 'en'
+            Mock Read-GuiBackgroundJob { 'scan complete' }
+            Mock Invoke-GuiBackgroundJobRemoval {}
+            Mock Get-PendingViewItems {
+                @([pscustomobject]@{CanExecute=$true},[pscustomobject]@{CanExecute=$false})
+            }
+            Set-GuiState scanning -Force
+            Complete-ScanPoll -job ([pscustomobject]@{State='Completed'}) -checkTimer (New-FakeTimer) -scanTimer (New-FakeTimer) | Should -BeTrue
+            $script:Win.FindName('ResultSummaryText').Text | Should -Be '1 safe item(s), 1 observation(s)'
+        } finally {
+            $script:Lang = $oldLang
+        }
+    }
+
+    It 'localizes scan failure and no-mutation wording in English' {
+        $oldLang = $script:Lang
+        try {
+            $script:Lang = 'en'
+            Mock Read-GuiBackgroundJob { 'scanner failed' }
+            Mock Invoke-GuiBackgroundJobRemoval {}
+            Set-GuiState scanning -Force
+            Complete-ScanPoll -job ([pscustomobject]@{State='Failed'}) -checkTimer (New-FakeTimer) -scanTimer (New-FakeTimer) | Should -BeTrue
+            $script:Win.FindName('ErrorSummaryText').Text | Should -Be 'Scan failed: Failed'
+            $script:Win.FindName('ErrorMutationText').Text | Should -Be 'The scan did not change any system settings.'
+        } finally {
+            $script:Lang = $oldLang
+        }
+    }
+
+    It 'bounds the retained scan transcript' {
+        $script:ScanTranscript = ''
+        Add-GuiScanOutput -Lines @(('x' * 70000))
+        $script:ScanTranscript.Length | Should -BeLessOrEqual 65536
+        $script:Win.FindName('ScanOutput').Text.Length | Should -BeLessOrEqual 65536
     }
 
     It 'wires start, retry, and review navigation to shared functions' {
@@ -267,8 +461,8 @@ Describe 'GUI 壳 (无窗口)' {
     }
 
     It 'completed scan stops timers, loads result counts, and enters results' {
-        Mock Receive-Job { 'scan complete' }
-        Mock Remove-Job {}
+        Mock Read-GuiBackgroundJob { 'scan complete' }
+        Mock Invoke-GuiBackgroundJobRemoval {}
         Mock Get-PendingViewItems {
             @([pscustomobject]@{CanExecute=$true},[pscustomobject]@{CanExecute=$false})
         }
@@ -285,8 +479,8 @@ Describe 'GUI 壳 (无窗口)' {
     }
 
     It 'failed scan enters error and states that no mutation occurred' {
-        Mock Receive-Job { 'scanner failed' }
-        Mock Remove-Job {}
+        Mock Read-GuiBackgroundJob { 'scanner failed' }
+        Mock Invoke-GuiBackgroundJobRemoval {}
         Set-GuiState scanning -Force
         Complete-ScanPoll -job ([pscustomobject]@{State='Failed'}) -checkTimer (New-FakeTimer) -scanTimer (New-FakeTimer) | Should -BeTrue
         $script:GuiState | Should -Be 'error'
@@ -294,8 +488,8 @@ Describe 'GUI 壳 (无窗口)' {
     }
 
     It 'stopped scan enters error and stops both timers' {
-        Mock Receive-Job { 'scanner stopped' }
-        Mock Remove-Job {}
+        Mock Read-GuiBackgroundJob { 'scanner stopped' }
+        Mock Invoke-GuiBackgroundJobRemoval {}
         $t1 = New-FakeTimer
         $t2 = New-FakeTimer
         Set-GuiState scanning -Force
