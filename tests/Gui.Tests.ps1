@@ -1332,7 +1332,40 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It 'exit 0 即使有失败和跳过也进入 completed 并逐项展示真实状态' {
+    It '运行中轮询从 subset 刷新逐项真实状态且暂时读失败保留旧显示' {
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('running-refresh-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedExecutionFixture
+            Mock Start-Process { return [pscustomobject]@{ HasExited=$false; ExitCode=0 } }
+            Mock New-Object { return (New-ExecutionFakeTimer) } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+            Start-GuiExecution -List $fixture.List | Should -BeTrue
+            @($script:Win.FindName('ExecutionList').ItemsSource)[0].State | Should -Be 'running'
+
+            $payload = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $payload.actions[0].status = 'failed'
+            [System.IO.File]::WriteAllText($script:ExecutionTempPath, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+
+            Complete-ExecutionPoll | Should -BeFalse
+            $rows = @($script:Win.FindName('ExecutionList').ItemsSource)
+            $rows.Count | Should -Be 1
+            $rows[0].State | Should -Be 'failed'
+            $rows[0].StateLabel | Should -Be '失败'
+            $script:GuiState | Should -Be 'executing'
+
+            [System.IO.File]::WriteAllText($script:ExecutionTempPath, '{temporarily incomplete', [System.Text.UTF8Encoding]::new($false))
+            Complete-ExecutionPoll | Should -BeFalse
+            @($script:Win.FindName('ExecutionList').ItemsSource)[0].State | Should -Be 'failed'
+            $script:GuiState | Should -Be 'executing'
+        } finally {
+            Clear-GuiExecutionResources -RemoveTemp
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It 'exit 0 即使有失败跳过和手动项也进入 completed 并逐项展示真实状态' {
         $oldRoot = $script:Root
         $tempRoot = Join-Path $TestDrive ('partial-zero-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
@@ -1341,23 +1374,25 @@ Describe '勾选视图 (v1.5.5)' {
             $success = (New-GuiReviewPendingFixture -ActionServiceName 'S1').actions[0]
             $failed = (New-GuiReviewPendingFixture -ActionServiceName 'S2').actions[0].PSObject.Copy(); $failed.id='failed-row'; $failed.status='failed'
             $skipped = (New-GuiReviewPendingFixture -ActionServiceName 'S3').actions[0].PSObject.Copy(); $skipped.id='skipped-row'; $skipped.status='skipped'
+            $manual = (New-GuiReviewPendingFixture -ActionServiceName 'S4').actions[0].PSObject.Copy(); $manual.id='manual-row'; $manual.status='manual_required'
             $success.status='success'
-            $subset = [pscustomobject]@{ pending_schema_version=2; actions=@($success,$failed,$skipped); observations=@(); suspicious=@() }
+            $subset = [pscustomobject]@{ pending_schema_version=2; actions=@($success,$failed,$skipped,$manual); observations=@(); suspicious=@() }
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
             [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
             $main = $subset.PSObject.Copy(); [System.IO.File]::WriteAllText((Join-Path $tempRoot 'pending_actions.json'), (ConvertTo-GuiPendingJson $main), [System.Text.UTF8Encoding]::new($false))
             $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
             $script:ExecutionTimer = New-ExecutionFakeTimer
             $script:ExecutionTempPath = $subsetPath
-            $script:ExecutionActions = @($success,$failed,$skipped)
+            $script:ExecutionActions = @($success,$failed,$skipped,$manual)
             Set-GuiState executing -Force
 
             Complete-ExecutionPoll | Should -BeTrue
 
             $script:GuiState | Should -Be 'completed'
-            @($script:Win.FindName('CompletedList').ItemsSource).Count | Should -Be 3
+            @($script:Win.FindName('CompletedList').ItemsSource).Count | Should -Be 4
             @($script:Win.FindName('CompletedList').ItemsSource | Where-Object State -eq 'failed').Count | Should -Be 1
-            $script:Win.FindName('CompletedSummaryText').Text | Should -Match 'success 1.*failed 1.*skipped 1'
+            @($script:Win.FindName('CompletedList').ItemsSource | Where-Object State -eq 'manual_required').Count | Should -Be 1
+            $script:Win.FindName('CompletedSummaryText').Text | Should -Match 'success 1.*failed 1.*skipped 1.*manual 1'
             Test-Path -LiteralPath $subsetPath | Should -BeFalse
         } finally { $script:Root = $oldRoot }
     }

@@ -32,7 +32,7 @@ $script:I18N = @{
         SelectAll='全选'; ClearAll='清空'
         ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
         BtnExec='处理已勾选项目（需要管理员）'; ExecEmpty='请先勾选要处理的项目（【2. 处理建议】页勾选）。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
-        ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2}'
+        ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2} / manual {3}'
         ExecUnauthorized='未授权、未开始处理。'; ExecNotStarted='管理员授权未完成，未开始处理，系统设置没有变化。'; ExecPartialPossible='执行进程异常结束，可能已有部分动作执行。'; ExecResultReadFailed='无法完整读取逐项结果。'
         BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
         NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。详见管理员窗口。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复出错或被取消: {0}'; RestorePartial='恢复完成，但部分条目验证失败（详见管理员窗口）。'
@@ -56,7 +56,7 @@ $script:I18N = @{
         SelectAll='Select All'; ClearAll='Clear'
         ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
         BtnExec='Process Checked Items (admin)'; ExecEmpty='Check items first (tab 2).'; ExecStart='Processing {0} item(s). UAC requested, click YES…'; ExecDone='Processing done. See tab 4 (restart PC recommended).'
-        ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2}'
+        ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2} / manual {3}'
         ExecUnauthorized='Not authorized; processing did not start.'; ExecNotStarted='Administrator authorization was not completed. Processing did not start and no system settings changed.'; ExecPartialPossible='The execution process ended abnormally; some actions may already have run.'; ExecResultReadFailed='The per-item result could not be read completely.'
         BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
         NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}. See admin window.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed/cancelled: {0}'; RestorePartial='Restore finished, but some items failed verification (see admin window).'
@@ -892,7 +892,25 @@ function Complete-ExecutionPoll {
     $process = $script:ExecutionProcess
     if ($null -eq $process) { return $false }
     try {
-        if (-not $process.HasExited) { return $false }
+        if (-not $process.HasExited) {
+            try {
+                $pending = Read-GuiPendingFile -Path $script:ExecutionTempPath
+                $null = Get-GuiPendingSchemaVersion $pending
+                Assert-GuiPendingPresentationShape -Pending $pending
+                $items = @($pending.actions)
+                $expected = @($script:ExecutionActions)
+                if ($items.Count -ne $expected.Count) { throw 'running subset action count changed.' }
+                for ($index = 0; $index -lt $items.Count; $index++) {
+                    if ((Get-PendingIdentityKey $items[$index]) -cne (Get-PendingIdentityKey $expected[$index])) {
+                        throw 'running subset action identity changed.'
+                    }
+                }
+                $window.FindName('ExecutionList').ItemsSource = @(ConvertTo-GuiExecutionRows $items)
+            } catch {
+                # Elevated clean rewrites the subset while this timer reads it. Keep the last truthful rows and retry.
+            }
+            return $false
+        }
     } catch {
         Clear-GuiExecutionResources -RemoveTemp
         Set-GuiError -Summary (Get-Text 'ExecUnauthorized') -Mutation (Get-Text 'ExecNotStarted') -Detail $_.Exception.ToString()
@@ -917,7 +935,7 @@ function Complete-ExecutionPoll {
         if ($exitCode -eq 0) {
             $window.FindName('CompletedList').ItemsSource = $rows
             $window.FindName('CompletedSummaryText').Text = if ($null -eq $readError) {
-                (Get-Text 'ExecDoneSum') -f $sum.success, $sum.failed, $sum.skipped
+                (Get-Text 'ExecDoneSum') -f $sum.success, $sum.failed, $sum.skipped, $sum.manual_required
             } else {
                 Get-Text 'ExecResultReadFailed'
             }
