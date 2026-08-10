@@ -1264,6 +1264,65 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
+    It '管理员进程启动后 timer <FailurePoint> 失败立即安全脱离且保留进程和 subset' -TestCases @(
+        @{ FailurePoint='construct'; FailureMessage='injected timer construction failure' }
+        @{ FailurePoint='start'; FailureMessage='injected timer start failure' }
+    ) {
+        param($FailurePoint, $FailureMessage)
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ("timer-$FailurePoint-" + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedExecutionFixture
+            $process = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+            Mock Start-Process { return $process }
+            Mock New-Object {
+                if ($FailurePoint -eq 'construct') { throw $FailureMessage }
+                $timer = [pscustomobject]@{ Stopped=$false; Started=$false; TickHandler=$null; Interval=$null }
+                $timer | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.Stopped = $true }
+                $timer | Add-Member -MemberType ScriptMethod -Name Add_Tick -Value { param($handler); $this.TickHandler = $handler }
+                $timer | Add-Member -MemberType ScriptMethod -Name Start -Value { throw 'injected timer start failure' }
+                return $timer
+            } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeFalse
+            $path = $script:ExecutionTempPath
+            $timer = $script:ExecutionTimer
+            Start-GuiExecution -List $fixture.List | Should -BeFalse
+            $closing = [pscustomobject]@{ Cancel=$false }
+            Protect-GuiExecutionWindowClose -EventArgs $closing | Should -BeTrue
+
+            Assert-MockCalled Start-Process -Times 1 -Exactly
+            $script:ExecutionProcess | Should -Be $process
+            $script:ExecutionTempPath | Should -BeExactly $path
+            Test-Path -LiteralPath $path | Should -BeTrue
+            $script:ExecutionLifecycle | Should -Be 'detached'
+            $script:ExecutionInProgress | Should -BeFalse
+            $closing.Cancel | Should -BeFalse
+            if ($FailurePoint -eq 'construct') {
+                $timer | Should -BeNullOrEmpty
+            } else {
+                $timer.Stopped | Should -BeTrue
+            }
+            $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未知'
+            $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
+            $script:Win.FindName('ErrorMutationText').Text | Should -Not -Match '未开始'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($FailureMessage))
+            $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($path))
+        } finally {
+            if ($script:ExecutionTempPath -and (Test-Path -LiteralPath $script:ExecutionTempPath)) { Remove-Item -LiteralPath $script:ExecutionTempPath -Force }
+            $script:ExecutionProcess = $null
+            $script:ExecutionTimer = $null
+            $script:ExecutionTempPath = $null
+            $script:ExecutionActions = @()
+            $script:ExecutionInProgress = $false
+            $script:ExecutionLifecycle = 'idle'
+            $script:ExecutionUnknownProbeCount = 0
+            $env:TEMP = $oldTemp
+        }
+    }
+
     It '运行中第二次启动不停止旧 timer、不清旧 subset 且不启动第二个 clean' {
         $oldTemp = $env:TEMP
         $tempRoot = Join-Path $TestDrive ('running-latch-' + [guid]::NewGuid().ToString('N'))

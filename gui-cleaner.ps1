@@ -1127,6 +1127,18 @@ function Save-GuiExecutionDiagnostic {
     return $evidencePath
 }
 
+function Enter-GuiExecutionSafeDetach {
+    param([AllowEmptyString()][string]$Detail = '')
+    $script:ExecutionUnknownProbeCount = $script:ExecutionUnknownProbeLimit
+    Invoke-GuiTimerStop $script:ExecutionTimer
+    $script:ExecutionLifecycle = 'detached'
+    $script:ExecutionInProgress = $false
+    $diagnosticDetail = $Detail
+    if ($diagnosticDetail) { $diagnosticDetail += [Environment]::NewLine }
+    $diagnosticDetail += 'Diagnostic subset: ' + $script:ExecutionTempPath
+    Set-GuiError -Summary (Get-Text 'ExecStatusUnknown') -Mutation (Get-Text 'ExecPartialPossible') -Detail $diagnosticDetail
+}
+
 function Complete-ExecutionPoll {
     $process = $script:ExecutionProcess
     if ($null -eq $process) { return $false }
@@ -1159,14 +1171,12 @@ function Complete-ExecutionPoll {
     if ($probe.State -eq 'unknown') {
         $script:ExecutionUnknownProbeCount++
         $script:ExecutionLifecycle = 'unknown'
-        $detail = $probe.Detail + [Environment]::NewLine + ('Diagnostic subset: ' + $script:ExecutionTempPath) + [Environment]::NewLine + ('Probe retry: {0}/{1}' -f $script:ExecutionUnknownProbeCount, $script:ExecutionUnknownProbeLimit)
-        Set-GuiError -Summary (Get-Text 'ExecStatusUnknown') -Mutation (Get-Text 'ExecPartialPossible') -Detail $detail
         if ($script:ExecutionUnknownProbeCount -ge $script:ExecutionUnknownProbeLimit) {
-            Invoke-GuiTimerStop $script:ExecutionTimer
-            $script:ExecutionLifecycle = 'detached'
-            $script:ExecutionInProgress = $false
+            Enter-GuiExecutionSafeDetach -Detail $probe.Detail
             return $true
         }
+        $detail = $probe.Detail + [Environment]::NewLine + ('Diagnostic subset: ' + $script:ExecutionTempPath) + [Environment]::NewLine + ('Probe retry: {0}/{1}' -f $script:ExecutionUnknownProbeCount, $script:ExecutionUnknownProbeLimit)
+        Set-GuiError -Summary (Get-Text 'ExecStatusUnknown') -Mutation (Get-Text 'ExecPartialPossible') -Detail $detail
         if ($null -ne $script:ExecutionTimer) { $script:ExecutionTimer.Interval = [TimeSpan]::FromSeconds(1) }
         return $false
     }
@@ -1216,7 +1226,7 @@ function Complete-ExecutionPoll {
 
 function Start-GuiExecution {
     param($List = $window.FindName('PendingList'))
-    if ($script:ExecutionInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown')) {
+    if ($script:ExecutionInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached')) {
         return $false
     }
     $script:ExecutionInProgress = $true
@@ -1260,9 +1270,7 @@ function Start-GuiExecution {
     } catch {
         $detail = $_.Exception.ToString()
         if ($startedProcess) {
-            $script:ExecutionLifecycle = 'unknown'
-            Invoke-GuiTimerStop $script:ExecutionTimer
-            Set-GuiError -Summary (Get-Text 'ExecResultReadFailed') -Mutation (Get-Text 'ExecPartialPossible') -Detail $detail
+            Enter-GuiExecutionSafeDetach -Detail $detail
         } else {
             $null = Clear-GuiExecutionResources -RemoveTemp
             Set-GuiError -Summary (Get-Text 'ExecUnauthorized') -Mutation (Get-Text 'ExecNotStarted') -Detail $detail
