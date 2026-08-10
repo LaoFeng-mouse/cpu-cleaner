@@ -35,6 +35,9 @@ BeforeAll {
             service_name = 'Svc'; matched_pattern = 'Svc'; matched_type = 'exact'; matched_field = 'service_name'
         }
     }
+
+    function Is-Admin { return $false }
+    function Write-Step { param([string]$Message) }
 }
 
 Describe '授权验证 (提权后重新确认)' {
@@ -469,7 +472,7 @@ Describe '执行前最终授权防 TOCTOU' {
         $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
         $loop = $source.IndexOf('foreach ($idx in $indexes)')
         $guard = $source.IndexOf('Test-SelectedPendingActionAuthorized', $loop)
-        $mutations = @('New-Item -ItemType Directory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Backup-AutostartValue', 'Remove-ItemProperty', 'Disable-ScheduledTask', 'Stop-Process') |
+        $mutations = @('New-Item -ItemType Directory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Backup-AutostartValue', 'Remove-LiteralAutostartValue', 'Disable-ScheduledTask', 'Stop-Process') |
             ForEach-Object { $source.IndexOf($_, $loop) }
 
         $loop | Should -BeGreaterOrEqual 0
@@ -534,18 +537,25 @@ Describe 'pending JSON 重复属性预检' {
         Assert-MockCalled Get-Content -Times 0 -Exactly
     }
 
-    It '同一 FileStream 上先检查 Length 再创建 reader 且源码无分离入口' {
+    It '同一 FileStream helper 先检查 Length 再读取且兼容包装及时释放' {
         $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
-        $start = $source.IndexOf('function Read-LimitedPendingJsonFile')
+        $start = $source.IndexOf('function Read-LimitedPendingJsonStream')
         $start | Should -BeGreaterOrEqual 0
         if ($start -lt 0) { return }
-        $end = $source.IndexOf('function Read-StrictPendingJsonFile', $start)
+        $end = $source.IndexOf('function Read-LimitedPendingJsonFile', $start)
         $body = $source.Substring($start, $end - $start)
 
         $body | Should -Not -Match '\bGet-Item\b|\bGet-Content\b'
         $body.IndexOf('.Length') | Should -BeGreaterOrEqual 0
         $body.IndexOf('StreamReader') | Should -BeGreaterThan $body.IndexOf('.Length')
         $body.IndexOf('ReadToEnd') | Should -BeGreaterThan $body.IndexOf('StreamReader')
+
+        $wrapperEnd = $source.IndexOf('function Read-StrictPendingJsonFile', $end)
+        $wrapper = $source.Substring($end, $wrapperEnd - $end)
+        $wrapper | Should -Match 'Open-LockedPendingFile'
+        $wrapper | Should -Match 'Read-LimitedPendingJsonStream'
+        $wrapper | Should -Match 'finally'
+        $wrapper | Should -Match '\.Dispose\(\)'
     }
 
     It '静态超限文件在读取全部内容前拒绝' {
@@ -600,5 +610,110 @@ Describe 'pending JSON 重复属性预检' {
 
         $probe = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
         $probe.Dispose()
+    }
+
+    It '读写锁拒绝并发写删替换且只向已打开对象回写无 BOM UTF-8' {
+        $path = Join-Path $TestDrive 'locked-read-write.json'
+        $replacement = Join-Path $TestDrive 'locked-replacement.json'
+        $backup = Join-Path $TestDrive 'locked-backup.json'
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($replacement, '{"replacement":true}', [System.Text.UTF8Encoding]::new($false))
+        $stream = $null
+        try {
+            $stream = Open-LockedPendingFile $path
+            $stream.CanRead | Should -BeTrue
+            $stream.CanWrite | Should -BeTrue
+            { [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite).Dispose() } | Should -Throw
+            { [System.IO.File]::Delete($path) } | Should -Throw
+            { [System.IO.File]::Replace($replacement, $path, $backup) } | Should -Throw
+
+            $payload = [pscustomobject]@{ pending_schema_version=2; generated='locked'; actions=@(); observations=@(); suspicious=@() }
+            Write-PendingToLockedStream -Stream $stream -Pending $payload
+        } finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+        }
+
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) | Should -BeFalse
+        ([System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json).generated | Should -Be 'locked'
+        ([System.IO.File]::ReadAllText($replacement) | ConvertFrom-Json).replacement | Should -BeTrue
+    }
+
+    It '拒绝经过 reparse-point 目录组件的 pending 输入路径' {
+        $targetDirectory = Join-Path $TestDrive 'pending-target'
+        $junctionPath = Join-Path $TestDrive 'pending-junction'
+        $null = New-Item -ItemType Directory -Path $targetDirectory
+        $null = New-Item -ItemType Junction -Path $junctionPath -Target $targetDirectory
+        $pendingPath = Join-Path $junctionPath 'pending.json'
+        [System.IO.File]::WriteAllText((Join-Path $targetDirectory 'pending.json'), '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+
+        $script:UnexpectedReparseStream = $null
+        try {
+            { $script:UnexpectedReparseStream = Open-LockedPendingFile $pendingPath } | Should -Throw '*reparse point*'
+        } finally {
+            if ($null -ne $script:UnexpectedReparseStream) { $script:UnexpectedReparseStream.Dispose() }
+        }
+    }
+
+    It 'Invoke-Clean 严格 JSON 异常后释放 pending 独占写句柄' {
+        $path = Join-Path $TestDrive 'invalid-locked-pending.json'
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[],"Actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        Mock Is-Admin { $true }
+        try {
+            { Invoke-Clean } | Should -Throw '*重复*'
+            $probe = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $probe.Dispose()
+        } finally {
+            $script:PendingFile = $oldPendingFile
+        }
+    }
+}
+
+Describe 'clean pending v2 状态持久化' {
+    It '初始授权全部拒绝也写回 skipped 并保留完整安全 envelope' {
+        $path = Join-Path $TestDrive 'rejected-v2.json'
+        $pending = [pscustomobject]@{
+            pending_schema_version = 2
+            generated = 'scan-time'
+            actions = @([pscustomobject]@{ id='reject'; status='pending'; action='disable_service'; hit_type='service' })
+            observations = @([pscustomobject]@{ id='observe'; obs_reason='keep' })
+            suspicious = @([pscustomobject]@{ PID=42; Name='suspect' })
+            safety_nonce = 'preserve-me'
+        }
+        [System.IO.File]::WriteAllText($path, (ConvertTo-Json -InputObject $pending -Depth 6), [System.Text.UTF8Encoding]::new($false))
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{ profiles=@() } }
+        Mock Test-PendingActionAuthorized { $false }
+        Mock Write-Step {}
+        $YesToAll = $true
+        try {
+            Invoke-Clean
+            $after = Read-StrictPendingJsonFile $path
+        } finally {
+            $script:PendingFile = $oldPendingFile
+        }
+
+        $after.pending_schema_version | Should -Be 2
+        $after.generated | Should -Be 'scan-time'
+        $after.actions[0].status | Should -Be 'skipped'
+        $after.observations[0].obs_reason | Should -Be 'keep'
+        $after.suspicious[0].PID | Should -Be 42
+        $after.safety_nonce | Should -Be 'preserve-me'
+    }
+
+    It '集中 payload builder 保留 envelope 扩展字段但强制 v2 和当前数组' {
+        $source = [pscustomobject]@{ pending_schema_version=2; generated='g'; actions=@('old'); observations=@('obs'); suspicious=@('sus'); safety_nonce='n' }
+        $built = Build-PendingV2Payload -Source $source -Actions @('new')
+
+        $built.pending_schema_version | Should -Be 2
+        $built.generated | Should -Be 'g'
+        @($built.actions) | Should -Be @('new')
+        @($built.observations) | Should -Be @('obs')
+        @($built.suspicious) | Should -Be @('sus')
+        $built.safety_nonce | Should -Be 'n'
     }
 }

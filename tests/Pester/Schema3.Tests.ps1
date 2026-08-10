@@ -121,6 +121,37 @@ Describe '进程标准化匹配保持字面语义' {
 }
 
 Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
+    It 'autostart value <type> 从 Match 到 pending 再到授权保持原始值' -TestCases @(
+        @{ type='exact'; pattern='C:\Apps\Updater.exe'; value='C:\Apps\Updater.exe' }
+        @{ type='path'; pattern='C:\Apps'; value='C:\Apps\Updater.exe --silent' }
+    ) {
+        param($type, $pattern, $value)
+        $oldPendingFile = $script:PendingFile
+        try {
+            $script:PendingFile = Join-Path $TestDrive ("autostart-e2e-$type.json")
+            $profile = [pscustomobject]@{
+                id='autostart-e2e'; vendor='T'; name='Auto'; name_cn='Auto'; risk='high'; safe=$true; reason_cn='r'
+                evidence=[pscustomobject]@{ tested=$true }
+                detect=[pscustomobject]@{ services=@(); processes=@(); tasks=@(); autostarts=@([pscustomobject]@{ match=$pattern; type=$type }) }
+                actions=[pscustomobject]@{ autostart='remove_autostart' }
+            }
+            $profiles = [pscustomobject]@{ profiles=@($profile) }
+            Mock Load-Profiles { $profiles }
+            Mock Get-ItemProperty { [pscustomobject]@{ Updater=$value } } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
+
+            $hits = @(Match-Profiles -Services @() -AutoStarts @([pscustomobject]@{ Name='Updater'; Value=$value; Source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }) -Tasks @() -TopProcs @())
+            Save-PendingActions -Hits $hits -Suspicious @()
+            $saved = Read-StrictPendingJsonFile $script:PendingFile
+
+            $hits.Count | Should -Be 1
+            $hits[0].autostart_value | Should -Be $value
+            $saved.actions[0].autostart_value | Should -Be $value
+            Test-PendingActionAuthorized $saved.actions[0] $profiles | Should -BeTrue
+        } finally {
+            $script:PendingFile = $oldPendingFile
+        }
+    }
+
     It '可执行 autostart_value 命中把原始值保存到 pending' {
         $oldPendingFile = $script:PendingFile
         try {

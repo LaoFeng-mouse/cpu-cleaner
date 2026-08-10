@@ -62,6 +62,44 @@ function Test-AllowedAutostartRegistrySource($Source) {
     return $false
 }
 
+function Remove-LiteralRegistryValueFromKey {
+    param($RegistryKey, $Name)
+    if ($null -eq $RegistryKey) { throw '注册表键未打开' }
+    if ($Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name)) { throw '注册表值名称无效' }
+    $RegistryKey.DeleteValue($Name, $false)
+}
+
+function Remove-LiteralAutostartValue {
+    param($Source, $Name)
+    if (-not (Test-AllowedAutostartRegistrySource $Source)) { throw '自启注册表路径不在白名单' }
+    if ($Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name)) { throw '自启值名称无效' }
+
+    $hive = $null
+    $relativePath = $null
+    if ($Source.StartsWith('HKCU:\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $hive = [Microsoft.Win32.RegistryHive]::CurrentUser
+        $relativePath = $Source.Substring(6)
+    } elseif ($Source.StartsWith('HKLM:\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $hive = [Microsoft.Win32.RegistryHive]::LocalMachine
+        $relativePath = $Source.Substring(6)
+    } else {
+        throw '自启注册表 hive 无效'
+    }
+
+    $baseKey = $null
+    $key = $null
+    try {
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, [Microsoft.Win32.RegistryView]::Default)
+        $key = $baseKey.OpenSubKey($relativePath, $true)
+        if ($null -eq $key) { return $false }
+        Remove-LiteralRegistryValueFromKey -RegistryKey $key -Name $Name
+        return $true
+    } finally {
+        if ($null -ne $key) { $key.Dispose() }
+        if ($null -ne $baseKey) { $baseKey.Dispose() }
+    }
+}
+
 function Skip-JsonWhitespace([string]$Json, [ref]$Index) {
     while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @([char]0x20,[char]0x09,[char]0x0A,[char]0x0D)) {
         $Index.Value++
@@ -237,22 +275,49 @@ function Test-PendingJsonFileLength($Length) {
     return ([int64]$Length -ge 0 -and [int64]$Length -le [int64]$script:MaxPendingJsonBytes)
 }
 
-function Open-PendingJsonReadStream($Path) {
+function Assert-PendingPathIsNotReparsePoint($Path) {
     if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path)) { throw 'pending 文件路径无效' }
-    return [System.IO.File]::Open(
-        $Path,
-        [System.IO.FileMode]::Open,
-        [System.IO.FileAccess]::Read,
-        [System.IO.FileShare]::Read
-    )
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetPathRoot($fullPath)
+    $current = $root
+    $relative = $fullPath.Substring($root.Length)
+    foreach ($segment in @($relative -split '[\\/]' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $current = [System.IO.Path]::Combine($current, $segment)
+        $attributes = [System.IO.File]::GetAttributes($current)
+        if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'pending 文件路径不能包含 reparse point'
+        }
+    }
 }
 
-function Read-LimitedPendingJsonFile($Path) {
+function Open-LockedPendingFile($Path) {
+    Assert-PendingPathIsNotReparsePoint $Path
     $stream = $null
+    try {
+        $stream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::Read
+        )
+        Assert-PendingPathIsNotReparsePoint $Path
+        return $stream
+    } catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        throw
+    }
+}
+
+function Open-PendingJsonReadStream($Path) {
+    return Open-LockedPendingFile $Path
+}
+
+function Read-LimitedPendingJsonStream($Stream) {
+    if ($null -eq $Stream -or -not $Stream.CanRead -or -not $Stream.CanSeek) { throw 'pending 文件流不可读或不可定位' }
     $reader = $null
     try {
-        $stream = Open-PendingJsonReadStream $Path
-        $initialLength = $stream.Length
+        $Stream.Position = 0
+        $initialLength = $Stream.Length
         if (-not (Test-PendingJsonFileLength $initialLength)) {
             throw "pending 文件过大或长度无效 (上限 $script:MaxPendingJsonBytes 字节)"
         }
@@ -260,33 +325,84 @@ function Read-LimitedPendingJsonFile($Path) {
         $bomLength = 0
         if ($initialLength -ge 3) {
             $prefix = New-Object byte[] 3
-            $prefixRead = $stream.Read($prefix, 0, 3)
+            $prefixRead = $Stream.Read($prefix, 0, 3)
             if ($prefixRead -eq 3 -and $prefix[0] -eq 0xEF -and $prefix[1] -eq 0xBB -and $prefix[2] -eq 0xBF) {
                 $bomLength = 3
             } else {
-                $stream.Position = 0
+                $Stream.Position = 0
             }
         }
 
         $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
-        $reader = [System.IO.StreamReader]::new($stream, $utf8, $false, 4096, $true)
+        $reader = [System.IO.StreamReader]::new($Stream, $utf8, $false, 4096, $true)
         $json = $reader.ReadToEnd()
         $reader.Dispose()
         $reader = $null
 
-        if ($stream.Length -ne $initialLength -or
+        if ($Stream.Length -ne $initialLength -or
             ([System.Text.Encoding]::UTF8.GetByteCount($json) + $bomLength) -ne $initialLength) {
             throw 'pending 文件读取期间长度或内容不一致'
         }
         return $json
     } finally {
         if ($null -ne $reader) { $reader.Dispose() }
+    }
+}
+
+function Read-LimitedPendingJsonFile($Path) {
+    $stream = $null
+    try {
+        $stream = Open-LockedPendingFile $Path
+        return Read-LimitedPendingJsonStream $stream
+    } finally {
         if ($null -ne $stream) { $stream.Dispose() }
     }
 }
 
 function Read-StrictPendingJsonFile($Path) {
     return ConvertFrom-StrictPendingJson (Read-LimitedPendingJsonFile $Path)
+}
+
+function Build-PendingV2Payload {
+    param($Source, $Actions, $Observations, $Suspicious)
+    $sourceActions = @()
+    $sourceObservations = @()
+    $sourceSuspicious = @()
+    if ($Source -and $Source.actions) { $sourceActions = @($Source.actions) }
+    if ($Source -and $Source.observations) { $sourceObservations = @($Source.observations) }
+    if ($Source -and $Source.suspicious) { $sourceSuspicious = @($Source.suspicious) }
+    if ($PSBoundParameters.ContainsKey('Actions')) { $sourceActions = @($Actions) }
+    if ($PSBoundParameters.ContainsKey('Observations')) { $sourceObservations = @($Observations) }
+    if ($PSBoundParameters.ContainsKey('Suspicious')) { $sourceSuspicious = @($Suspicious) }
+
+    $generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    if ($Source -and $Source.PSObject.Properties.Name -contains 'generated') { $generated = $Source.generated }
+    $properties = [ordered]@{
+        pending_schema_version = 2
+        generated = $generated
+        actions = @($sourceActions)
+        observations = @($sourceObservations)
+        suspicious = @($sourceSuspicious)
+    }
+    if ($Source) {
+        foreach ($property in $Source.PSObject.Properties) {
+            if ($property.Name -notin @('pending_schema_version','generated','actions','observations','suspicious')) {
+                $properties[$property.Name] = $property.Value
+            }
+        }
+    }
+    return [pscustomobject]$properties
+}
+
+function Write-PendingToLockedStream {
+    param($Stream, $Pending)
+    if ($null -eq $Stream -or -not $Stream.CanWrite -or -not $Stream.CanSeek) { throw 'pending 文件流不可写或不可定位' }
+    $json = ConvertTo-Json -InputObject $Pending -Depth 10
+    $bytes = [System.Text.UTF8Encoding]::new($false, $true).GetBytes($json)
+    $null = $Stream.Seek(0, [System.IO.SeekOrigin]::Begin)
+    $Stream.SetLength(0)
+    $Stream.Write($bytes, 0, $bytes.Length)
+    $Stream.Flush($true)
 }
 
 function Get-CurrentPendingMatchValue($Pending) {
@@ -635,12 +751,18 @@ function Invoke-Clean {
         Write-Host '未找到 pending_actions.json, 请先运行 scan 模式生成清单。' -ForegroundColor Red
         exit 1
     }
-    $pendingRaw = Read-LimitedPendingJsonFile $script:PendingFile
+    $pendingStream = $null
+    $pending = $null
+    $pendingValidated = $false
+    try {
+    $pendingStream = Open-LockedPendingFile $script:PendingFile
+    $pendingRaw = Read-LimitedPendingJsonStream $pendingStream
     $pending = ConvertFrom-StrictPendingJson $pendingRaw
     if (-not (Test-PendingSchemaSupported $pending)) {
         Write-Host '错误: pending 清单版本旧或不兼容。请重新运行 scan 生成新清单。' -ForegroundColor Red
         exit 1
     }
+    $pendingValidated = $true
     # null 防御: $pending.actions 为空/null 时不得产生 @($null) 元素 (管道展开陷阱)
     # v1.2 状态机: 只处理 pending(待办) 和 failed(可重试); success/skipped/manual_required 跳过
     $actions = @()
@@ -772,7 +894,7 @@ function Invoke-Clean {
                         if ($key -and ($key.PSObject.Properties | Where-Object { $_.Name -eq $nm })) {
                             # v1.5.4 P0: 只备份该 Value 的 Name/Type/Data, 不再 reg export 整个键
                             $bak = Backup-AutostartValue $rp $nm $backupDir $tag
-                            Remove-ItemProperty -Path $rp -Name $nm -ErrorAction SilentlyContinue
+                            $null = Remove-LiteralAutostartValue -Source $rp -Name $nm
                             # v1.2: 执行后验证
                             $keyAfter = Get-ItemProperty $rp -ErrorAction SilentlyContinue
                             $stillThere = $keyAfter -and ($keyAfter.PSObject.Properties | Where-Object { $_.Name -eq $nm })
@@ -839,16 +961,6 @@ function Invoke-Clean {
             Write-Step '动作处理完成。没有已授权动作进入执行阶段，未创建备份目录。'
         }
 
-        # 写回 status 状态机 (v1.2): 重建完整 payload, 用 -InputObject 防管道展开
-        $suspArr2 = @()
-        if ($pending.suspicious) { $suspArr2 = @($pending.suspicious) }
-        $payload2 = [pscustomobject]@{
-            generated  = $pending.generated
-            actions    = @($pending.actions)
-            suspicious = $suspArr2
-        }
-        $json2 = ConvertTo-Json -InputObject $payload2 -Depth 5
-        [System.IO.File]::WriteAllText($script:PendingFile, $json2, (New-Object System.Text.UTF8Encoding($true)))
     }
 
     # ---- 可疑进程处理 (B4: 显式输入 PID, 不自动杀) ----
@@ -897,6 +1009,16 @@ function Invoke-Clean {
     }
 
     Write-Step '完成。建议重启一次让所有禁用生效。'
+    } finally {
+        try {
+            if ($pendingValidated -and $null -ne $pendingStream) {
+                $payload = Build-PendingV2Payload -Source $pending -Actions @($pending.actions)
+                Write-PendingToLockedStream -Stream $pendingStream -Pending $payload
+            }
+        } finally {
+            if ($null -ne $pendingStream) { $pendingStream.Dispose() }
+        }
+    }
 }
 
 # ---------- 11. restore 模式 ----------

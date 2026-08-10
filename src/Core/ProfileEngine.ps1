@@ -266,7 +266,7 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
 
 # 构造一条命中记录 (结构化字段)
 function New-Hit {
-    param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $action, $matchEvidence, $processId = 0, $processPath = '')
+    param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $action, $matchEvidence, $processId = 0, $processPath = '', $autostartValue = '')
     $matchedPattern = ''
     $matchedType = ''
     $matchedField = ''
@@ -282,7 +282,7 @@ function New-Hit {
         hit_type = $hitType
         detail = $detail
         service_name = $srvName
-        autostart_source = $autostartSource; autostart_name = $autostartName
+        autostart_source = $autostartSource; autostart_name = $autostartName; autostart_value = $autostartValue
         task_path = $taskPath; process_name = $procName
         matched_pattern = $matchedPattern; matched_type = $matchedType; matched_field = $matchedField
         process_id = $processId; process_path = $processPath
@@ -354,7 +354,7 @@ function Match-Profiles {
                 )
                 if ($matchEvidence) {
                     $action = Get-EffectiveHitAction $p 'autostart' $matchEvidence
-                    $hits += New-Hit -p $p -hitType 'autostart' -detail "$($a.Name) => $($a.Value)" -srvName '' -autostartSource $a.Source -autostartName $a.Name -taskPath '' -procName '' -action $action -matchEvidence $matchEvidence
+                    $hits += New-Hit -p $p -hitType 'autostart' -detail "$($a.Name) => $($a.Value)" -srvName '' -autostartSource $a.Source -autostartName $a.Name -autostartValue $a.Value -taskPath '' -procName '' -action $action -matchEvidence $matchEvidence
                 }
             }
         }

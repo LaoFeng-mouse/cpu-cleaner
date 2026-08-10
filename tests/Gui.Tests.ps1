@@ -234,7 +234,7 @@ Describe '勾选视图 (v1.5.5)' {
             matched_pattern='C:\Apps'; matched_type='path'; matched_field='process_path'; future_v2_property='preserve-me'
         }
         $checked = @([pscustomobject]@{ _raw=$raw })
-        $source = [pscustomobject]@{ pending_schema_version=2; generated='scan'; actions=@($raw); observations=@(); suspicious=@([pscustomobject]@{ PID=9; Name='Other' }) }
+        $source = [pscustomobject]@{ pending_schema_version=2; generated='scan'; actions=@($raw); observations=@([pscustomobject]@{ id='observe'; obs_reason='keep' }); suspicious=@([pscustomobject]@{ PID=9; Name='Other' }); safety_nonce='keep-envelope' }
 
         $payload = New-PendingSubsetPayload -Checked $checked -SourcePending $source
 
@@ -250,10 +250,12 @@ Describe '勾选视图 (v1.5.5)' {
         $action.future_v2_property | Should -Be 'preserve-me'
         $raw.status | Should -Be 'failed'
         @($payload.suspicious).Count | Should -Be 1
-        @($payload.observations).Count | Should -Be 0
+        @($payload.observations).Count | Should -Be 1
+        $payload.observations[0].obs_reason | Should -Be 'keep'
+        $payload.safety_nonce | Should -Be 'keep-envelope'
         $json = ConvertTo-Json -InputObject $payload -Depth 6
         $json | Should -Match '"actions"\s*:\s*\[\s*\{'
-        $json | Should -Match '"observations"\s*:\s*\[\s*\]'
+        $json | Should -Match '"observations"\s*:\s*\[\s*\{'
     }
 
     It '缺失 pending schema marker 时拒绝生成勾选子集并要求重新 scan' {

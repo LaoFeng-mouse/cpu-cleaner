@@ -100,4 +100,40 @@ Describe '自启值单值备份/恢复 (v1.5.4 P0)' {
     It '非法路径 (非 HKLM/HKCU) 返回 null' {
         Get-AutostartValueInfo 'C:\Windows\System32' 'x' | Should -Be $null
     }
+
+    It 'RegistryKey 字面删除只删除指定的 * ? [x] 值' {
+        $relativePath = 'Software\ShushuCleanerLiteralDeleteTest_' + [guid]::NewGuid().ToString('N')
+        try {
+            $created = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($relativePath)
+            foreach ($name in @('*','?','[x]','keep')) {
+                $created.SetValue($name, "value-$name", [Microsoft.Win32.RegistryValueKind]::String)
+            }
+            $created.Dispose()
+
+            foreach ($target in @('*','?','[x]')) {
+                $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($relativePath, $true)
+                try { Remove-LiteralRegistryValueFromKey -RegistryKey $key -Name $target } finally { $key.Dispose() }
+                $check = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($relativePath, $false)
+                try {
+                    @($check.GetValueNames()) | Should -Not -Contain $target
+                    @($check.GetValueNames()) | Should -Contain 'keep'
+                    foreach ($other in @('*','?','[x]') | Where-Object { $_ -ne $target }) {
+                        if ($other -in @($check.GetValueNames())) { $check.GetValue($other) | Should -Be "value-$other" }
+                    }
+                } finally { $check.Dispose() }
+            }
+        } finally {
+            [Microsoft.Win32.Registry]::CurrentUser.DeleteSubKeyTree($relativePath, $false)
+        }
+    }
+
+    It '生产 remove_autostart 使用字面 helper 且源码不调用 Remove-ItemProperty' {
+        $source = Get-Content (Join-Path $projectRoot 'src\Core\ActionEngine.ps1') -Raw -Encoding UTF8
+        $start = $source.IndexOf("'remove_autostart' {")
+        $end = $source.IndexOf("'disable_task' {", $start)
+        $body = $source.Substring($start, $end - $start)
+
+        $body | Should -Match 'Remove-LiteralAutostartValue'
+        $body | Should -Not -Match '\bRemove-ItemProperty\b'
+    }
 }

@@ -328,15 +328,23 @@ function New-PendingSubsetPayload {
             $actions += Copy-PendingActionForSubset $checkedItem._raw
         }
     }
+    $observations = @()
+    if ($SourcePending -and $SourcePending.observations) { $observations = @($SourcePending.observations) }
     $suspicious = @()
     if ($SourcePending -and $SourcePending.suspicious) { $suspicious = @($SourcePending.suspicious) }
-    return [pscustomobject]@{
+    $properties = [ordered]@{
         pending_schema_version = $pendingVersion
         generated = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         actions = @($actions)
-        observations = @()
+        observations = @($observations)
         suspicious = @($suspicious)
     }
+    foreach ($property in $SourcePending.PSObject.Properties) {
+        if ($property.Name -notin @('pending_schema_version','generated','actions','observations','suspicious')) {
+            $properties[$property.Name] = $property.Value
+        }
+    }
+    return [pscustomobject]$properties
 }
 
 # v1.5.5: 动作中文标签 (勾选视图展示)
