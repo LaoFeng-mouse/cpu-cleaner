@@ -32,6 +32,13 @@ $script:I18N = @{
         ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2}'
         BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
         NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。详见管理员窗口。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复出错或被取消: {0}'; RestorePartial='恢复完成，但部分条目验证失败（详见管理员窗口）。'
+        State_idle_Title='鼠鼠开始幻想'; State_idle_Sub='先做只读扫描，不会修改系统。'
+        State_scanning_Title='正在看清现实'; State_scanning_Sub='只展示真实阶段，不伪造完成百分比。'
+        State_results_Title='扫描结论'; State_results_Sub='可处理项与观察项分开显示，目前尚未修改系统。'
+        State_review_Title='确认处理边界'; State_review_Sub='只有安全、已测试且窄匹配命中的项目可以选择。'
+        State_executing_Title='鼠鼠正在谨慎整理'; State_executing_Sub='每项都会重新验证、备份并记录结果。'
+        State_completed_Title='幻想落地'; State_completed_Sub='结果按成功、失败和跳过逐项展示。'
+        State_error_Title='鼠鼠的幻想被打断了'; State_error_Sub='查看真实原因后可以安全重试。'
         LangLabel='EN'
     }
     'en' = @{
@@ -45,11 +52,25 @@ $script:I18N = @{
         ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2}'
         BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
         NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}. See admin window.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed/cancelled: {0}'; RestorePartial='Restore finished, but some items failed verification (see admin window).'
+        State_idle_Title='The fantasy begins'; State_idle_Sub='Start with a read-only scan. No system settings will change.'
+        State_scanning_Title='Looking at reality'; State_scanning_Sub='Showing real scan phases without a fabricated percentage.'
+        State_results_Title='Scan result'; State_results_Sub='Safe actions and observations are separated. Nothing has changed yet.'
+        State_review_Title='Review the safety boundary'; State_review_Sub='Only tested items produced by narrow matches can be selected.'
+        State_executing_Title='Cleaning carefully'; State_executing_Sub='Every item is revalidated, backed up, and recorded.'
+        State_completed_Title='Fantasy delivered'; State_completed_Sub='Success, failure, and skipped results are shown item by item.'
+        State_error_Title='The fantasy was interrupted'; State_error_Sub='Read the real cause, then retry safely.'
         LangLabel='中文'
     }
 }
 
 function Get-Text($key) { return $script:I18N[$script:Lang][$key] }
+
+function Update-GuiStateText {
+    $titleKey = 'State_{0}_Title' -f $script:GuiState
+    $subtitleKey = 'State_{0}_Sub' -f $script:GuiState
+    $window.FindName('StateTitle').Text = Get-Text $titleKey
+    $window.FindName('StateSubtitle').Text = Get-Text $subtitleKey
+}
 
 function Apply-Language {
     $t = $script:I18N[$script:Lang]
@@ -57,6 +78,7 @@ function Apply-Language {
     $w.Title = $t['AppName']
     $w.FindName('TitleMain').Text = $t['AppName']
     $w.FindName('BtnLang').Content = $t['LangLabel']
+    Update-GuiStateText
 }
 
 # ---------- 鼠鼠风格 XAML ----------
@@ -84,6 +106,34 @@ foreach ($imgName in $script:ImgMap.Keys) {
             $imgCtrl.Source = $bi
         }
     }
+}
+
+$script:GuiState = 'idle'
+$script:GuiActiveStage = 1
+$script:StatePanels = @('IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel','ExecutingPanel','CompletedPanel','ErrorPanel')
+
+function Set-GuiState {
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('idle','scanning','results','review','executing','completed','error')][string]$Name,
+        [switch]$Force
+    )
+    if (-not $Force -and -not (Test-GuiStateTransition $script:GuiState $Name)) {
+        throw "非法界面状态转换: $script:GuiState -> $Name"
+    }
+    $definition = Get-GuiStateDefinition $Name
+    foreach ($panelName in $script:StatePanels) {
+        $window.FindName($panelName).Visibility = if ($panelName -eq $definition.Panel) { 'Visible' } else { 'Collapsed' }
+    }
+    $activeStage = if ($definition.ActiveStage -eq 0) { $script:GuiActiveStage } else { $definition.ActiveStage }
+    for ($stage = 1; $stage -le 4; $stage++) {
+        $card = $window.FindName("StageCard$stage")
+        $card.Opacity = if ($stage -le $activeStage) { 1.0 } else { 0.46 }
+        $card.BorderBrush = if ($stage -eq $activeStage) { '#FFD21F' } else { '#D8CBAA' }
+        $card.BorderThickness = if ($stage -eq $activeStage) { 3 } else { 1 }
+    }
+    $script:GuiState = $Name
+    $script:GuiActiveStage = $activeStage
+    Update-GuiStateText
 }
 
 function Get-PendingItems {
@@ -495,6 +545,7 @@ $window.FindName('BtnRestore').Add_Click({
     }
 })
 
+Set-GuiState -Name idle -Force
 Apply-Language
 if ($script:TestMode) {
     # 测试模式: 不显示窗口, 暴露窗口对象供 Pester 无窗口断言

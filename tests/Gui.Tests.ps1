@@ -45,6 +45,22 @@ Describe 'GUI 壳 (无窗口)' {
         $script:Lang = 'zh'; Apply-Language
     }
 
+    It 'shows exactly one state panel and emphasizes completed/current stages' {
+        Set-GuiState -Name 'review' -Force
+        $script:Win.FindName('ReviewPanel').Visibility.ToString() | Should -Be 'Visible'
+        foreach ($name in @('IdlePanel','ScanningPanel','ResultsPanel','ExecutingPanel','CompletedPanel','ErrorPanel')) {
+            $script:Win.FindName($name).Visibility.ToString() | Should -Be 'Collapsed'
+        }
+        $script:Win.FindName('StageCard3').BorderThickness.Left | Should -Be 3
+        $script:Win.FindName('StageCard4').Opacity | Should -BeLessThan 1
+    }
+
+    It 'rejects a direct idle to executing jump' {
+        Set-GuiState -Name 'idle' -Force
+        { Set-GuiState -Name 'executing' } | Should -Throw '*非法界面状态转换*'
+        $script:GuiState | Should -Be 'idle'
+    }
+
     It '扫描轮询: Completed 恢复按钮并置进度 100' {
         $btn = [pscustomobject]@{ IsEnabled = $false }
         $prog = [pscustomobject]@{ Value = 0 }
