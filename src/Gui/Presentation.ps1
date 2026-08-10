@@ -34,7 +34,8 @@ function Get-GuiStateDefinition {
 
 function Get-GuiItemSummary {
     param($Items)
-    $all = @($Items)
+    $all = @()
+    if ($null -ne $Items) { $all = @($Items) }
     return [pscustomobject]@{
         executable  = @($all | Where-Object { $_.CanExecute }).Count
         observation = @($all | Where-Object { -not $_.CanExecute }).Count
@@ -45,8 +46,13 @@ function Get-GuiItemSummary {
 function Format-GuiMatcherDetail {
     param($Raw)
     if (-not $Raw) { return '' }
-    return ('目标类型: {0}`r`n动作: {1}`r`n命中字段: {2}`r`n命中类型: {3}`r`n命中模式: {4}' -f
-        $Raw.hit_type, $Raw.action, $Raw.matched_field, $Raw.matched_type, $Raw.matched_pattern)
+    return @(
+        '目标类型: {0}' -f $Raw.hit_type
+        '动作: {0}' -f $Raw.action
+        '命中字段: {0}' -f $Raw.matched_field
+        '命中类型: {0}' -f $Raw.matched_type
+        '命中模式: {0}' -f $Raw.matched_pattern
+    ) -join [Environment]::NewLine
 }
 
 function ConvertTo-GuiExecutionRows {
