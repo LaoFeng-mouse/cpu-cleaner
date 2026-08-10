@@ -290,6 +290,98 @@ function Assert-PendingPathIsNotReparsePoint($Path) {
     }
 }
 
+function Initialize-PendingFileIdentityNativeApi {
+    $nativeType = [System.Management.Automation.PSTypeName]'ShushuCleaner.PendingFileIdentityNative'
+    if ($null -ne $nativeType.Type) { return }
+    $typeDefinition = @'
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace ShushuCleaner
+{
+    public static class PendingFileIdentityNative
+    {
+        public const uint FILE_NAME_NORMALIZED = 0x0;
+        public const uint VOLUME_NAME_DOS = 0x0;
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern uint GetFinalPathNameByHandleW(
+            SafeFileHandle hFile,
+            StringBuilder lpszFilePath,
+            uint cchFilePath,
+            uint dwFlags);
+    }
+}
+'@
+    $null = Add-Type -TypeDefinition $typeDefinition -ErrorAction Stop
+}
+
+function Invoke-GetFinalPathNameByHandleNative {
+    param($SafeFileHandle, $Builder, $Capacity, $Flags)
+    return [ShushuCleaner.PendingFileIdentityNative]::GetFinalPathNameByHandleW(
+        $SafeFileHandle,
+        $Builder,
+        [uint32]$Capacity,
+        [uint32]$Flags
+    )
+}
+
+function Get-NormalizedFinalPathFromHandle($Stream) {
+    if ($Stream -isnot [System.IO.FileStream] -or $null -eq $Stream.SafeFileHandle -or $Stream.SafeFileHandle.IsInvalid -or $Stream.SafeFileHandle.IsClosed) {
+        throw 'pending 文件句柄无效'
+    }
+    Initialize-PendingFileIdentityNativeApi
+
+    $capacity = 512
+    $rawPath = $null
+    for ($attempt = 0; $attempt -lt 4; $attempt++) {
+        $builder = New-Object System.Text.StringBuilder($capacity)
+        $length = Invoke-GetFinalPathNameByHandleNative `
+            -SafeFileHandle $Stream.SafeFileHandle `
+            -Builder $builder `
+            -Capacity $builder.Capacity `
+            -Flags ([ShushuCleaner.PendingFileIdentityNative]::FILE_NAME_NORMALIZED -bor [ShushuCleaner.PendingFileIdentityNative]::VOLUME_NAME_DOS)
+        if ($length -eq 0) {
+            throw (New-Object System.ComponentModel.Win32Exception([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
+        }
+        if ($length -lt $builder.Capacity) {
+            $rawPath = $builder.ToString()
+            break
+        }
+        if ($length -gt 32767) { throw 'pending 文件最终路径过长' }
+        $capacity = [int]$length + 1
+    }
+    if ([string]::IsNullOrWhiteSpace($rawPath)) { throw '无法读取 pending 文件最终路径' }
+
+    $dosPath = $null
+    if ($rawPath.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $dosPath = '\\' + $rawPath.Substring(8)
+    } elseif ($rawPath -match '^\\\\\?\\[A-Za-z]:\\') {
+        $dosPath = $rawPath.Substring(4)
+    } else {
+        throw 'pending 文件最终路径不是可安全验证的本地 DOS/UNC 形式'
+    }
+    $normalized = [System.IO.Path]::GetFullPath($dosPath)
+    if ($normalized -notmatch '^[A-Za-z]:\\' -and $normalized -notmatch '^\\\\[^\\]+\\[^\\]+\\') {
+        throw 'pending 文件最终路径不是可安全验证的本地 DOS/UNC 形式'
+    }
+    return $normalized
+}
+
+function Test-OpenedPendingFileIdentity {
+    param($Stream, $Path)
+    try {
+        if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path)) { return $false }
+        $expectedPath = [System.IO.Path]::GetFullPath($Path)
+        if ($expectedPath -notmatch '^[A-Za-z]:\\' -and $expectedPath -notmatch '^\\\\[^\\]+\\[^\\]+\\') { return $false }
+        $actualPath = Get-NormalizedFinalPathFromHandle $Stream
+        return [string]::Equals($actualPath, $expectedPath, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
 function Open-LockedPendingFile($Path) {
     Assert-PendingPathIsNotReparsePoint $Path
     $stream = $null
@@ -300,6 +392,9 @@ function Open-LockedPendingFile($Path) {
             [System.IO.FileAccess]::ReadWrite,
             [System.IO.FileShare]::Read
         )
+        if (-not (Test-OpenedPendingFileIdentity -Stream $stream -Path $Path)) {
+            throw 'pending 文件句柄身份验证失败，拒绝读取或写回'
+        }
         Assert-PendingPathIsNotReparsePoint $Path
         return $stream
     } catch {
@@ -433,15 +528,13 @@ function Get-CurrentPendingMatchValue($Pending) {
             })
             if ($properties.Count -ne 1) { return $null }
             $currentName = [string]$properties[0].Name
+            $storedValue = Get-StrictNonBlankStringProperty $Pending 'autostart_value'
+            if ($null -eq $storedValue) { return $null }
+            try { $currentValue = $properties[0].Value } catch { return $null }
+            if ($currentValue -isnot [string] -or [string]::IsNullOrWhiteSpace($currentValue)) { return $null }
+            if (-not [string]::Equals($currentValue, $storedValue, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
             if ($matchedField -eq 'autostart_name') { return $currentName }
-            if ($matchedField -eq 'autostart_value') {
-                $storedValue = Get-StrictNonBlankStringProperty $Pending 'autostart_value'
-                if ($null -eq $storedValue) { return $null }
-                try { $currentValue = $properties[0].Value } catch { return $null }
-                if ($currentValue -isnot [string] -or [string]::IsNullOrWhiteSpace($currentValue)) { return $null }
-                if (-not [string]::Equals($currentValue, $storedValue, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
-                return $currentValue
-            }
+            if ($matchedField -eq 'autostart_value') { return $currentValue }
             return $null
         }
         'task' {

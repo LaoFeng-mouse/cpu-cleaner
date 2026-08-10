@@ -121,6 +121,35 @@ Describe '进程标准化匹配保持字面语义' {
 }
 
 Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
+    It 'autostart name exact 从 Match 到 pending 绑定原始 Value 且变化后拒绝授权' {
+        $oldPendingFile = $script:PendingFile
+        try {
+            $script:PendingFile = Join-Path $TestDrive 'autostart-name-e2e.json'
+            $profile = [pscustomobject]@{
+                id='autostart-name-e2e'; vendor='T'; name='Auto'; name_cn='Auto'; risk='high'; safe=$true; reason_cn='r'
+                evidence=[pscustomobject]@{ tested=$true }
+                detect=[pscustomobject]@{ services=@(); processes=@(); tasks=@(); autostarts=@([pscustomobject]@{ match='Updater'; type='exact' }) }
+                actions=[pscustomobject]@{ autostart='remove_autostart' }
+            }
+            $profiles = [pscustomobject]@{ profiles=@($profile) }
+            $script:CurrentAutostartValue = 'C:\Apps\Updater.exe'
+            Mock Load-Profiles { $profiles }
+            Mock Get-ItemProperty { [pscustomobject]@{ Updater=$script:CurrentAutostartValue } } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
+
+            $hits = @(Match-Profiles -Services @() -AutoStarts @([pscustomobject]@{ Name='Updater'; Value='C:\Apps\Updater.exe'; Source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }) -Tasks @() -TopProcs @())
+            Save-PendingActions -Hits $hits -Suspicious @()
+            $saved = Read-StrictPendingJsonFile $script:PendingFile
+
+            $saved.actions[0].matched_field | Should -Be 'autostart_name'
+            $saved.actions[0].autostart_value | Should -Be 'C:\Apps\Updater.exe'
+            Test-PendingActionAuthorized $saved.actions[0] $profiles | Should -BeTrue
+            $script:CurrentAutostartValue = 'C:\Apps\Changed.exe'
+            Test-PendingActionAuthorized $saved.actions[0] $profiles | Should -BeFalse
+        } finally {
+            $script:PendingFile = $oldPendingFile
+        }
+    }
+
     It 'autostart value <type> 从 Match 到 pending 再到授权保持原始值' -TestCases @(
         @{ type='exact'; pattern='C:\Apps\Updater.exe'; value='C:\Apps\Updater.exe' }
         @{ type='path'; pattern='C:\Apps'; value='C:\Apps\Updater.exe --silent' }

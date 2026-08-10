@@ -38,6 +38,15 @@ BeforeAll {
 
     function Is-Admin { return $false }
     function Write-Step { param([string]$Message) }
+    if (-not (Get-Command Get-NormalizedFinalPathFromHandle -ErrorAction SilentlyContinue)) {
+        function Get-NormalizedFinalPathFromHandle { throw 'handle identity helper not implemented' }
+    }
+    if (-not (Get-Command Invoke-GetFinalPathNameByHandleNative -ErrorAction SilentlyContinue)) {
+        function Invoke-GetFinalPathNameByHandleNative {
+            param($SafeFileHandle, $Builder, $Capacity, $Flags)
+            throw 'native API wrapper not implemented'
+        }
+    }
 }
 
 Describe '授权验证 (提权后重新确认)' {
@@ -230,12 +239,46 @@ Describe '当前系统字段解析与相同 matcher 重放' {
         $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='Updater';type='exact'})
         $pending = [pscustomobject]@{
             id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
-            autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='Updater'
+            autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='Updater'; autostart_value='C:\Apps\updater.exe'
             matched_pattern='Updater'; matched_type='exact'; matched_field='autostart_name'
         }
         Mock Get-ItemProperty { [pscustomobject]@{ Updater='C:\Apps\updater.exe' } } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
 
         Test-PendingActionAuthorized $pending $profiles | Should -BeTrue
+    }
+
+    It 'autostart_name exact 在保存值缺失或当前值变化时拒绝' {
+        $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='Updater';type='exact'})
+        $pending = [pscustomobject]@{
+            id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
+            autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='Updater'; autostart_value='C:\Apps\old.exe'
+            matched_pattern='Updater'; matched_type='exact'; matched_field='autostart_name'
+        }
+        Mock Get-ItemProperty { [pscustomobject]@{ Updater=$script:CurrentAutostartValue } } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
+
+        $script:CurrentAutostartValue = 'C:\Apps\changed.exe'
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
+        $pending.autostart_value = ''
+        $script:CurrentAutostartValue = 'C:\Apps\old.exe'
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
+    }
+
+    It 'autostart_name exact 在当前 Value 空白、非字符串或读取异常时拒绝' {
+        $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='Updater';type='exact'})
+        $pending = [pscustomobject]@{
+            id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
+            autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='Updater'; autostart_value='C:\Apps\old.exe'
+            matched_pattern='Updater'; matched_type='exact'; matched_field='autostart_name'
+        }
+        Mock Get-ItemProperty { $script:CurrentAutostartKey } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
+
+        foreach ($badValue in @($null, ' ', 123)) {
+            $script:CurrentAutostartKey = [pscustomobject]@{ Updater=$badValue }
+            Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
+        }
+        $script:CurrentAutostartKey = [pscustomobject]@{}
+        $script:CurrentAutostartKey | Add-Member -MemberType ScriptProperty -Name Updater -Value { throw 'current value unreadable' }
+        Test-PendingActionAuthorized $pending $profiles | Should -BeFalse
     }
 
     It 'autostart_value 从当前命名属性值读取且缺失值拒绝' {
@@ -298,7 +341,7 @@ Describe '当前系统字段解析与相同 matcher 重放' {
         $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='Updater';type='exact'})
         $pending = [pscustomobject]@{
             id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'
-            autostart_source='hkcu:\software\microsoft\windows\currentversion\run'; autostart_name='Updater'
+            autostart_source='hkcu:\software\microsoft\windows\currentversion\run'; autostart_name='Updater'; autostart_value='C:\Apps\updater.exe'
             matched_pattern='Updater'; matched_type='exact'; matched_field='autostart_name'
         }
         Mock Get-ItemProperty { [pscustomobject]@{ Updater='C:\Apps\updater.exe' } } -ParameterFilter { $Path -eq 'hkcu:\software\microsoft\windows\currentversion\run' }
@@ -439,7 +482,7 @@ Describe '执行前最终授权防 TOCTOU' {
         $profiles = New-AuthProfiles -HitType autostart -Action remove_autostart -Matchers @([pscustomobject]@{match='Updater';type='exact'})
         $pending = [pscustomobject]@{
             id='rule'; hit_type='autostart'; action='remove_autostart'; status='pending'; safe=$true
-            autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='Updater'
+            autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='Updater'; autostart_value='C:\Apps\old.exe'
             matched_pattern='Updater'; matched_type='exact'; matched_field='autostart_name'
         }
         $script:CurrentAutostart = [pscustomobject]@{ Updater='C:\Apps\old.exe' }
@@ -637,6 +680,85 @@ Describe 'pending JSON 重复属性预检' {
         ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) | Should -BeFalse
         ([System.Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json).generated | Should -Be 'locked'
         ([System.IO.File]::ReadAllText($replacement) | ConvertFrom-Json).replacement | Should -BeTrue
+    }
+
+    It '普通文件的已打开句柄最终路径与输入身份一致' {
+        $path = Join-Path $TestDrive 'identity-normal.json'
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+        try {
+            Test-OpenedPendingFileIdentity -Stream $stream -Path $path | Should -BeTrue
+        } finally {
+            $stream.Dispose()
+        }
+    }
+
+    It '已打开句柄返回不同最终目标时失败关闭且路径换回不改变结论' {
+        $path = Join-Path $TestDrive 'identity-input.json'
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+        Mock Invoke-GetFinalPathNameByHandleNative {
+            $null = $Builder.Append('\\?\C:\Different\target.json')
+            return [uint32]$Builder.Length
+        }
+        try {
+            Test-OpenedPendingFileIdentity -Stream $stream -Path $path | Should -BeFalse
+            Test-OpenedPendingFileIdentity -Stream $stream -Path $path | Should -BeFalse
+        } finally {
+            $stream.Dispose()
+        }
+        Assert-MockCalled Invoke-GetFinalPathNameByHandleNative -Times 2 -Exactly
+    }
+
+    It '最终路径 Windows API 失败时句柄身份校验 fail closed' {
+        $path = Join-Path $TestDrive 'identity-api-failure.json'
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+        Mock Invoke-GetFinalPathNameByHandleNative { return [uint32]0 }
+        try {
+            Test-OpenedPendingFileIdentity -Stream $stream -Path $path | Should -BeFalse
+        } finally {
+            $stream.Dispose()
+        }
+    }
+
+    It '句柄身份不一致时 Invoke-Clean 不进入 JSON 解析或写回并释放句柄' {
+        $path = Join-Path $TestDrive 'identity-block-clean.json'
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        Mock Is-Admin { $true }
+        Mock Invoke-GetFinalPathNameByHandleNative {
+            $null = $Builder.Append('\\?\C:\Different\target.json')
+            return [uint32]$Builder.Length
+        }
+        Mock Read-LimitedPendingJsonStream { throw 'must not parse' }
+        Mock Write-PendingToLockedStream { throw 'must not write' }
+        try {
+            { Invoke-Clean } | Should -Throw '*身份*'
+            Assert-MockCalled Read-LimitedPendingJsonStream -Times 0 -Exactly
+            Assert-MockCalled Write-PendingToLockedStream -Times 0 -Exactly
+            $probe = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $probe.Dispose()
+        } finally {
+            $script:PendingFile = $oldPendingFile
+        }
+    }
+
+    It '即使纵深 reparse 预检被绕过，junction 最终句柄目标仍拒绝' {
+        $targetDirectory = Join-Path $TestDrive 'identity-target'
+        $junctionPath = Join-Path $TestDrive 'identity-junction'
+        $null = New-Item -ItemType Directory -Path $targetDirectory
+        $null = New-Item -ItemType Junction -Path $junctionPath -Target $targetDirectory
+        [System.IO.File]::WriteAllText((Join-Path $targetDirectory 'pending.json'), '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $pendingPath = Join-Path $junctionPath 'pending.json'
+        Mock Assert-PendingPathIsNotReparsePoint {}
+        $script:UnexpectedIdentityStream = $null
+        try {
+            { $script:UnexpectedIdentityStream = Open-LockedPendingFile $pendingPath } | Should -Throw '*身份*'
+        } finally {
+            if ($null -ne $script:UnexpectedIdentityStream) { $script:UnexpectedIdentityStream.Dispose() }
+        }
     }
 
     It '拒绝经过 reparse-point 目录组件的 pending 输入路径' {
