@@ -591,6 +591,22 @@ function Read-LimitedPendingJsonStream($Stream) {
     }
 }
 
+function Get-PendingStreamSha256($Stream) {
+    if ($null -eq $Stream -or -not $Stream.CanRead -or -not $Stream.CanSeek) { throw 'pending 文件流不可用于 SHA-256 校验' }
+    $sha = $null
+    try {
+        $Stream.Position = 0
+        $initialLength = $Stream.Length
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $hashBytes = $sha.ComputeHash($Stream)
+        if ($Stream.Length -ne $initialLength) { throw 'pending 文件 SHA-256 校验期间长度变化' }
+        $Stream.Position = 0
+        return ([System.BitConverter]::ToString($hashBytes) -replace '-', '')
+    } finally {
+        if ($null -ne $sha) { $sha.Dispose() }
+    }
+}
+
 function Read-LimitedPendingJsonFile($Path) {
     $stream = $null
     try {
@@ -996,6 +1012,15 @@ function Invoke-Clean {
     $pendingValidated = $false
     try {
     $pendingStream = Open-LockedPendingFile $script:PendingFile
+    if ($script:RequirePendingSha256) {
+        if ($script:PendingSha256 -isnot [string] -or $script:PendingSha256 -cnotmatch '^[0-9a-fA-F]{64}$') {
+            throw '自定义 pending 文件缺失有效的 SHA-256 绑定，拒绝执行'
+        }
+        $actualPendingSha256 = Get-PendingStreamSha256 $pendingStream
+        if (-not [string]::Equals($actualPendingSha256, $script:PendingSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw '自定义 pending 文件 SHA-256 不匹配，拒绝执行'
+        }
+    }
     $pendingRaw = Read-LimitedPendingJsonStream $pendingStream
     $pending = ConvertFrom-StrictPendingJson $pendingRaw
     if (-not (Test-PendingSchemaSupported $pending)) {

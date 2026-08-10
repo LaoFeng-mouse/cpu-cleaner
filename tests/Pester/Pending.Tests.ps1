@@ -121,6 +121,49 @@ exit 0
         Test-Path -LiteralPath $markerPath | Should -BeFalse
     }
 
+    It '自定义 pending 缺失或错误 SHA-256 时在解析、授权和动作前 fail closed' -TestCases @(
+        @{ label='missing'; supplied='' }
+        @{ label='wrong'; supplied=('0' * 64) }
+    ) {
+        param($label, $supplied)
+        $pendingPath = Join-Path $TestDrive "hash-$label.json"
+        $markerPath = Join-Path $TestDrive "hash-$label-forbidden.txt"
+        $fixturePath = Join-Path $TestDrive "hash-$label-fixture.ps1"
+        [System.IO.File]::WriteAllText($pendingPath, '{"pending_schema_version":2,"actions":[],"observations":[],"suspicious":[]}', [System.Text.UTF8Encoding]::new($false))
+        $actionEnginePath = Join-Path $projectRoot 'src\Core\ActionEngine.ps1'
+        $fixture = @'
+param([string]$PendingPath, [string]$MarkerPath, [string]$ActionEnginePath, [string]$ProvidedHash)
+$ErrorActionPreference = 'Stop'
+$script:PendingFile = $PendingPath
+$script:PendingSha256 = $ProvidedHash
+$script:RequirePendingSha256 = $true
+function Is-Admin { return $true }
+function Add-ForbiddenCall([string]$Name) { [System.IO.File]::AppendAllText($MarkerPath, ($Name + [Environment]::NewLine)) }
+function ConvertFrom-StrictPendingJson { Add-ForbiddenCall 'ConvertFrom-StrictPendingJson'; throw 'parse must not run' }
+function Load-Profiles { Add-ForbiddenCall 'Load-Profiles'; throw 'profiles must not load' }
+function Get-Service { Add-ForbiddenCall 'Get-Service'; throw 'service must not run' }
+function Get-ItemProperty { Add-ForbiddenCall 'Get-ItemProperty'; throw 'registry must not run' }
+function Get-ScheduledTask { Add-ForbiddenCall 'Get-ScheduledTask'; throw 'task must not run' }
+. $ActionEnginePath
+Invoke-Clean
+'@
+        [System.IO.File]::WriteAllText($fixturePath, $fixture, [System.Text.UTF8Encoding]::new($false))
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
+        $psi.Arguments = ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -PendingPath "{1}" -MarkerPath "{2}" -ActionEnginePath "{3}" -ProvidedHash "{4}"' -f $fixturePath, $pendingPath, $markerPath, $actionEnginePath, $supplied)
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $output = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+
+        $process.ExitCode | Should -Not -Be 0
+        $output | Should -Match 'SHA-256|hash'
+        Test-Path -LiteralPath $markerPath | Should -BeFalse
+    }
+
     It '同一 id 不同动作都保留(不丢 autostart)' {
         $hits = @(
             [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' },

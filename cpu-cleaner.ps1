@@ -24,7 +24,8 @@ param(
     # v1.5.5: GUI 勾选子集清单路径 (只处理勾选条目)。
     # 注意参数名不能是 $PendingFile: param 变量与 $script:PendingFile 同名同变量,
     # 顶部默认赋值会覆盖参数值导致丢失, 故命名为 $PendingFileArg
-    [string]$PendingFileArg = ''
+    [string]$PendingFileArg = '',
+    [string]$PendingSha256Arg = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -32,6 +33,8 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:ProfileFile = Join-Path $script:Root 'bloatware-profiles.json'
 $script:PendingFile = Join-Path $script:Root 'pending_actions.json'
+$script:PendingSha256 = $PendingSha256Arg
+$script:RequirePendingSha256 = $false
 $script:BackupRoot = Join-Path $script:Root 'backups'
 # v1.5.2: 版本号全局唯一 (文本报告/HTML 页脚统一引用, 不再手改多处)
 $script:Version = '1.7.0'
@@ -82,7 +85,10 @@ switch ($Mode) {
     }
     'clean' {
         # v1.5.5: GUI 勾选子集 — -PendingFileArg 指向临时清单 (只处理勾选条目, 授权验证照跑)
-        if ($PendingFileArg) { $script:PendingFile = $PendingFileArg }
+        if ($PendingFileArg) {
+            $script:PendingFile = $PendingFileArg
+            $script:RequirePendingSha256 = $true
+        }
         Invoke-Clean
     }
     'restore' { Invoke-Restore }
