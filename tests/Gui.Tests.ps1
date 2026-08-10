@@ -543,6 +543,34 @@ Describe '勾选视图 (v1.5.5)' {
         $script:GuiRoot = Split-Path $PSScriptRoot -Parent
         . (Join-Path $script:GuiRoot 'gui-cleaner.ps1')
         $script:Win = $window
+
+        function New-GuiReviewPendingFixture {
+            param(
+                [string]$Marker = 'fixture',
+                [string]$ActionMatchedType = 'contains',
+                [string]$ObservationMatchedType = 'exact',
+                [string]$ActionServiceName = 'ActionService'
+            )
+            return [pscustomobject]@{
+                pending_schema_version = [int64]2
+                review_marker = $Marker
+                actions = @([pscustomobject]@{
+                    id='action-row'; name_cn='可执行分支'; hit_type='service'; action='disable_service'; status='pending'
+                    service_name=$ActionServiceName; matched_pattern='Action'; matched_type=$ActionMatchedType; matched_field='service_name'; reason_cn='action reason'
+                })
+                observations = @([pscustomobject]@{
+                    id='observation-row'; name_cn='观察分支'; hit_type='service'; action='investigate'; status='观察'
+                    service_name='ObservationService'; matched_pattern='ObservationService'; matched_type=$ObservationMatchedType; matched_field='service_name'; reason_cn='observation reason'; obs_reason='只观察'
+                })
+                suspicious = @()
+            }
+        }
+
+        function Invoke-GuiOpenReviewClick {
+            $script:Win.FindName('BtnOpenReview').RaiseEvent(
+                [System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)
+            )
+        }
     }
 
     It '动作中文标签映射' {
@@ -587,7 +615,7 @@ Describe '勾选视图 (v1.5.5)' {
 
         $oldRoot = $script:Root
         $script:Root = $tmpRoot
-        try { $view = @(Get-PendingViewItems) } finally { $script:Root = $oldRoot }
+        try { $view = @(Get-PendingViewItems -Pending $pending) } finally { $script:Root = $oldRoot }
 
         # t3 success 被过滤; 剩下 t1 (actions) + t2 (observations)
         $view.Count | Should -Be 2
@@ -637,7 +665,7 @@ Describe '勾选视图 (v1.5.5)' {
         $oldRoot = $script:Root
         $script:Root = $tmpRoot
         try {
-            $items = @(Get-PendingViewItems)
+            $items = @(Get-PendingViewItems -Pending $pending)
             $items.Count | Should -Be 2
             $items[0].CanExecute | Should -BeTrue
             $items[0].IsChecked | Should -BeTrue
@@ -655,7 +683,140 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It 'review 加载非 v2 pending 时失败关闭且不绑定清单' {
+    It 'actions 中 contains 仍可执行而 observations 中 exact 仍不可执行' {
+        $pending = New-GuiReviewPendingFixture
+
+        $items = @(Get-PendingViewItems -Pending $pending)
+
+        $items.Count | Should -Be 2
+        $items[0].matched_type | Should -Be 'contains'
+        $items[0].CanExecute | Should -BeTrue
+        $items[0].IsChecked | Should -BeTrue
+        $items[1].matched_type | Should -Be 'exact'
+        $items[1].CanExecute | Should -BeFalse
+        $items[1].IsChecked | Should -BeFalse
+    }
+
+    It 'review presentation shape 拒绝 null、数组标量和缺失 concrete identity' {
+        $cases = @(
+            @{ Label='actions container null'; Mutate={ param($p) $p.actions = $null } },
+            @{ Label='observations container null'; Mutate={ param($p) $p.observations = $null } },
+            @{ Label='action id null'; Mutate={ param($p) $p.actions[0].id = $null } },
+            @{ Label='action hit_type array'; Mutate={ param($p) $p.actions[0].hit_type = @('service') } },
+            @{ Label='action action array'; Mutate={ param($p) $p.actions[0].action = @('disable_service') } },
+            @{ Label='action status null'; Mutate={ param($p) $p.actions[0].status = $null } },
+            @{ Label='action pattern array'; Mutate={ param($p) $p.actions[0].matched_pattern = @('Action') } },
+            @{ Label='action type null'; Mutate={ param($p) $p.actions[0].matched_type = $null } },
+            @{ Label='action field array'; Mutate={ param($p) $p.actions[0].matched_field = @('service_name') } },
+            @{ Label='action target null'; Mutate={ param($p) $p.actions[0].service_name = $null } },
+            @{ Label='observation row null'; Mutate={ param($p) $p.observations = @($null) } },
+            @{ Label='observation id array'; Mutate={ param($p) $p.observations[0].id = @('observation-row') } },
+            @{ Label='observation reason null'; Mutate={ param($p) $p.observations[0].obs_reason = $null } }
+        )
+
+        foreach ($case in $cases) {
+            $pending = New-GuiReviewPendingFixture
+            & $case.Mutate $pending
+            { Assert-GuiPendingPresentationShape -Pending $pending } |
+                Should -Throw '*pending review shape*' -Because $case.Label
+        }
+    }
+
+    It 'review 只读一次并用同一 parsed object 投影及保存 snapshot identity' {
+        $tmpRoot = Join-Path $TestDrive ('gui-one-read-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $pendingPath = Join-Path $tmpRoot 'pending_actions.json'
+        [System.IO.File]::WriteAllText($pendingPath, '{}', [System.Text.UTF8Encoding]::new($false))
+        $firstJson = ConvertTo-Json -InputObject (New-GuiReviewPendingFixture -Marker 'first' -ActionServiceName 'FirstService') -Depth 6
+        $secondJson = ConvertTo-Json -InputObject (New-GuiReviewPendingFixture -Marker 'second' -ActionServiceName 'SecondService') -Depth 6
+        $script:PendingReadCount = 0
+        Mock Get-Content {
+            $script:PendingReadCount++
+            if ($script:PendingReadCount -eq 1) { return $firstJson }
+            return $secondJson
+        } -ParameterFilter { $Path -eq $pendingPath }
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try {
+            Set-GuiState results -Force
+            Invoke-GuiOpenReviewClick
+
+            $script:PendingReadCount | Should -Be 1
+            Assert-MockCalled Get-Content -Times 1 -Exactly -ParameterFilter { $Path -eq $pendingPath }
+            $script:ReviewedPendingSnapshot.review_marker | Should -Be 'first'
+            @($script:ReviewedPendingIdentityKeys).Count | Should -Be 2
+            $script:Win.FindName('PendingList').Items[0]._raw.service_name | Should -Be 'FirstService'
+        } finally {
+            $script:Root = $oldRoot
+        }
+    }
+
+    It '成功 review 会替换先前 snapshot 和 identity keys' {
+        $tmpRoot = Join-Path $TestDrive ('gui-review-replace-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $pendingPath = Join-Path $tmpRoot 'pending_actions.json'
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try {
+            $first = New-GuiReviewPendingFixture -Marker 'first' -ActionServiceName 'FirstService'
+            [System.IO.File]::WriteAllText($pendingPath, (ConvertTo-Json -InputObject $first -Depth 6), [System.Text.UTF8Encoding]::new($false))
+            Set-GuiState results -Force
+            Invoke-GuiOpenReviewClick
+            $firstSnapshot = $script:ReviewedPendingSnapshot
+            $firstKeys = @($script:ReviewedPendingIdentityKeys)
+
+            $second = New-GuiReviewPendingFixture -Marker 'second' -ActionServiceName 'SecondService'
+            [System.IO.File]::WriteAllText($pendingPath, (ConvertTo-Json -InputObject $second -Depth 6), [System.Text.UTF8Encoding]::new($false))
+            Set-GuiState results -Force
+            Invoke-GuiOpenReviewClick
+
+            [object]::ReferenceEquals($firstSnapshot, $script:ReviewedPendingSnapshot) | Should -BeFalse
+            $script:ReviewedPendingSnapshot.review_marker | Should -Be 'second'
+            @($script:ReviewedPendingIdentityKeys).Count | Should -Be 2
+            $script:ReviewedPendingIdentityKeys[0] | Should -Not -Be $firstKeys[0]
+            $script:Win.FindName('PendingList').Items[0]._raw.service_name | Should -Be 'SecondService'
+        } finally {
+            $script:Root = $oldRoot
+        }
+    }
+
+    It 'malformed review 清空 stale list、snapshot 和 identity keys' {
+        $tmpRoot = Join-Path $TestDrive ('gui-malformed-review-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $pending = New-GuiReviewPendingFixture
+        $pending.actions[0].matched_pattern = @('Action')
+        [System.IO.File]::WriteAllText(
+            (Join-Path $tmpRoot 'pending_actions.json'),
+            (ConvertTo-Json -InputObject $pending -Depth 6),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try {
+            $list = $script:Win.FindName('PendingList')
+            $list.ItemsSource = @([pscustomobject]@{ name_cn='stale' })
+            $script:ReviewedPendingSnapshot = [pscustomobject]@{ review_marker='stale' }
+            $script:ReviewedPendingIdentityKeys = @('stale-key')
+            Set-GuiState results -Force
+            Invoke-GuiOpenReviewClick
+
+            $script:GuiState | Should -Be 'error'
+            $list.ItemsSource | Should -BeNullOrEmpty
+            @($list.Items).Count | Should -Be 0
+            $script:ReviewedPendingSnapshot | Should -BeNullOrEmpty
+            @($script:ReviewedPendingIdentityKeys).Count | Should -Be 0
+        } finally {
+            $script:Root = $oldRoot
+        }
+    }
+
+    It 'review 加载非 v2 pending 时按 <Lang> 本地化失败并清空 stale state' -TestCases @(
+        @{ Lang='zh'; Summary='待处理清单已过期，必须重新扫描。'; Mutation='没有执行任何系统修改。' }
+        @{ Lang='en'; Summary='The pending review is stale and must be rescanned.'; Mutation='No system settings were changed.' }
+    ) {
+        param($Lang, $Summary, $Mutation)
         $tmpRoot = Join-Path $TestDrive ('gui-stale-review-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tmpRoot)
         [System.IO.File]::WriteAllText(
@@ -665,22 +826,29 @@ Describe '勾选视图 (v1.5.5)' {
         )
 
         $oldRoot = $script:Root
+        $oldLang = $script:Lang
         $script:Root = $tmpRoot
         try {
+            $script:Lang = $Lang
             $list = $script:Win.FindName('PendingList')
             $list.ItemsSource = @([pscustomobject]@{ name_cn='旧数据' })
+            $script:ReviewedPendingSnapshot = [pscustomobject]@{ review_marker='stale' }
+            $script:ReviewedPendingIdentityKeys = @('stale-key')
             Set-GuiState results -Force
 
-            $script:Win.FindName('BtnOpenReview').RaiseEvent(
-                [System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)
-            )
+            Invoke-GuiOpenReviewClick
 
             $script:GuiState | Should -Be 'error'
-            $script:Win.FindName('ErrorSummaryText').Text | Should -Be '待处理清单已过期，必须重新扫描。'
-            $script:Win.FindName('ErrorMutationText').Text | Should -Be '没有执行任何系统修改。'
+            $script:Win.FindName('ErrorSummaryText').Text | Should -Be $Summary
+            $script:Win.FindName('ErrorMutationText').Text | Should -Be $Mutation
             $script:Win.FindName('ErrorDetailText').Text | Should -Match '重新运行 scan'
+            $list.ItemsSource | Should -BeNullOrEmpty
+            @($list.Items).Count | Should -Be 0
+            $script:ReviewedPendingSnapshot | Should -BeNullOrEmpty
+            @($script:ReviewedPendingIdentityKeys).Count | Should -Be 0
         } finally {
             $script:Root = $oldRoot
+            $script:Lang = $oldLang
         }
     }
 

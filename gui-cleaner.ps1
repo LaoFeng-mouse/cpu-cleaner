@@ -27,6 +27,7 @@ $script:I18N = @{
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
         ScanPhaseInitial='正在检查服务、启动项、计划任务和进程'; ScanPhaseSystemInfo='读取系统信息'; ScanPhaseProcesses='检查高占用进程'; ScanPhaseServices='检查系统服务'; ScanPhaseAutoStart='检查启动项'; ScanPhaseTasks='检查计划任务'; ScanPhaseRules='匹配安全规则'; ScanPhaseReport='生成扫描报告'
         ScanResultSummary='{0} 项可以安全处理，{1} 项建议观察'; ScanErrorSummary='扫描失败：{0}'; ScanNoMutation='扫描阶段未修改任何系统设置。'; ScanStatusStart='启动'; ScanStatusOutput='输出读取'; ScanStatusResults='结果处理'
+        ReviewErrorSummary='待处理清单已过期，必须重新扫描。'; ReviewNoMutation='没有执行任何系统修改。'
         BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
         SelectAll='全选'; ClearAll='清空'
         ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
@@ -49,6 +50,7 @@ $script:I18N = @{
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
         ScanPhaseInitial='Checking services, startup items, scheduled tasks, and processes'; ScanPhaseSystemInfo='Reading system information'; ScanPhaseProcesses='Checking high-usage processes'; ScanPhaseServices='Checking system services'; ScanPhaseAutoStart='Checking startup items'; ScanPhaseTasks='Checking scheduled tasks'; ScanPhaseRules='Matching safety rules'; ScanPhaseReport='Generating scan report'
         ScanResultSummary='{0} safe item(s), {1} observation(s)'; ScanErrorSummary='Scan failed: {0}'; ScanNoMutation='The scan did not change any system settings.'; ScanStatusStart='startup'; ScanStatusOutput='output read'; ScanStatusResults='result processing'
+        ReviewErrorSummary='The pending review is stale and must be rescanned.'; ReviewNoMutation='No system settings were changed.'
         BtnLoad='Load Pending Items'; PendingHint='Risk & evidence shown; check items to process (unverified = observe only, unchecked)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Check items, then go to tab 3.'
         SelectAll='Select All'; ClearAll='Clear'
         ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
@@ -131,6 +133,8 @@ foreach ($imgName in $script:ImgMap.Keys) {
 
 $script:GuiState = 'idle'
 $script:GuiActiveStage = 1
+$script:ReviewedPendingSnapshot = $null
+$script:ReviewedPendingIdentityKeys = @()
 $script:StatePanels = @('IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel','ExecutingPanel','CompletedPanel','ErrorPanel')
 
 function Set-GuiState {
@@ -351,9 +355,13 @@ function Get-RuleDisplay($rule) {
 # v1.5.6: 构造勾选展示对象 — actions(可执行, 勾选) / observations(仅观察, checkbox disabled)
 # 数据流: scan → Save-PendingActions 已分流; 这里 actions 只读可执行集, observations 只读观察集
 function Get-PendingViewItems {
-    $pf = Join-Path $script:Root 'pending_actions.json'
-    if (-not (Test-Path $pf)) { return @() }
-    $p = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json
+    param($Pending = $null)
+    $p = $Pending
+    if ($null -eq $p) {
+        $pendingPath = Join-Path $script:Root 'pending_actions.json'
+        if (-not (Test-Path $pendingPath)) { return @() }
+        $p = Get-Content $pendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
     $map = Get-ProfileLookup
     $view = @()
     # 1) 可执行项: 默认勾选, 可勾选
@@ -396,6 +404,81 @@ function Get-PendingViewItems {
         }
     }
     return $view
+}
+
+function Get-GuiReviewScalarString {
+    param($Item, [string]$PropertyName, [string]$Context)
+    $property = if ($null -ne $Item) { $Item.PSObject.Properties[$PropertyName] } else { $null }
+    if ($null -eq $property -or $property.Value -isnot [string] -or [string]::IsNullOrWhiteSpace($property.Value)) {
+        throw "pending review shape invalid: $Context.$PropertyName must be a non-empty scalar string."
+    }
+    return [string]$property.Value
+}
+
+function Assert-GuiPendingPresentationRow {
+    param($Item, [string]$Branch, [int]$Index)
+    $context = "$Branch[$Index]"
+    foreach ($propertyName in @('id','name_cn','hit_type','action','matched_pattern','matched_type','matched_field')) {
+        $null = Get-GuiReviewScalarString -Item $Item -PropertyName $propertyName -Context $context
+    }
+    if ($Branch -eq 'actions') {
+        $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'status' -Context $context
+        $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'reason_cn' -Context $context
+    } else {
+        $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'obs_reason' -Context $context
+    }
+
+    $hitType = [string]$Item.hit_type
+    $allowedMatchedFields = switch ($hitType) {
+        'service'   { @('service_name','service_display_name') }
+        'autostart' { @('autostart_name','autostart_value') }
+        'task'      { @('task_name','task_path') }
+        'process'   { @('process_name','process_path') }
+        default     { @() }
+    }
+    if ($allowedMatchedFields.Count -eq 0 -or $Item.matched_field -notin $allowedMatchedFields) {
+        throw "pending review shape invalid: $context.matched_field is not compatible with hit_type."
+    }
+
+    switch ($hitType) {
+        'service' {
+            $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'service_name' -Context $context
+        }
+        'autostart' {
+            foreach ($propertyName in @('autostart_source','autostart_name','autostart_value')) {
+                $null = Get-GuiReviewScalarString -Item $Item -PropertyName $propertyName -Context $context
+            }
+        }
+        'task' {
+            $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'task_path' -Context $context
+        }
+        'process' {
+            foreach ($propertyName in @('process_name','process_path')) {
+                $null = Get-GuiReviewScalarString -Item $Item -PropertyName $propertyName -Context $context
+            }
+            $processIdProperty = $Item.PSObject.Properties['process_id']
+            if ($null -eq $processIdProperty -or
+                ($processIdProperty.Value -isnot [int32] -and $processIdProperty.Value -isnot [int64]) -or
+                [int64]$processIdProperty.Value -le 0) {
+                throw "pending review shape invalid: $context.process_id must be a positive scalar integer."
+            }
+        }
+    }
+}
+
+function Assert-GuiPendingPresentationShape {
+    param([Parameter(Mandatory=$true)]$Pending)
+    if ($null -eq $Pending) { throw 'pending review shape invalid: pending object is null.' }
+    foreach ($branch in @('actions','observations')) {
+        $property = $Pending.PSObject.Properties[$branch]
+        if ($null -eq $property -or $property.Value -isnot [System.Array]) {
+            throw "pending review shape invalid: $branch must be an array."
+        }
+        $rows = @($property.Value)
+        for ($index = 0; $index -lt $rows.Count; $index++) {
+            Assert-GuiPendingPresentationRow -Item $rows[$index] -Branch $branch -Index $index
+        }
+    }
 }
 
 # v1.5.6: 全选/清空 — 全选跳过 CanExecute=false (观察项 checkbox disabled 且不可被全选勾上)
@@ -636,19 +719,26 @@ function Start-GuiScan {
 $window.FindName('BtnStartScan').Add_Click({ Start-GuiScan })
 $window.FindName('BtnRetry').Add_Click({ Start-GuiScan })
 $window.FindName('BtnOpenReview').Add_Click({
+    $list = $window.FindName('PendingList')
     try {
         $pendingPath = Join-Path $script:Root 'pending_actions.json'
         $pending = Get-Content $pendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $null = Get-GuiPendingSchemaVersion $pending
-        $items = @(Get-PendingViewItems)
-        $list = $window.FindName('PendingList')
+        Assert-GuiPendingPresentationShape -Pending $pending
+        $items = @(Get-PendingViewItems -Pending $pending)
         $list.ItemsSource = $null
         $list.ItemsSource = $items
         $list.Items.Refresh()
+        $script:ReviewedPendingSnapshot = $pending
+        $script:ReviewedPendingIdentityKeys = @($items | ForEach-Object { Get-PendingIdentityKey $_._raw })
         Set-GuiState review
     } catch {
-        $window.FindName('ErrorSummaryText').Text = '待处理清单已过期，必须重新扫描。'
-        $window.FindName('ErrorMutationText').Text = '没有执行任何系统修改。'
+        $list.ItemsSource = $null
+        $list.Items.Clear()
+        $script:ReviewedPendingSnapshot = $null
+        $script:ReviewedPendingIdentityKeys = @()
+        $window.FindName('ErrorSummaryText').Text = (Get-Text 'ReviewErrorSummary')
+        $window.FindName('ErrorMutationText').Text = (Get-Text 'ReviewNoMutation')
         $window.FindName('ErrorDetailText').Text = $_.Exception.Message
         Set-GuiState error
     }
