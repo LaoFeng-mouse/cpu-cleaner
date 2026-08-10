@@ -56,198 +56,23 @@ function Apply-Language {
     $w = $window
     $w.Title = $t['AppName']
     $w.FindName('TitleMain').Text = $t['AppName']
-    $w.FindName('TitleSub').Text = $t['SubTitle']
-    $w.FindName('TitleHint').Text = $t['Hint0']
-    $w.FindName('TabScan').Header = $t['TabScan']
-    $w.FindName('TabPending').Header = $t['TabPending']
-    $w.FindName('TabExec').Header = $t['TabExec']
-    $w.FindName('TabResult').Header = $t['TabResult']
-    $w.FindName('BtnScan').Content = $t['BtnScan']
-    $w.FindName('ScanHint').Text = $t['ScanHint']
-    $w.FindName('BtnLoadPending').Content = $t['BtnLoad']
-    $w.FindName('BtnSelectAll').Content = $t['SelectAll']
-    $w.FindName('BtnClearAll').Content = $t['ClearAll']
-    $w.FindName('PendingHint').Text = $t['PendingHint']
-    $w.FindName('ExecInfo1').Text = $t['ExecInfo1']
-    $w.FindName('ExecInfo2').Text = $t['ExecInfo2']
-    $w.FindName('BtnExec').Content = $t['BtnExec']
-    $w.FindName('BtnResult').Content = $t['BtnResult']
-    $w.FindName('BtnRestore').Content = $t['BtnRestore']
-    $w.FindName('ResultHint').Text = $t['ResultHint']
     $w.FindName('BtnLang').Content = $t['LangLabel']
 }
 
 # ---------- 鼠鼠风格 XAML ----------
-$xaml = @"
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="鼠鼠cleaner" Width="880" Height="660"
-        WindowStartupLocation="CenterScreen" Background="#FFF6DC"
-        FontFamily="Microsoft YaHei UI" FontSize="13">
-  <Window.Resources>
-    <StreamGeometry x:Key="RatHeadGeo">M45 58 C58 46 182 46 195 58 C220 72 236 98 238 128 C240 156 198 180 120 180 C42 180 0 156 2 128 C4 98 20 72 45 58 Z</StreamGeometry>
-  </Window.Resources>
-  <Grid Margin="12">
-    <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="*"/>
-    </Grid.RowDefinitions>
-
-    <!-- 头部: 鼠鼠 + 标题 + 语言切换 -->
-    <Border Grid.Row="0" Background="#211D16" CornerRadius="14" Margin="0,0,0,10">
-    <Grid>
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="Auto"/>
-        <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="Auto"/>
-      </Grid.ColumnDefinitions>
-      <Viewbox Width="150" Height="113" Margin="14,4,4,2">
-        <Canvas Width="240" Height="180">
-          <Ellipse Canvas.Left="28"  Canvas.Top="33" Width="36" Height="30" Fill="#8D8478" Stroke="#211D16" StrokeThickness="3.5"/>
-          <Ellipse Canvas.Left="35"  Canvas.Top="39" Width="18" Height="14" Fill="#D9A8A0"/>
-          <Ellipse Canvas.Left="176" Canvas.Top="33" Width="36" Height="30" Fill="#8D8478" Stroke="#211D16" StrokeThickness="3.5"/>
-          <Ellipse Canvas.Left="183" Canvas.Top="39" Width="18" Height="14" Fill="#D9A8A0"/>
-          <Path Data="M45 58 C58 46 182 46 195 58 C220 72 236 98 238 128 C240 156 198 180 120 180 C42 180 0 156 2 128 C4 98 20 72 45 58 Z" Fill="#F1EBE1" Stroke="#211D16" StrokeThickness="4.5"/>
-          <Path Data="M4 100 C40 92 70 96 95 96 C108 96 114 102 120 110 C126 102 132 96 145 96 C170 96 200 92 236 100 L236 240 L4 240 Z" Fill="#8D8478" Clip="{StaticResource RatHeadGeo}"/>
-          <Ellipse Canvas.Left="54" Canvas.Top="57" Width="40" Height="22" Fill="#6F675C" Opacity="0.28"/>
-          <Ellipse Canvas.Left="146" Canvas.Top="57" Width="40" Height="22" Fill="#6F675C" Opacity="0.28"/>
-          <Ellipse Canvas.Left="53" Canvas.Top="82.5" Width="30" Height="27" Fill="#231E1B">
-            <Ellipse.RenderTransform><RotateTransform Angle="-4" CenterX="68" CenterY="96"/></Ellipse.RenderTransform>
-          </Ellipse>
-          <Ellipse Canvas.Left="157" Canvas.Top="82.5" Width="30" Height="27" Fill="#231E1B">
-            <Ellipse.RenderTransform><RotateTransform Angle="4" CenterX="172" CenterY="96"/></Ellipse.RenderTransform>
-          </Ellipse>
-          <Path Data="M114 110 Q120 107 126 110 Q128 115 120 120 Q112 115 114 110 Z" Fill="#D89C96" Stroke="#211D16" StrokeThickness="2"/>
-          <Line X1="120" Y1="116" X2="120" Y2="124" Stroke="#C08880" StrokeThickness="2.5"/>
-          <Path Data="M74 116 L166 116 C166 138 148 150 120 150 C92 150 74 138 74 116 Z" Fill="#171210"/>
-          <Rectangle Canvas.Left="86" Canvas.Top="114" Width="68" Height="24" RadiusX="6" RadiusY="6" Fill="#FFFFFF" Stroke="#211D16" StrokeThickness="2.5"/>
-          <Line X1="120" Y1="114" X2="120" Y2="138" Stroke="#211D16" StrokeThickness="2.5"/>
-        </Canvas>
-      </Viewbox>
-      <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="6,0,10,0">
-        <TextBlock x:Name="TitleMain" Text="鼠鼠cleaner" FontSize="26" FontWeight="Bold" Foreground="#FFD21F"/>
-        <TextBlock x:Name="TitleSub" Text="扫描 · 清理 · 恢复 —— 全程自动备份，后悔可还原" FontSize="12" Foreground="#FFF6DC"/>
-        <TextBlock x:Name="TitleHint" Text="图形界面只是壳，核心逻辑与命令行版一致" FontSize="10" Foreground="#8D8478"/>
-      </StackPanel>
-      <Button x:Name="BtnLang" Grid.Column="2" Content="EN" Width="46" Height="30" Margin="0,0,14,0" VerticalAlignment="Center" Background="#FFD21F" Foreground="#211D16" FontWeight="Bold" BorderThickness="0"/>
-    </Grid>
-    </Border>
-
-    <!-- 4 页 Tab -->
-    <TabControl Grid.Row="1" Background="Transparent" BorderThickness="0">
-      <TabItem x:Name="TabScan" Header="🐹 1. 扫描（只读）">
-        <Grid Margin="8">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-          </Grid.RowDefinitions>
-          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
-            <Image x:Name="ImgScan" Source="assets/rat_scan.jpg" Width="72" Height="72" Stretch="UniformToFill" Margin="0,0,10,0"/>
-            <StackPanel>
-              <Button x:Name="BtnScan" Content="开始扫描" Width="130" Height="36" Background="#FFD21F" Foreground="#211D16" FontWeight="Bold" BorderThickness="0"/>
-              <TextBlock x:Name="ScanHint" Text="扫描只查看、不改任何设置，随便点" Foreground="#666" Margin="0,4,0,0"/>
-            </StackPanel>
-          </StackPanel>
-          <ProgressBar x:Name="ScanProgress" Grid.Row="1" Height="10" Margin="0,0,0,6" Foreground="#FFD21F" Background="#E8DCC0" BorderThickness="0" Minimum="0" Maximum="100" Value="0"/>
-          <TextBox x:Name="ScanOutput" Grid.Row="2" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11" VerticalScrollBarVisibility="Auto" Background="#1E1E1E" Foreground="#DDD" BorderThickness="0" Padding="8"/>
-        </Grid>
-      </TabItem>
-
-      <TabItem x:Name="TabPending" Header="📋 2. 处理建议">
-        <Grid Margin="8">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-          </Grid.RowDefinitions>
-          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <Image x:Name="ImgPending" Source="assets/rat_pending.jpg" Width="72" Height="72" Stretch="UniformToFill" Margin="0,0,10,0"/>
-            <StackPanel>
-              <StackPanel Orientation="Horizontal">
-                <Button x:Name="BtnLoadPending" Content="读取待处理清单" Width="150" Height="30" Background="#FFD21F" Foreground="#211D16" FontWeight="Bold" BorderThickness="0"/>
-                <Button x:Name="BtnSelectAll" Content="全选" Width="64" Height="30" Background="#27AE60" Foreground="White" BorderThickness="0" Margin="8,0,0,0"/>
-                <Button x:Name="BtnClearAll" Content="清空" Width="64" Height="30" Background="#95A5A6" Foreground="White" BorderThickness="0" Margin="6,0,0,0"/>
-              </StackPanel>
-              <TextBlock x:Name="PendingHint" Text="按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）" Foreground="#666" Margin="0,4,0,0"/>
-            </StackPanel>
-          </StackPanel>
-          <ListView x:Name="PendingList" Grid.Row="1" BorderThickness="1" BorderBrush="#DDD" Background="#FFFDF4">
-            <ListView.View>
-              <GridView>
-                <GridViewColumn Header="☑" Width="40">
-                  <GridViewColumn.CellTemplate>
-                    <DataTemplate>
-                      <CheckBox IsChecked="{Binding IsChecked}" IsEnabled="{Binding CanExecute}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </DataTemplate>
-                  </GridViewColumn.CellTemplate>
-                </GridViewColumn>
-                <GridViewColumn Header="项目" Width="180" DisplayMemberBinding="{Binding name_cn}"/>
-                <GridViewColumn Header="风险" Width="70" DisplayMemberBinding="{Binding risk_label}"/>
-                <GridViewColumn Header="实测" Width="80" DisplayMemberBinding="{Binding evidence_label}"/>
-                <GridViewColumn Header="建议" Width="80" DisplayMemberBinding="{Binding action_label}"/>
-                <GridViewColumn Header="恢复" Width="56" DisplayMemberBinding="{Binding restorable_label}"/>
-                <GridViewColumn Header="状态" Width="70" DisplayMemberBinding="{Binding status}"/>
-                <GridViewColumn Header="说明" Width="280" DisplayMemberBinding="{Binding reason_cn}"/>
-              </GridView>
-            </ListView.View>
-          </ListView>
-        </Grid>
-      </TabItem>
-
-      <TabItem x:Name="TabExec" Header="⚙️ 3. 执行（管理员）">
-        <Grid Margin="8">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-          </Grid.RowDefinitions>
-          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <Image x:Name="ImgExec" Source="assets/rat_exec.jpg" Width="72" Height="72" Stretch="UniformToFill" Margin="0,0,10,0"/>
-            <StackPanel VerticalAlignment="Center">
-              <TextBlock x:Name="ExecInfo1" Text="点击下面按钮，会把【处理建议】里的全部项目处理掉。" Foreground="#333"/>
-              <TextBlock x:Name="ExecInfo2" Text="每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。" Foreground="#666" Margin="0,4,0,0"/>
-              <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                <Button x:Name="BtnExec" Content="执行全部处理（需要管理员）" Width="230" Height="38" Background="#E74C3C" Foreground="White" FontWeight="Bold" BorderThickness="0"/>
-                <TextBlock x:Name="ExecHint" Text="" Foreground="#C0392B" VerticalAlignment="Center" Margin="10,0,0,0"/>
-              </StackPanel>
-            </StackPanel>
-          </StackPanel>
-          <TextBox x:Name="ExecOutput" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11" VerticalScrollBarVisibility="Auto" Background="#1E1E1E" Foreground="#DDD" BorderThickness="0" Padding="8"/>
-        </Grid>
-      </TabItem>
-
-      <TabItem x:Name="TabResult" Header="✅ 4. 结果与恢复">
-        <Grid Margin="8">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-          </Grid.RowDefinitions>
-          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <Image x:Name="ImgResult" Source="assets/rat_result.jpg" Width="72" Height="72" Stretch="UniformToFill" Margin="0,0,10,0"/>
-            <StackPanel VerticalAlignment="Center">
-              <StackPanel Orientation="Horizontal">
-                <Button x:Name="BtnResult" Content="查看最近处理结果" Width="150" Height="36" Background="#27AE60" Foreground="White" FontWeight="Bold" BorderThickness="0"/>
-                <Button x:Name="BtnRestore" Content="恢复最近一次处理" Width="150" Height="36" Background="#95A5A6" Foreground="White" FontWeight="Bold" BorderThickness="0" Margin="8,0,0,0"/>
-              </StackPanel>
-              <TextBlock x:Name="ResultHint" Text="恢复会弹管理员窗口，选最新备份还原" Foreground="#666" Margin="0,4,0,0"/>
-            </StackPanel>
-          </StackPanel>
-          <TextBox x:Name="ResultOutput" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11" VerticalScrollBarVisibility="Auto" Background="#1E1E1E" Foreground="#DDD" BorderThickness="0" Padding="8"/>
-        </Grid>
-      </TabItem>
-    </TabControl>
-  </Grid>
-</Window>
-"@
-
-$reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
+. (Join-Path $script:Root 'src\Gui\Presentation.ps1')
+$xamlPath = Join-Path $script:Root 'src\Gui\MainWindow.xaml'
+if (-not (Test-Path -LiteralPath $xamlPath)) { throw "GUI layout missing: $xamlPath" }
+[xml]$xaml = Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8
+$reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
 
 # 鼠鼠页面形象图: 用绝对路径 (Image Source 相对路径按工作目录解析, 不可靠)
-$script:ImgMap = @{
-    'ImgScan'   = 'assets/rat_scan.jpg'
-    'ImgPending'= 'assets/rat_pending.jpg'
-    'ImgExec'   = 'assets/rat_exec.jpg'
-    'ImgResult' = 'assets/rat_result.jpg'
+$script:ImgMap = [ordered]@{
+    ImgStage1 = 'assets/rat_scan.jpg'
+    ImgStage2 = 'assets/rat_pending.jpg'
+    ImgStage3 = 'assets/rat_exec.jpg'
+    ImgStage4 = 'assets/rat_result.jpg'
 }
 foreach ($imgName in $script:ImgMap.Keys) {
     $imgCtrl = $window.FindName($imgName)
@@ -493,7 +318,8 @@ $window.FindName('BtnLang').Add_Click({
 
 # ---------- 扫描 (后台 job + 进度条动画) ----------
 $script:ScanTimer = $null
-$window.FindName('BtnScan').Add_Click({
+$legacyBtnScan = $window.FindName('BtnScan')
+if ($legacyBtnScan) { $legacyBtnScan.Add_Click({
     $btn = $window.FindName('BtnScan')
     $out = $window.FindName('ScanOutput')
     $prog = $window.FindName('ScanProgress')
@@ -523,10 +349,11 @@ $window.FindName('BtnScan').Add_Click({
         }
     })
     $checkTimer.Start()
-})
+}) }
 
 # ---------- 读取处理建议 (v1.5.5: 勾选视图 — 风险/实测/建议标签 + 默认勾选 + 全选/清空) ----------
-$window.FindName('BtnLoadPending').Add_Click({
+$legacyBtnLoadPending = $window.FindName('BtnLoadPending')
+if ($legacyBtnLoadPending) { $legacyBtnLoadPending.Add_Click({
     $list = $window.FindName('PendingList')
     $hint = $window.FindName('PendingHint')
     $items = @(Get-PendingViewItems)
@@ -540,7 +367,7 @@ $window.FindName('BtnLoadPending').Add_Click({
         $list.ItemsSource = $items
         $list.Items.Refresh()
     }
-})
+}) }
 
 # v1.5.5: 全选 / 清空 勾选 (v1.5.6: 全选跳过观察项 CanExecute=false)
 $window.FindName('BtnSelectAll').Add_Click({
@@ -553,7 +380,8 @@ $window.FindName('BtnClearAll').Add_Click({
 })
 
 # ---------- 处理已勾选项目 (v1.5.5: 勾选子集 → 临时清单 → clean -PendingFileArg) ----------
-$window.FindName('BtnExec').Add_Click({
+$legacyBtnExec = $window.FindName('BtnExec')
+if ($legacyBtnExec) { $legacyBtnExec.Add_Click({
     $hint = $window.FindName('ExecHint')
     $out = $window.FindName('ExecOutput')
     $list = $window.FindName('PendingList')
@@ -612,10 +440,11 @@ $window.FindName('BtnExec').Add_Click({
             Remove-Item -LiteralPath $tmpPending -Force -ErrorAction SilentlyContinue
         }
     }
-})
+}) }
 
 # ---------- 查看最近结果 ----------
-$window.FindName('BtnResult').Add_Click({
+$legacyBtnResult = $window.FindName('BtnResult')
+if ($legacyBtnResult) { $legacyBtnResult.Add_Click({
     $out = $window.FindName('ResultOutput')
     $backupRoot = Join-Path $script:Root 'backups'
     if (-not (Test-Path $backupRoot)) { $out.Text = (Get-Text 'NoBackup'); return }
@@ -634,7 +463,7 @@ $window.FindName('BtnResult').Add_Click({
     $lines += ''; $lines += "success $ok, failed $bad"
     $lines += ''; $lines += "restore: cpu-cleaner.ps1 -Mode restore -BackupDir `".\backups\$($latest.Name)`""
     $out.Text = ($lines -join "`r`n")
-})
+}) }
 
 # ---------- 恢复最近一次处理 ----------
 $window.FindName('BtnRestore').Add_Click({

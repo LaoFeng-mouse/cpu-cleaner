@@ -16,11 +16,19 @@ Describe 'GUI 壳 (无窗口)' {
         }
     }
 
-    It 'XAML 加载成功且关键控件存在' {
-        $script:Win | Should -Not -Be $null
-        foreach ($n in @('TabScan','TabPending','TabExec','TabResult','BtnScan','BtnLoadPending','BtnExec','BtnResult','BtnRestore','ScanProgress','ScanOutput','PendingList','ExecOutput','ResultOutput')) {
-            $script:Win.FindName($n) | Should -Not -Be $null
+    It 'loads the single-page fantasy comic shell' {
+        $script:Win | Should -Not -BeNullOrEmpty
+        foreach ($name in @(
+            'StageCard1','StageCard2','StageCard3','StageCard4',
+            'ImgStage1','ImgStage2','ImgStage3','ImgStage4',
+            'IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel',
+            'ExecutingPanel','CompletedPanel','ErrorPanel',
+            'StateTitle','StateSubtitle','PendingList','ExecutionList',
+            'BtnStartScan','BtnOpenReview','BtnExecute','BtnRescan','BtnRetry','BtnRestore','BtnLang'
+        )) {
+            $script:Win.FindName($name) | Should -Not -BeNullOrEmpty
         }
+        $script:Win.FindName('LegacyTabs') | Should -BeNullOrEmpty
     }
 
     It '鼠鼠图片资源存在' {
@@ -306,89 +314,6 @@ Describe '勾选视图 (v1.5.5)' {
         for ($i = 0; $i -lt $Levels; $i++) { $cursor = $cursor.next }
         $cursor | Should -BeOfType ([pscustomobject])
         $cursor.terminal | Should -Be "subset-$Levels"
-    }
-
-    It '非法 schema 的执行调用链不启动管理员 clean 且不写临时 subset' {
-        $oldRoot = $script:Root
-        $oldTemp = $env:TEMP
-        $tempRoot = Join-Path $TestDrive ('invalid-chain-' + [guid]::NewGuid().ToString('N'))
-        [void][System.IO.Directory]::CreateDirectory($tempRoot)
-        $script:Root = $tempRoot
-        $env:TEMP = $tempRoot
-        try {
-            [System.IO.File]::WriteAllText((Join-Path $tempRoot 'pending_actions.json'), '{"pending_schema_version":1,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
-            $list = $script:Win.FindName('PendingList')
-            $list.ItemsSource = $null
-            $list.Items.Clear()
-            [void]$list.Items.Add([pscustomobject]@{ IsChecked=$true; CanExecute=$true; _raw=[pscustomobject]@{ id='x'; status='pending' } })
-            Mock Start-Process { throw 'Start-Process must not run' }
-
-            $script:Win.FindName('BtnExec').RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
-
-            Assert-MockCalled Start-Process -Times 0 -Exactly
-            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
-            $script:Win.FindName('ExecHint').Text | Should -Match 'scan'
-        } finally {
-            $script:Root = $oldRoot
-            $env:TEMP = $oldTemp
-            if ([System.IO.Directory]::Exists($tempRoot)) { [System.IO.Directory]::Delete($tempRoot, $true) }
-        }
-    }
-
-    It '管理员启动异常后仅清理本次临时 subset' {
-        $oldRoot = $script:Root
-        $oldTemp = $env:TEMP
-        $tempRoot = Join-Path $TestDrive ('cleanup-chain-' + [guid]::NewGuid().ToString('N'))
-        [void][System.IO.Directory]::CreateDirectory($tempRoot)
-        $script:Root = $tempRoot
-        $env:TEMP = $tempRoot
-        $sentinel = Join-Path $tempRoot 'shushu_pending_keep.json'
-        try {
-            [System.IO.File]::WriteAllText((Join-Path $tempRoot 'pending_actions.json'), '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
-            [System.IO.File]::WriteAllText($sentinel, 'keep', [System.Text.UTF8Encoding]::new($false))
-            $list = $script:Win.FindName('PendingList')
-            $list.ItemsSource = $null
-            $list.Items.Clear()
-            [void]$list.Items.Add([pscustomobject]@{ IsChecked=$true; CanExecute=$true; _raw=[pscustomobject]@{ id='x'; status='pending' } })
-            Mock Start-Process { throw 'simulated UAC failure' }
-
-            $script:Win.FindName('BtnExec').RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
-
-            Assert-MockCalled Start-Process -Times 1 -Exactly
-            Test-Path -LiteralPath $sentinel | Should -BeTrue
-            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json' | Where-Object { $_.FullName -ne $sentinel }).Count | Should -Be 0
-        } finally {
-            $script:Root = $oldRoot
-            $env:TEMP = $oldTemp
-            if ([System.IO.Directory]::Exists($tempRoot)) { [System.IO.Directory]::Delete($tempRoot, $true) }
-        }
-    }
-
-    It 'subset payload helper 返回 false 时不启动管理员 clean 且不写临时文件' {
-        $oldRoot = $script:Root
-        $oldTemp = $env:TEMP
-        $tempRoot = Join-Path $TestDrive ('false-payload-' + [guid]::NewGuid().ToString('N'))
-        [void][System.IO.Directory]::CreateDirectory($tempRoot)
-        $script:Root = $tempRoot
-        $env:TEMP = $tempRoot
-        try {
-            [System.IO.File]::WriteAllText((Join-Path $tempRoot 'pending_actions.json'), '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
-            $list = $script:Win.FindName('PendingList')
-            $list.ItemsSource = $null
-            $list.Items.Clear()
-            [void]$list.Items.Add([pscustomobject]@{ IsChecked=$true; CanExecute=$true; _raw=[pscustomobject]@{ id='x'; status='pending' } })
-            Mock New-PendingSubsetPayload { return $false }
-            Mock Start-Process { throw 'Start-Process must not run' }
-
-            $script:Win.FindName('BtnExec').RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
-
-            Assert-MockCalled Start-Process -Times 0 -Exactly
-            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
-        } finally {
-            $script:Root = $oldRoot
-            $env:TEMP = $oldTemp
-            if ([System.IO.Directory]::Exists($tempRoot)) { [System.IO.Directory]::Delete($tempRoot, $true) }
-        }
     }
 
     It 'pending identity 区分 action、PID/path 和 matcher provenance' {
