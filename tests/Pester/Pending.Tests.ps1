@@ -164,6 +164,37 @@ Invoke-Clean
         Test-Path -LiteralPath $markerPath | Should -BeFalse
     }
 
+    It '自定义空动作 pending 的正确 SHA-256 通过锁内 hash gate、解析并到达 Load-Profiles' {
+        $pendingPath = Join-Path $TestDrive 'hash-correct-empty.json'
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes('{"pending_schema_version":2,"actions":[],"observations":[],"suspicious":[]}')
+        [System.IO.File]::WriteAllBytes($pendingPath, $bytes)
+        $oldPendingFile = $script:PendingFile
+        $oldPendingSha256 = $script:PendingSha256
+        $oldRequirePendingSha256 = $script:RequirePendingSha256
+        $script:PendingFile = $pendingPath
+        $script:PendingSha256 = (Get-FileHash -LiteralPath $pendingPath -Algorithm SHA256).Hash
+        $script:RequirePendingSha256 = $true
+        Mock Is-Admin { return $true }
+        Mock Load-Profiles { return [pscustomobject]@{ profiles=@() } }
+        Mock Get-Service { throw 'system service access must not run' }
+        Mock Get-ItemProperty { throw 'registry access must not run' }
+        Mock Get-ScheduledTask { throw 'scheduled task access must not run' }
+        Mock Get-Process { throw 'process access must not run' }
+        try {
+            Invoke-Clean
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:PendingSha256 = $oldPendingSha256
+            $script:RequirePendingSha256 = $oldRequirePendingSha256
+        }
+
+        Assert-MockCalled Load-Profiles -Times 1 -Exactly
+        Assert-MockCalled Get-Service -Times 0 -Exactly
+        Assert-MockCalled Get-ItemProperty -Times 0 -Exactly
+        Assert-MockCalled Get-ScheduledTask -Times 0 -Exactly
+        Assert-MockCalled Get-Process -Times 0 -Exactly
+    }
+
     It '同一 id 不同动作都保留(不丢 autostart)' {
         $hits = @(
             [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' },

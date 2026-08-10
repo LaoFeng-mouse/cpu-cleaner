@@ -603,6 +603,18 @@ Describe '勾选视图 (v1.5.5)' {
             param([Parameter(Mandatory=$true)][string]$Path)
             $script:ReviewedPendingGenerationSha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
         }
+
+        function Merge-GuiPendingStatusFromFile {
+            param([Parameter(Mandatory=$true)][string]$Path)
+            $pending = Read-GuiPendingFile -Path $Path
+            $script:ExecutionActions = @($pending.actions)
+            $pairs = [System.Collections.Generic.List[System.Tuple[string,string]]]::new()
+            foreach ($action in @($pending.actions)) {
+                $pairs.Add([System.Tuple[string,string]]::new((Get-PendingIdentityKey $action), [string]$action.status))
+            }
+            $result = [pscustomobject]@{ Items=$pairs.AsReadOnly() }
+            Merge-PendingStatus $result
+        }
     }
 
     AfterEach {
@@ -615,6 +627,7 @@ Describe '勾选视图 (v1.5.5)' {
         $script:ExecutionActions = @()
         $script:ExecutionInProgress = $false
         $script:ExecutionLifecycle = 'idle'
+        $script:ExecutionUnknownProbeCount = 0
     }
 
     It '动作中文标签映射' {
@@ -1507,64 +1520,98 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It 'WaitForExit(0) 探测异常进入状态未知且保留进程与诊断路径' {
+    It 'WaitForExit(0) 单次探测异常保留 timer 并在重试恢复后完成 exit 0' {
         $tempRoot = Join-Path $TestDrive ('probe-method-error-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $oldRoot = $script:Root; $script:Root = $tempRoot
         $action = (New-GuiReviewPendingFixture).actions[0]
-        $subset = [pscustomobject]@{ pending_schema_version=2; actions=@($action); observations=@(); suspicious=@() }
+        $resultAction = $action.PSObject.Copy(); $resultAction.status = 'success'
+        $subset = [pscustomobject]@{ pending_schema_version=2; actions=@($resultAction); observations=@(); suspicious=@() }
         $path = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
-        $process = [pscustomobject]@{ ExitCode=0 }
-        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); throw 'probe method failed' }
+        $mainPath = Join-Path $tempRoot 'pending_actions.json'
+        [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($action); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
+        Set-GuiReviewedGenerationFromFile $mainPath
+        $process = [pscustomobject]@{ ExitCode=0; ProbeCalls=0 }
+        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); $this.ProbeCalls++; if ($this.ProbeCalls -eq 1) { throw 'probe method failed' }; return $true }
         $timer = New-ExecutionFakeTimer
         $script:ExecutionProcess = $process; $script:ExecutionTimer = $timer; $script:ExecutionTempPath = $path
         $script:ExecutionActions = @($action); $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+        $script:Win.FindName('CompletedSummaryText').Text = ''
         Set-GuiState executing -Force
 
-        Complete-ExecutionPoll | Should -BeTrue
-        $script:Root = $oldRoot
+        Complete-ExecutionPoll | Should -BeFalse
 
         $script:GuiState | Should -Be 'error'
         $script:ExecutionLifecycle | Should -Be 'unknown'
         $script:ExecutionProcess | Should -Be $process
         $script:ExecutionTempPath | Should -BeExactly $path
-        $timer.Stopped | Should -BeTrue
+        $timer.Stopped | Should -BeFalse
+        $timer.Interval.TotalMilliseconds | Should -Be 1000
         Test-Path -LiteralPath $path | Should -BeTrue
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未知'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
+
+        Complete-ExecutionPoll | Should -BeTrue
+        $script:GuiState | Should -Be 'completed'
+        $process.ProbeCalls | Should -Be 2
+        Test-Path -LiteralPath $path | Should -BeFalse
+        $script:Root = $oldRoot
     }
 
-    It 'HasExited getter 异常进入状态未知而不误报 completed' {
-        $process = [pscustomobject]@{ ExitCode=0 }
-        $process | Add-Member -MemberType ScriptProperty -Name HasExited -Value { throw 'getter failed' }
+    It 'unknown 重试恢复为非零 exit 时进入 error 而不误报 completed' {
+        $tempRoot = Join-Path $TestDrive ('probe-recover-error-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $action = (New-GuiReviewPendingFixture).actions[0]; $action.status = 'failed'
+        $path = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($action); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
+        $process = [pscustomobject]@{ ExitCode=7; ProbeCalls=0 }
+        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); $this.ProbeCalls++; if ($this.ProbeCalls -eq 1) { throw 'transient getter failure' }; return $true }
         $timer = New-ExecutionFakeTimer
-        $script:ExecutionProcess = $process; $script:ExecutionTimer = $timer; $script:ExecutionTempPath = 'C:\diagnostic\unreadable.json'
-        $script:ExecutionActions = @(); $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+        $script:ExecutionProcess = $process; $script:ExecutionTimer = $timer; $script:ExecutionTempPath = $path
+        $script:ExecutionActions = @($action); $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+        $script:Win.FindName('CompletedSummaryText').Text = ''
         Set-GuiState executing -Force
 
+        Complete-ExecutionPoll | Should -BeFalse
         Complete-ExecutionPoll | Should -BeTrue
 
         $script:GuiState | Should -Be 'error'
-        $script:ExecutionLifecycle | Should -Be 'unknown'
-        $script:ExecutionProcess | Should -Be $process
-        $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未知'
+        $script:Win.FindName('ErrorSummaryText').Text | Should -Match '7'
+        $script:Win.FindName('CompletedSummaryText').Text | Should -Not -Match 'Done|执行完成'
+        Test-Path -LiteralPath $path | Should -BeFalse
     }
 
-    It '进程已退出但 ExitCode 为 null 时进入状态未知并阻止新执行' {
+    It 'unknown 达到重试上限后安全脱离并允许关闭但保留进程与原 temp' {
+        $tempRoot = Join-Path $TestDrive ('probe-detached-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $path = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, '{}', [System.Text.UTF8Encoding]::new($false))
         $process = [pscustomobject]@{ ExitCode=$null }
         $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); return $true }
         $timer = New-ExecutionFakeTimer
-        $script:ExecutionProcess = $process; $script:ExecutionTimer = $timer; $script:ExecutionTempPath = 'C:\diagnostic\null-exit.json'
+        $script:ExecutionProcess = $process; $script:ExecutionTimer = $timer; $script:ExecutionTempPath = $path
         $script:ExecutionActions = @(); $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+        $script:Win.FindName('CompletedSummaryText').Text = ''
         Set-GuiState executing -Force
 
+        Complete-ExecutionPoll | Should -BeFalse
+        Complete-ExecutionPoll | Should -BeFalse
         Complete-ExecutionPoll | Should -BeTrue
         Start-GuiExecution -List $script:Win.FindName('PendingList') | Should -BeFalse
+        $closing = [pscustomobject]@{ Cancel=$false }
+        Protect-GuiExecutionWindowClose -EventArgs $closing | Should -BeTrue
 
         $script:GuiState | Should -Be 'error'
-        $script:ExecutionLifecycle | Should -Be 'unknown'
+        $script:ExecutionLifecycle | Should -Be 'detached'
+        $script:ExecutionInProgress | Should -BeFalse
         $script:ExecutionProcess | Should -Be $process
+        $timer.Stopped | Should -BeTrue
+        $closing.Cancel | Should -BeFalse
+        Test-Path -LiteralPath $path | Should -BeTrue
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未知'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
+        $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($path))
         $script:Win.FindName('CompletedSummaryText').Text | Should -Not -Match 'Done|执行完成'
     }
 
@@ -1599,6 +1646,41 @@ Describe '勾选视图 (v1.5.5)' {
             @($script:Win.FindName('CompletedList').ItemsSource | Where-Object State -eq 'manual_required').Count | Should -Be 1
             $script:Win.FindName('CompletedSummaryText').Text | Should -Match 'success 1.*failed 1.*skipped 1.*manual 1'
             Test-Path -LiteralPath $subsetPath | Should -BeFalse
+        } finally { $script:Root = $oldRoot }
+    }
+
+    It 'exit 0 验证结果只读一次且显示与主清单合并使用同一快照' {
+        $tempRoot = Join-Path $TestDrive ('single-result-read-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $oldRoot = $script:Root; $script:Root = $tempRoot
+        try {
+            $expected = (New-GuiReviewPendingFixture -ActionServiceName 'SingleReadService').actions[0]
+            $mainPath = Join-Path $tempRoot 'pending_actions.json'
+            [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($expected); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
+            Set-GuiReviewedGenerationFromFile $mainPath
+            $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
+            [System.IO.File]::WriteAllText($subsetPath, '{}', [System.Text.UTF8Encoding]::new($false))
+            $script:ExecutionResultReadCount = 0
+            Mock Read-GuiPendingFile {
+                $script:ExecutionResultReadCount++
+                $action = $expected.PSObject.Copy()
+                $action.status = if ($script:ExecutionResultReadCount -eq 1) { 'success' } else { 'pending' }
+                return [pscustomobject]@{ pending_schema_version=2; actions=@($action); observations=@(); suspicious=@() }
+            }
+            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
+            $script:ExecutionTimer = New-ExecutionFakeTimer
+            $script:ExecutionTempPath = $subsetPath
+            $script:ExecutionActions = @($expected)
+            $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+            Set-GuiState executing -Force
+
+            Complete-ExecutionPoll | Should -BeTrue
+
+            $script:ExecutionResultReadCount | Should -Be 1
+            $script:GuiState | Should -Be 'completed'
+            @($script:Win.FindName('CompletedList').ItemsSource)[0].State | Should -Be 'success'
+            $merged = Get-Content -LiteralPath $mainPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $merged.actions[0].status | Should -Be 'success'
         } finally { $script:Root = $oldRoot }
     }
 
@@ -1768,7 +1850,7 @@ Describe '勾选视图 (v1.5.5)' {
         $oldRoot = $script:Root
         $script:Root = $tmpRoot
         Set-GuiReviewedGenerationFromFile (Join-Path $tmpRoot 'pending_actions.json')
-        try { Merge-PendingStatus $subsetFile } finally { $script:Root = $oldRoot }
+        try { Merge-GuiPendingStatusFromFile $subsetFile } finally { $script:Root = $oldRoot }
 
         $after = Get-Content (Join-Path $tmpRoot 'pending_actions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         @($after.actions | Where-Object { $_.id -eq 't1' })[0].status | Should -Be 'success'
@@ -1806,7 +1888,7 @@ Describe '勾选视图 (v1.5.5)' {
         $oldRoot = $script:Root
         $script:Root = $tmpRoot
         Set-GuiReviewedGenerationFromFile (Join-Path $tmpRoot 'pending_actions.json')
-        try { Merge-PendingStatus $subsetFile } finally { $script:Root = $oldRoot }
+        try { Merge-GuiPendingStatusFromFile $subsetFile } finally { $script:Root = $oldRoot }
 
         $after = Get-Content (Join-Path $tmpRoot 'pending_actions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         @($after.actions | Where-Object { $_.hit_type -eq 'service' })[0].status | Should -Be 'failed'
@@ -1829,7 +1911,7 @@ Describe '勾选视图 (v1.5.5)' {
         $oldRoot = $script:Root
         $script:Root = $tmpRoot
         Set-GuiReviewedGenerationFromFile $mainPath
-        try { Merge-PendingStatus $subsetPath } finally { $script:Root = $oldRoot }
+        try { Merge-GuiPendingStatusFromFile $subsetPath } finally { $script:Root = $oldRoot }
 
         $after = Get-Content -LiteralPath $mainPath -Raw -Encoding UTF8 | ConvertFrom-Json
         @($after.actions | Where-Object service_name -CEQ 'CaseService')[0].status | Should -Be 'success'
@@ -1856,7 +1938,7 @@ Describe '勾选视图 (v1.5.5)' {
         $oldRoot = $script:Root
         $script:Root = $tmpRoot
         Set-GuiReviewedGenerationFromFile $mainPath
-        try { Merge-PendingStatus $subsetPath } finally { $script:Root = $oldRoot }
+        try { Merge-GuiPendingStatusFromFile $subsetPath } finally { $script:Root = $oldRoot }
 
         $roundTrip = Get-Content -LiteralPath $mainPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $cursor = $roundTrip.extension
@@ -1884,7 +1966,7 @@ Describe '勾选视图 (v1.5.5)' {
         $oldRoot = $script:Root
         $script:Root = $tmpRoot
         Set-GuiReviewedGenerationFromFile (Join-Path $tmpRoot 'pending_actions.json')
-        try { Merge-PendingStatus $subsetFile } finally { $script:Root = $oldRoot }
+        try { Merge-GuiPendingStatusFromFile $subsetFile } finally { $script:Root = $oldRoot }
 
         $after = Get-Content (Join-Path $tmpRoot 'pending_actions.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         @($after.actions | Where-Object { $_.process_id -eq 101 -and $_.matched_field -eq 'process_name' })[0].status | Should -Be 'success'
@@ -1911,7 +1993,7 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($subsetAction); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
         $oldRoot = $script:Root; $script:Root = $tmpRoot
         try {
-            { Merge-PendingStatus $subsetPath } | Should -Throw '*generation*'
+            { Merge-GuiPendingStatusFromFile $subsetPath } | Should -Throw '*generation*'
             [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $replacementBytes
         } finally { $script:Root = $oldRoot }
     }
@@ -1930,10 +2012,38 @@ Describe '勾选视图 (v1.5.5)' {
         $lock = [System.IO.File]::Open($mainPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         $oldRoot = $script:Root; $script:Root = $tmpRoot
         try {
-            { Merge-PendingStatus $subsetPath } | Should -Throw
+            { Merge-GuiPendingStatusFromFile $subsetPath } | Should -Throw
         } finally {
             $lock.Dispose(); $script:Root = $oldRoot
         }
+        [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $mainBytes
+    }
+
+    It 'Merge-PendingStatus 写回中途失败时在同一独占锁内恢复原始 JSON 字节' {
+        $tmpRoot = Join-Path $TestDrive ('gui-merge-write-rollback-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $action = (New-GuiReviewPendingFixture -ActionServiceName 'RollbackService').actions[0]
+        $mainPath = Join-Path $tmpRoot 'pending_actions.json'
+        $mainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; generated='original'; actions=@($action); observations=@(); suspicious=@(); marker='restore-me' })))
+        [System.IO.File]::WriteAllBytes($mainPath, $mainBytes)
+        Set-GuiReviewedGenerationFromFile $mainPath
+        $resultAction = $action.PSObject.Copy(); $resultAction.status = 'success'
+        $pairs = [System.Collections.Generic.List[System.Tuple[string,string]]]::new()
+        $pairs.Add([System.Tuple[string,string]]::new((Get-PendingIdentityKey $resultAction), 'success'))
+        $script:ExecutionActions = @($action)
+        $result = [pscustomobject]@{ Items=$pairs.AsReadOnly() }
+        Mock Write-GuiPendingBytesToLockedStream {
+            param($Stream, $Bytes)
+            $Stream.Position = 0
+            $Stream.SetLength(0)
+            $Stream.Write($Bytes, 0, [Math]::Min(7, $Bytes.Length))
+            throw 'injected write failure after truncation'
+        }
+        $oldRoot = $script:Root; $script:Root = $tmpRoot
+        try {
+            { Merge-PendingStatus $result } | Should -Throw '*injected write failure*'
+        } finally { $script:Root = $oldRoot }
+
         [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $mainBytes
     }
 }

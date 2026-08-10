@@ -145,6 +145,8 @@ $script:ExecutionTempPath = $null
 $script:ExecutionActions = @()
 $script:ExecutionInProgress = $false
 $script:ExecutionLifecycle = 'idle'
+$script:ExecutionUnknownProbeCount = 0
+$script:ExecutionUnknownProbeLimit = 3
 $script:StatePanels = @('IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel','ExecutingPanel','CompletedPanel','ErrorPanel')
 
 function Set-GuiState {
@@ -572,6 +574,22 @@ function Read-GuiLockedStreamBytes {
     return $bytes
 }
 
+function Write-GuiPendingBytesToLockedStream {
+    param([Parameter(Mandatory=$true)]$Stream, [Parameter(Mandatory=$true)][byte[]]$Bytes)
+    $Stream.Position = 0
+    $Stream.SetLength(0)
+    $Stream.Write($Bytes, 0, $Bytes.Length)
+    $Stream.Flush($true)
+}
+
+function Restore-GuiPendingBytesToLockedStream {
+    param([Parameter(Mandatory=$true)]$Stream, [Parameter(Mandatory=$true)][byte[]]$Bytes)
+    $Stream.Position = 0
+    $Stream.SetLength(0)
+    $Stream.Write($Bytes, 0, $Bytes.Length)
+    $Stream.Flush($true)
+}
+
 # v1.5.6: 全选/清空 — 全选跳过 CanExecute=false (观察项 checkbox disabled 且不可被全选勾上)
 function Set-AllChecked($list, $value) {
     foreach ($it in @($list.Items)) {
@@ -581,9 +599,9 @@ function Set-AllChecked($list, $value) {
 
 # v1.5.5: 把勾选子集临时文件的处理结果状态合并回主 pending_actions.json
 # (clean 处理的是临时子集, 主清单不同步的话下次加载仍是 pending, 用户会看到重复待办)
-function Merge-PendingStatus($SubsetPath) {
+function Merge-PendingStatus($ExecutionResult) {
     $mainPath = Join-Path $script:Root 'pending_actions.json'
-    if (-not (Test-Path -LiteralPath $mainPath) -or -not (Test-Path -LiteralPath $SubsetPath)) { throw 'pending merge input is missing.' }
+    if (-not (Test-Path -LiteralPath $mainPath) -or $null -eq $ExecutionResult) { throw 'pending merge input is missing.' }
     if ($script:ReviewedPendingGenerationSha256 -isnot [string] -or $script:ReviewedPendingGenerationSha256 -cnotmatch '^[0-9a-fA-F]{64}$') {
         throw 'review generation is missing; refusing pending merge.'
     }
@@ -596,23 +614,35 @@ function Merge-PendingStatus($SubsetPath) {
             throw 'pending review generation changed; refusing to overwrite a newer scan.'
         }
         $main = ConvertFrom-GuiPendingBytes $mainBytes
-        $subset = Read-GuiPendingFile -Path $SubsetPath
         $null = Get-GuiPendingSchemaVersion $main
-        $null = Get-GuiPendingSchemaVersion $subset
-        if ($null -eq $main.actions -or $null -eq $subset.actions) { throw 'pending merge actions are missing.' }
+        if ($null -eq $main.actions -or $null -eq $ExecutionResult.Items) { throw 'pending merge actions are missing.' }
 
         $mainByKey = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
         foreach ($ma in @($main.actions)) { $mainByKey.Add((Get-PendingIdentityKey $ma), $ma) }
-        foreach ($sa in @($subset.actions)) {
-            $key = Get-PendingIdentityKey $sa
+        $executionKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($expectedAction in @($script:ExecutionActions)) { [void]$executionKeys.Add((Get-PendingIdentityKey $expectedAction)) }
+        if (@($ExecutionResult.Items).Count -ne $executionKeys.Count) { throw 'pending merge result count does not match this execution.' }
+        foreach ($item in @($ExecutionResult.Items)) {
+            if ($item -isnot [System.Tuple[string,string]]) { throw 'pending merge result item is not an immutable identity/status pair.' }
+            $key = $item.Item1
+            $status = $item.Item2
+            if (-not $executionKeys.Contains($key)) { throw 'pending merge identity is outside this execution.' }
+            if ($status -cnotin @('success','failed','skipped','manual_required')) { throw 'pending merge status is not terminal.' }
             if (-not $mainByKey.ContainsKey($key)) { throw 'pending merge identity is absent from reviewed generation.' }
-            $mainByKey[$key].status = $sa.status
+            $mainByKey[$key].status = $status
         }
         $updatedBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson -InputObject $main))
-        $stream.Position = 0
-        $stream.SetLength(0)
-        $stream.Write($updatedBytes, 0, $updatedBytes.Length)
-        $stream.Flush($true)
+        try {
+            Write-GuiPendingBytesToLockedStream -Stream $stream -Bytes $updatedBytes
+        } catch {
+            $writeFailure = $_
+            try {
+                Restore-GuiPendingBytesToLockedStream -Stream $stream -Bytes $mainBytes
+            } catch {
+                throw ('pending merge write failed and rollback also failed. Write: {0}; Rollback: {1}' -f $writeFailure.Exception.Message, $_.Exception.Message)
+            }
+            throw $writeFailure
+        }
     } finally {
         if ($null -ne $stream) { $stream.Dispose() }
     }
@@ -718,7 +748,7 @@ function Set-GuiError {
     $window.FindName('ErrorSummaryText').Text = $Summary
     $window.FindName('ErrorMutationText').Text = $Mutation
     $window.FindName('ErrorDetailText').Text = $Detail
-    Set-GuiState error
+    if ($script:GuiState -ne 'error') { Set-GuiState error }
 }
 
 function Show-GuiScanError {
@@ -938,6 +968,7 @@ function Clear-GuiExecutionResources {
     $script:ExecutionActions = @()
     $script:ExecutionInProgress = $false
     $script:ExecutionLifecycle = 'idle'
+    $script:ExecutionUnknownProbeCount = 0
     return $true
 }
 
@@ -1046,7 +1077,30 @@ function Read-GuiStrictExecutionResult {
             throw 'execution result contains a non-terminal action status.'
         }
     }
-    return [pscustomobject]@{ Pending=$pending; Actions=$items }
+    $actionCopies = [System.Collections.Generic.List[object]]::new()
+    $resultPairs = [System.Collections.Generic.List[System.Tuple[string,string]]]::new()
+    $statusMap = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+    foreach ($action in $items) {
+        $copy = Copy-PendingActionForSubset $action
+        $copy.status = [string]$action.status
+        $key = Get-PendingIdentityKey $copy
+        $status = [string]$copy.status
+        $actionCopies.Add($copy)
+        $resultPairs.Add([System.Tuple[string,string]]::new($key, $status))
+        $statusMap.Add($key, $status)
+    }
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in @(ConvertTo-GuiExecutionRows $actionCopies)) { $rows.Add($row) }
+    $summaryValues = Get-GuiExecutionSummaryFromActions $actionCopies
+    $summaryMap = [System.Collections.Generic.Dictionary[string,int]]::new([System.StringComparer]::Ordinal)
+    foreach ($name in @('success','failed','skipped','manual_required')) { $summaryMap.Add($name, [int]$summaryValues[$name]) }
+    return [pscustomobject]@{
+        Actions = $actionCopies.AsReadOnly()
+        Items = $resultPairs.AsReadOnly()
+        StatusByIdentity = [System.Collections.ObjectModel.ReadOnlyDictionary[string,string]]::new($statusMap)
+        Summary = [System.Collections.ObjectModel.ReadOnlyDictionary[string,int]]::new($summaryMap)
+        Rows = $rows.AsReadOnly()
+    }
 }
 
 function Get-GuiExecutionSummaryFromActions {
@@ -1078,6 +1132,12 @@ function Complete-ExecutionPoll {
     if ($null -eq $process) { return $false }
     $probe = Get-GuiExecutionProcessStatus -Process $process
     if ($probe.State -eq 'running') {
+        if ($script:ExecutionLifecycle -eq 'unknown') {
+            $script:ExecutionLifecycle = 'running'
+            $script:ExecutionUnknownProbeCount = 0
+            if ($null -ne $script:ExecutionTimer) { $script:ExecutionTimer.Interval = [TimeSpan]::FromMilliseconds(500) }
+            Set-GuiState executing -Force
+        }
         try {
             $pending = Read-GuiPendingFile -Path $script:ExecutionTempPath
             $null = Get-GuiPendingSchemaVersion $pending
@@ -1097,23 +1157,31 @@ function Complete-ExecutionPoll {
         return $false
     }
     if ($probe.State -eq 'unknown') {
-        Invoke-GuiTimerStop $script:ExecutionTimer
+        $script:ExecutionUnknownProbeCount++
         $script:ExecutionLifecycle = 'unknown'
-        Set-GuiError -Summary (Get-Text 'ExecStatusUnknown') -Mutation (Get-Text 'ExecPartialPossible') -Detail $probe.Detail
-        return $true
+        $detail = $probe.Detail + [Environment]::NewLine + ('Diagnostic subset: ' + $script:ExecutionTempPath) + [Environment]::NewLine + ('Probe retry: {0}/{1}' -f $script:ExecutionUnknownProbeCount, $script:ExecutionUnknownProbeLimit)
+        Set-GuiError -Summary (Get-Text 'ExecStatusUnknown') -Mutation (Get-Text 'ExecPartialPossible') -Detail $detail
+        if ($script:ExecutionUnknownProbeCount -ge $script:ExecutionUnknownProbeLimit) {
+            Invoke-GuiTimerStop $script:ExecutionTimer
+            $script:ExecutionLifecycle = 'detached'
+            $script:ExecutionInProgress = $false
+            return $true
+        }
+        if ($null -ne $script:ExecutionTimer) { $script:ExecutionTimer.Interval = [TimeSpan]::FromSeconds(1) }
+        return $false
     }
 
+    if ($script:ExecutionLifecycle -eq 'unknown') { Set-GuiState executing -Force }
+    $script:ExecutionUnknownProbeCount = 0
     Invoke-GuiTimerStop $script:ExecutionTimer
     $script:ExecutionLifecycle = 'exited'
     $exitCode = $probe.ExitCode
     if ($exitCode -eq 0) {
         try {
             $result = Read-GuiStrictExecutionResult -Path $script:ExecutionTempPath -ExpectedActions $script:ExecutionActions
-            Merge-PendingStatus $script:ExecutionTempPath
-            $rows = @(ConvertTo-GuiExecutionRows $result.Actions)
-            $sum = Get-GuiExecutionSummaryFromActions $result.Actions
-            $window.FindName('CompletedList').ItemsSource = $rows
-            $window.FindName('CompletedSummaryText').Text = (Get-Text 'ExecDoneSum') -f $sum.success, $sum.failed, $sum.skipped, $sum.manual_required
+            Merge-PendingStatus $result
+            $window.FindName('CompletedList').ItemsSource = @($result.Rows)
+            $window.FindName('CompletedSummaryText').Text = (Get-Text 'ExecDoneSum') -f $result.Summary['success'], $result.Summary['failed'], $result.Summary['skipped'], $result.Summary['manual_required']
             Set-GuiState completed
             $null = Clear-GuiExecutionResources -RemoveTemp -ProcessExitConfirmed
         } catch {
@@ -1153,6 +1221,7 @@ function Start-GuiExecution {
     }
     $script:ExecutionInProgress = $true
     $script:ExecutionLifecycle = 'starting'
+    $script:ExecutionUnknownProbeCount = 0
     $startedProcess = $false
     try {
         $checked = @(Resolve-GuiReviewedActions -List $List)
