@@ -894,6 +894,55 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
+    It 'observation identity 与 action collision 使 review 在绑定前失败关闭' {
+        $tmpRoot = Join-Path $TestDrive ('gui-cross-branch-collision-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $pending = New-GuiReviewPendingFixture
+        $collision = $pending.actions[0].PSObject.Copy()
+        $collision.name_cn = '伪装观察分支'
+        $collision.status = '观察'
+        $collision | Add-Member -NotePropertyName obs_reason -NotePropertyValue '只观察'
+        $pending.observations = @($collision)
+
+        $projected = @(Get-PendingViewItems -Pending $pending)
+        $projectedObservation = @($projected | Where-Object { -not $_.CanExecute })[0]
+        $projectedObservation.CanExecute = $true
+        $projectedObservation.IsChecked = $true
+        (Get-PendingIdentityKey $projectedObservation._raw) |
+            Should -Be (Get-PendingIdentityKey $pending.actions[0])
+
+        [System.IO.File]::WriteAllText(
+            (Join-Path $tmpRoot 'pending_actions.json'),
+            (ConvertTo-Json -InputObject $pending -Depth 6),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $oldRoot = $script:Root
+        $oldLang = $script:Lang
+        $script:Root = $tmpRoot
+        $script:Lang = 'zh'
+        try {
+            $list = $script:Win.FindName('PendingList')
+            $list.ItemsSource = $projected
+            $script:ReviewedPendingSnapshot = [pscustomobject]@{ review_marker='stale' }
+            $script:ReviewedActionIdentityKeys = @('stale-key')
+            Set-GuiState results -Force
+            Invoke-GuiOpenReviewClick
+
+            $script:GuiState | Should -Be 'error'
+            $script:Win.FindName('ErrorSummaryText').Text | Should -Be '待处理清单已过期，必须重新扫描。'
+            $script:Win.FindName('ErrorMutationText').Text | Should -Be '没有执行任何系统修改。'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Match 'observation identity.*action identity'
+            $list.ItemsSource | Should -BeNullOrEmpty
+            @($list.Items).Count | Should -Be 0
+            $script:ReviewedPendingSnapshot | Should -BeNullOrEmpty
+            @($script:ReviewedActionIdentityKeys).Count | Should -Be 0
+        } finally {
+            $script:Root = $oldRoot
+            $script:Lang = $oldLang
+        }
+    }
+
     It 'malformed review 清空 stale list、snapshot 和 identity keys' {
         $tmpRoot = Join-Path $TestDrive ('gui-malformed-review-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tmpRoot)

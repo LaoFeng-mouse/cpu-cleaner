@@ -493,6 +493,11 @@ function Get-GuiValidatedActionIdentityKeys {
             $selectableKeys.Add($key)
         }
     }
+    foreach ($observation in @($Pending.observations)) {
+        if ($seen.Contains((Get-PendingIdentityKey $observation))) {
+            throw 'pending review shape invalid: observation identity collides with action identity.'
+        }
+    }
     return [string[]]$selectableKeys.ToArray()
 }
 
