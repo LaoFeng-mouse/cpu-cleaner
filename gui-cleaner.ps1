@@ -347,6 +347,11 @@ function New-PendingSubsetPayload {
     return [pscustomobject]$properties
 }
 
+function ConvertTo-GuiPendingJson {
+    param($InputObject)
+    return ConvertTo-Json -InputObject $InputObject -Depth 100
+}
+
 # v1.5.5: 动作中文标签 (勾选视图展示)
 function Get-ActionLabel($a) {
     switch ($a) {
@@ -448,7 +453,7 @@ function Merge-PendingStatus($SubsetPath) {
             if ($sameKey) { $ma.status = $sa.status }
         }
     }
-    $main | ConvertTo-Json -Depth 5 | Out-File $mainPath -Encoding utf8
+    ConvertTo-GuiPendingJson -InputObject $main | Out-File $mainPath -Encoding utf8
 }
 
 # v1.5.3: 扫描 job 收尾统一处理 — Completed 成功 / Failed / Stopped 都要恢复 UI
@@ -569,7 +574,7 @@ $window.FindName('BtnExec').Add_Click({
         $payload = New-PendingSubsetPayload -Checked $checked -SourcePending $src
         if (-not $payload) { throw '无法生成 pending 子集。请重新运行 scan 生成新清单。' }
         $tmpPending = Join-Path $env:TEMP ("shushu_pending_" + [guid]::NewGuid().ToString('N') + ".json")
-        $json = ConvertTo-Json -InputObject $payload -Depth 6
+        $json = ConvertTo-GuiPendingJson -InputObject $payload
         [System.IO.File]::WriteAllText($tmpPending, $json, (New-Object System.Text.UTF8Encoding($true)))
 
         $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll','-PendingFileArg',"`"$tmpPending`""

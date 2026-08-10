@@ -34,7 +34,18 @@ function Backup-AutostartValue($keyPath, $name, $backupDir, $tag) {
     $info = Get-AutostartValueInfo $keyPath $name
     if (-not $info) { return $null }
     $out = Join-Path $backupDir ("$tag.autostart.json")
-    [System.IO.File]::WriteAllText($out, (ConvertTo-Json -InputObject $info -Depth 5), (New-Object System.Text.UTF8Encoding($true)))
+    [System.IO.File]::WriteAllText($out, (ConvertTo-Json -InputObject $info -Depth 100), (New-Object System.Text.UTF8Encoding($true)))
+    return $out
+}
+
+function Write-AutostartValueBackup($Info, $BackupDir, $Tag) {
+    if ($null -eq $Info) { return $null }
+    $out = Join-Path $BackupDir ("$Tag.autostart.json")
+    $json = ConvertTo-Json -InputObject $Info -Depth 100
+    [System.IO.File]::WriteAllText($out, $json, (New-Object System.Text.UTF8Encoding($true)))
+    if (-not [System.IO.File]::Exists($out) -or (Get-Item -LiteralPath $out).Length -le 0) {
+        throw '单值备份文件写入失败'
+    }
     return $out
 }
 

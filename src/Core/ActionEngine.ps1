@@ -100,6 +100,105 @@ function Remove-LiteralAutostartValue {
     }
 }
 
+function New-AutostartRemovalResult($Status, $Reason, $Backup = '') {
+    return [pscustomobject]@{ status=$Status; reason=$Reason; backup=$Backup }
+}
+
+function Invoke-LiteralAutostartRemovalFromKey {
+    param($RegistryKey, $Source, $Name, $ExpectedValue, $BackupDir, $Tag)
+    if ($null -eq $RegistryKey) { return New-AutostartRemovalResult 'failed' '注册表键未打开' }
+    if ($Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name) -or
+        $ExpectedValue -isnot [string] -or [string]::IsNullOrWhiteSpace($ExpectedValue)) {
+        return New-AutostartRemovalResult 'skipped' 'pending 自启名称或原始 Value 无效'
+    }
+
+    try {
+        $matchingNames = @($RegistryKey.GetValueNames() | Where-Object {
+            $_ -is [string] -and [string]::Equals($_, $Name, [System.StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($matchingNames.Count -ne 1) { return New-AutostartRemovalResult 'skipped' '自启项已不存在或名称不唯一' }
+        $literalName = [string]$matchingNames[0]
+        $currentValue = $RegistryKey.GetValue($literalName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($currentValue -isnot [string] -or [string]::IsNullOrWhiteSpace($currentValue) -or
+            -not [string]::Equals($currentValue, $ExpectedValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return New-AutostartRemovalResult 'skipped' '自启 Value 已变化，拒绝删除'
+        }
+        $valueKind = $RegistryKey.GetValueKind($literalName)
+    } catch {
+        return New-AutostartRemovalResult 'failed' ('读取当前自启值失败: ' + $_.Exception.Message)
+    }
+
+    $backupInfo = [pscustomobject]@{
+        key = $Source
+        name = $literalName
+        value_type = $valueKind.ToString()
+        value = $currentValue
+    }
+    try {
+        $backup = Write-AutostartValueBackup -Info $backupInfo -BackupDir $BackupDir -Tag $Tag
+    } catch {
+        return New-AutostartRemovalResult 'failed' ('单值备份失败: ' + $_.Exception.Message)
+    }
+    if ($backup -isnot [string] -or [string]::IsNullOrWhiteSpace($backup) -or
+        -not [System.IO.File]::Exists($backup) -or (Get-Item -LiteralPath $backup).Length -le 0) {
+        return New-AutostartRemovalResult 'failed' '单值备份未成功写入有效文件'
+    }
+
+    try {
+        $matchingNamesAfterBackup = @($RegistryKey.GetValueNames() | Where-Object {
+            $_ -is [string] -and [string]::Equals($_, $literalName, [System.StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($matchingNamesAfterBackup.Count -ne 1) {
+            return New-AutostartRemovalResult 'skipped' '备份后自启项身份变化，拒绝删除' $backup
+        }
+        $valueAfterBackup = $RegistryKey.GetValue($literalName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($valueAfterBackup -isnot [string] -or
+            -not [string]::Equals($valueAfterBackup, $ExpectedValue, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return New-AutostartRemovalResult 'skipped' '备份后自启 Value 已变化，拒绝删除' $backup
+        }
+        Remove-LiteralRegistryValueFromKey -RegistryKey $RegistryKey -Name $literalName
+        $stillPresent = @($RegistryKey.GetValueNames() | Where-Object {
+            $_ -is [string] -and [string]::Equals($_, $literalName, [System.StringComparison]::OrdinalIgnoreCase)
+        }).Count -gt 0
+        if ($stillPresent) { return New-AutostartRemovalResult 'failed' '字面删除后自启项仍存在' $backup }
+        return New-AutostartRemovalResult 'success' '自启项已完成单值备份并删除' $backup
+    } catch {
+        return New-AutostartRemovalResult 'failed' ('字面删除或验证失败: ' + $_.Exception.Message) $backup
+    }
+}
+
+function Invoke-LiteralAutostartRemoval {
+    param($Source, $Name, $ExpectedValue, $BackupDir, $Tag)
+    if (-not (Test-AllowedAutostartRegistrySource $Source)) {
+        return New-AutostartRemovalResult 'skipped' '自启注册表路径不在白名单'
+    }
+    $hive = $null
+    $relativePath = $null
+    if ($Source.StartsWith('HKCU:\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $hive = [Microsoft.Win32.RegistryHive]::CurrentUser
+        $relativePath = $Source.Substring(6)
+    } elseif ($Source.StartsWith('HKLM:\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $hive = [Microsoft.Win32.RegistryHive]::LocalMachine
+        $relativePath = $Source.Substring(6)
+    } else {
+        return New-AutostartRemovalResult 'skipped' '自启注册表 hive 无效'
+    }
+
+    $baseKey = $null
+    $key = $null
+    try {
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, [Microsoft.Win32.RegistryView]::Default)
+        $key = $baseKey.OpenSubKey($relativePath, $true)
+        if ($null -eq $key) { return New-AutostartRemovalResult 'skipped' '自启注册表键不存在' }
+        return Invoke-LiteralAutostartRemovalFromKey -RegistryKey $key -Source $Source -Name $Name -ExpectedValue $ExpectedValue -BackupDir $BackupDir -Tag $Tag
+    } catch {
+        return New-AutostartRemovalResult 'failed' ('打开或处理自启注册表键失败: ' + $_.Exception.Message)
+    } finally {
+        if ($null -ne $key) { $key.Dispose() }
+        if ($null -ne $baseKey) { $baseKey.Dispose() }
+    }
+}
+
 function Skip-JsonWhitespace([string]$Json, [ref]$Index) {
     while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @([char]0x20,[char]0x09,[char]0x0A,[char]0x0D)) {
         $Index.Value++
@@ -302,6 +401,21 @@ namespace ShushuCleaner
 {
     public static class PendingFileIdentityNative
     {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BY_HANDLE_FILE_INFORMATION
+        {
+            public uint dwFileAttributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME ftCreationTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME ftLastAccessTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME ftLastWriteTime;
+            public uint dwVolumeSerialNumber;
+            public uint nFileSizeHigh;
+            public uint nFileSizeLow;
+            public uint nNumberOfLinks;
+            public uint nFileIndexHigh;
+            public uint nFileIndexLow;
+        }
+
         public const uint FILE_NAME_NORMALIZED = 0x0;
         public const uint VOLUME_NAME_DOS = 0x0;
 
@@ -311,6 +425,12 @@ namespace ShushuCleaner
             StringBuilder lpszFilePath,
             uint cchFilePath,
             uint dwFlags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetFileInformationByHandle(
+            SafeFileHandle hFile,
+            out BY_HANDLE_FILE_INFORMATION lpFileInformation);
     }
 }
 '@
@@ -325,6 +445,15 @@ function Invoke-GetFinalPathNameByHandleNative {
         [uint32]$Capacity,
         [uint32]$Flags
     )
+}
+
+function Invoke-GetFileInformationByHandleNative($SafeFileHandle) {
+    $information = New-Object ShushuCleaner.PendingFileIdentityNative+BY_HANDLE_FILE_INFORMATION
+    $success = [ShushuCleaner.PendingFileIdentityNative]::GetFileInformationByHandle($SafeFileHandle, [ref]$information)
+    return [pscustomobject]@{
+        success = [bool]$success
+        nNumberOfLinks = [uint32]$information.nNumberOfLinks
+    }
 }
 
 function Get-NormalizedFinalPathFromHandle($Stream) {
@@ -382,6 +511,21 @@ function Test-OpenedPendingFileIdentity {
     }
 }
 
+function Test-OpenedPendingFileHasSingleLink($Stream) {
+    try {
+        if ($Stream -isnot [System.IO.FileStream] -or $null -eq $Stream.SafeFileHandle -or $Stream.SafeFileHandle.IsInvalid -or $Stream.SafeFileHandle.IsClosed) {
+            return $false
+        }
+        Initialize-PendingFileIdentityNativeApi
+        $result = Invoke-GetFileInformationByHandleNative $Stream.SafeFileHandle
+        if ($null -eq $result -or $result.success -isnot [bool] -or -not $result.success) { return $false }
+        if ($result.nNumberOfLinks -isnot [uint32] -and $result.nNumberOfLinks -isnot [int32] -and $result.nNumberOfLinks -isnot [int64]) { return $false }
+        return ([uint64]$result.nNumberOfLinks -eq [uint64]1)
+    } catch {
+        return $false
+    }
+}
+
 function Open-LockedPendingFile($Path) {
     Assert-PendingPathIsNotReparsePoint $Path
     $stream = $null
@@ -394,6 +538,9 @@ function Open-LockedPendingFile($Path) {
         )
         if (-not (Test-OpenedPendingFileIdentity -Stream $stream -Path $Path)) {
             throw 'pending 文件句柄身份验证失败，拒绝读取或写回'
+        }
+        if (-not (Test-OpenedPendingFileHasSingleLink -Stream $stream)) {
+            throw 'pending 文件硬链接计数无效，拒绝读取或写回'
         }
         Assert-PendingPathIsNotReparsePoint $Path
         return $stream
@@ -492,7 +639,7 @@ function Build-PendingV2Payload {
 function Write-PendingToLockedStream {
     param($Stream, $Pending)
     if ($null -eq $Stream -or -not $Stream.CanWrite -or -not $Stream.CanSeek) { throw 'pending 文件流不可写或不可定位' }
-    $json = ConvertTo-Json -InputObject $Pending -Depth 10
+    $json = ConvertTo-Json -InputObject $Pending -Depth 100
     $bytes = [System.Text.UTF8Encoding]::new($false, $true).GetBytes($json)
     $null = $Stream.Seek(0, [System.IO.SeekOrigin]::Begin)
     $Stream.SetLength(0)
@@ -728,7 +875,7 @@ function Save-PendingActions($Hits, $Suspicious) {
         suspicious    = $suspArr
     }
     # 用 -InputObject 强制序列化, 避免管道展开导致空数组写空文件
-    $json = ConvertTo-Json -InputObject $payload -Depth 5
+    $json = ConvertTo-Json -InputObject $payload -Depth 100
     [System.IO.File]::WriteAllText($script:PendingFile, $json, (New-Object System.Text.UTF8Encoding($true)))
 }
 
@@ -982,28 +1129,15 @@ function Invoke-Clean {
                 'remove_autostart' {
                     $rp = $p.autostart_source
                     $nm = $p.autostart_name
-                    if ($rp -and $nm) {
-                        $key = Get-ItemProperty $rp -ErrorAction SilentlyContinue
-                        if ($key -and ($key.PSObject.Properties | Where-Object { $_.Name -eq $nm })) {
-                            # v1.5.4 P0: 只备份该 Value 的 Name/Type/Data, 不再 reg export 整个键
-                            $bak = Backup-AutostartValue $rp $nm $backupDir $tag
-                            $null = Remove-LiteralAutostartValue -Source $rp -Name $nm
-                            # v1.2: 执行后验证
-                            $keyAfter = Get-ItemProperty $rp -ErrorAction SilentlyContinue
-                            $stillThere = $keyAfter -and ($keyAfter.PSObject.Properties | Where-Object { $_.Name -eq $nm })
-                            if (-not $stillThere) {
-                                $p.status = 'success'
-                                Write-Host "  验证通过: 自启项已删除: $nm (备份: $bak)" -ForegroundColor Green
-                                $manifest += [pscustomobject]@{ type='autostart'; key=$rp; name=$nm; backup=$bak; verified=$true; note='restore: 单值恢复' }
-                            } else {
-                                $p.status = 'failed'
-                                Write-Host "  验证失败: 自启项仍在 ($nm)" -ForegroundColor Red
-                                $manifest += [pscustomobject]@{ type='autostart'; key=$rp; name=$nm; backup=$bak; verified=$false; note='restore: 单值恢复' }
-                            }
-                        } else {
-                            Write-Host "  跳过: 自启项已不存在 ($nm)" -ForegroundColor DarkYellow
-                            $p.status = 'skipped'
-                        }
+                    $removal = Invoke-LiteralAutostartRemoval -Source $rp -Name $nm -ExpectedValue $p.autostart_value -BackupDir $backupDir -Tag $tag
+                    $p.status = $removal.status
+                    if ($removal.status -eq 'success') {
+                        Write-Host "  验证通过: 自启项已删除: $nm (备份: $($removal.backup))" -ForegroundColor Green
+                        $manifest += [pscustomobject]@{ type='autostart'; key=$rp; name=$nm; backup=$removal.backup; verified=$true; note='restore: 单值恢复' }
+                    } elseif ($removal.status -eq 'skipped') {
+                        Write-Host "  跳过: $($removal.reason) ($nm)" -ForegroundColor DarkYellow
+                    } else {
+                        Write-Host "  失败: $($removal.reason) ($nm)" -ForegroundColor Red
                     }
                 }
                 'disable_task' {
@@ -1047,7 +1181,7 @@ function Invoke-Clean {
 
         if ($backupDirReady) {
             # -InputObject 强制数组, 空 manifest 也写 []
-            $jsonM = ConvertTo-Json -InputObject @($manifest) -Depth 5
+            $jsonM = ConvertTo-Json -InputObject @($manifest) -Depth 100
             [System.IO.File]::WriteAllText((Join-Path $backupDir 'manifest.json'), $jsonM, (New-Object System.Text.UTF8Encoding($true)))
             Write-Step "动作处理完成。备份目录: $backupDir"
         } else {
@@ -1086,7 +1220,7 @@ function Invoke-Clean {
                                 $man = @()
                                 if (Test-Path $mf) { $man = @(Get-Content $mf -Raw -Encoding UTF8 | ConvertFrom-Json) }
                                 $man += [pscustomobject]@{ type='process'; name=$proc.ProcessName; pid=$pidNum; path=$proc.Path; note="restore: 如需恢复请手动启动 $($proc.Path)" }
-                                $man | ConvertTo-Json -Depth 5 | Out-File $mf -Encoding utf8
+                                $man | ConvertTo-Json -Depth 100 | Out-File $mf -Encoding utf8
                             }
                         }
                     } else {

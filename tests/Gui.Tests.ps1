@@ -288,6 +288,26 @@ Describe '勾选视图 (v1.5.5)' {
         $payload.pending_schema_version.GetType() | Should -Be ([int64])
     }
 
+    It 'GUI subset JSON 无损保留 <Levels> 层扩展字段' -TestCases @(
+        @{ Levels = 12 }
+        @{ Levels = 55 }
+    ) {
+        param($Levels)
+        $deep = [pscustomobject]@{ terminal = "subset-$Levels" }
+        for ($i = 0; $i -lt $Levels; $i++) { $deep = [pscustomobject]@{ next = $deep } }
+        $raw = [pscustomobject]@{ id='deep'; action='disable_service'; hit_type='service'; status='pending' }
+        $source = [pscustomobject]@{
+            pending_schema_version=2; generated='x'; actions=@($raw); observations=@(); suspicious=@(); extension=$deep
+        }
+
+        $payload = New-PendingSubsetPayload -Checked @([pscustomobject]@{ _raw=$raw }) -SourcePending $source
+        $roundTrip = ConvertTo-GuiPendingJson -InputObject $payload | ConvertFrom-Json
+        $cursor = $roundTrip.extension
+        for ($i = 0; $i -lt $Levels; $i++) { $cursor = $cursor.next }
+        $cursor | Should -BeOfType ([pscustomobject])
+        $cursor.terminal | Should -Be "subset-$Levels"
+    }
+
     It '非法 schema 的执行调用链不启动管理员 clean 且不写临时 subset' {
         $oldRoot = $script:Root
         $oldTemp = $env:TEMP
@@ -449,6 +469,34 @@ Describe '勾选视图 (v1.5.5)' {
         @($after.actions | Where-Object { $_.hit_type -eq 'service' })[0].status | Should -Be 'failed'
         @($after.actions | Where-Object { $_.hit_type -eq 'autostart' })[0].status | Should -Be 'pending'
         [System.IO.Directory]::Delete($tmpRoot, $true)
+    }
+
+    It 'Merge-PendingStatus 无损保留 <Levels> 层主 envelope 扩展字段' -TestCases @(
+        @{ Levels = 12 }
+        @{ Levels = 55 }
+    ) {
+        param($Levels)
+        $tmpRoot = Join-Path $TestDrive ("gui-deep-merge-$Levels-" + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $deep = [pscustomobject]@{ terminal = "merge-$Levels" }
+        for ($i = 0; $i -lt $Levels; $i++) { $deep = [pscustomobject]@{ next = $deep } }
+        $action = [pscustomobject]@{ id='deep'; hit_type='service'; action='disable_service'; service_name='Svc'; status='pending' }
+        $main = [pscustomobject]@{ pending_schema_version=2; generated='x'; actions=@($action); observations=@(); suspicious=@(); extension=$deep }
+        $mainPath = Join-Path $tmpRoot 'pending_actions.json'
+        [System.IO.File]::WriteAllText($mainPath, (ConvertTo-Json -InputObject $main -Depth 100), [System.Text.UTF8Encoding]::new($false))
+        $subsetAction = $action.PSObject.Copy(); $subsetAction.status = 'success'
+        $subset = [pscustomobject]@{ pending_schema_version=2; generated='x'; actions=@($subsetAction); observations=@(); suspicious=@() }
+        $subsetPath = Join-Path $tmpRoot 'subset.json'
+        [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-Json -InputObject $subset -Depth 100), [System.Text.UTF8Encoding]::new($false))
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try { Merge-PendingStatus $subsetPath } finally { $script:Root = $oldRoot }
+
+        $roundTrip = Get-Content -LiteralPath $mainPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $cursor = $roundTrip.extension
+        for ($i = 0; $i -lt $Levels; $i++) { $cursor = $cursor.next }
+        $cursor | Should -BeOfType ([pscustomobject])
+        $cursor.terminal | Should -Be "merge-$Levels"
     }
 
     It 'Merge-PendingStatus: 同进程名按 PID/path/provenance 精确合并' {

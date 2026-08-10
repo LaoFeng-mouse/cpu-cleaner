@@ -47,6 +47,12 @@ BeforeAll {
             throw 'native API wrapper not implemented'
         }
     }
+    if (-not (Get-Command Invoke-GetFileInformationByHandleNative -ErrorAction SilentlyContinue)) {
+        function Invoke-GetFileInformationByHandleNative {
+            param($SafeFileHandle)
+            throw 'file information API wrapper not implemented'
+        }
+    }
 }
 
 Describe '授权验证 (提权后重新确认)' {
@@ -515,7 +521,7 @@ Describe '执行前最终授权防 TOCTOU' {
         $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
         $loop = $source.IndexOf('foreach ($idx in $indexes)')
         $guard = $source.IndexOf('Test-SelectedPendingActionAuthorized', $loop)
-        $mutations = @('New-Item -ItemType Directory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Backup-AutostartValue', 'Remove-LiteralAutostartValue', 'Disable-ScheduledTask', 'Stop-Process') |
+        $mutations = @('New-Item -ItemType Directory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Invoke-LiteralAutostartRemoval', 'Disable-ScheduledTask', 'Stop-Process') |
             ForEach-Object { $source.IndexOf($_, $loop) }
 
         $loop | Should -BeGreaterOrEqual 0
@@ -693,6 +699,54 @@ Describe 'pending JSON 重复属性预检' {
         }
     }
 
+    It '普通临时文件的已打开句柄 link count 严格为 1' {
+        $path = Join-Path $TestDrive 'single-link.json'
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+        try {
+            Test-OpenedPendingFileHasSingleLink -Stream $stream | Should -BeTrue
+        } finally {
+            $stream.Dispose()
+        }
+    }
+
+    It '存在第二个硬链接时 Open-LockedPendingFile 在读取前关闭并拒绝' {
+        $target = Join-Path $TestDrive 'hardlink-target.json'
+        $link = Join-Path $TestDrive 'hardlink-alias.json'
+        [System.IO.File]::WriteAllText($target, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $null = New-Item -ItemType HardLink -Path $link -Target $target
+        Mock Read-LimitedPendingJsonStream { throw 'must not parse hardlink' }
+        $script:UnexpectedHardlinkStream = $null
+        try {
+            { $script:UnexpectedHardlinkStream = Open-LockedPendingFile $target } | Should -Throw '*硬链接*'
+            Assert-MockCalled Read-LimitedPendingJsonStream -Times 0 -Exactly
+            $probe = [System.IO.File]::Open($target, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $probe.Dispose()
+        } finally {
+            if ($null -ne $script:UnexpectedHardlinkStream) { $script:UnexpectedHardlinkStream.Dispose() }
+            Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'GetFileInformationByHandle API 失败或 link count 非 1 时 fail closed' {
+        $path = Join-Path $TestDrive 'link-api-failure.json'
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+        try {
+            Mock Invoke-GetFileInformationByHandleNative { return [pscustomobject]@{ success=$false; nNumberOfLinks=[uint32]0 } }
+            Test-OpenedPendingFileHasSingleLink -Stream $stream | Should -BeFalse
+
+            Mock Invoke-GetFileInformationByHandleNative { return [pscustomobject]@{ success=$true; nNumberOfLinks=[uint32]0 } }
+            Test-OpenedPendingFileHasSingleLink -Stream $stream | Should -BeFalse
+
+            Mock Invoke-GetFileInformationByHandleNative { return [pscustomobject]@{ success=$true; nNumberOfLinks=[uint32]2 } }
+            Test-OpenedPendingFileHasSingleLink -Stream $stream | Should -BeFalse
+        } finally {
+            $stream.Dispose()
+        }
+    }
+
     It '已打开句柄返回不同最终目标时失败关闭且路径换回不改变结论' {
         $path = Join-Path $TestDrive 'identity-input.json'
         [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
@@ -794,6 +848,40 @@ Describe 'pending JSON 重复属性预检' {
 }
 
 Describe 'clean pending v2 状态持久化' {
+    It 'CLI 同句柄写回无损保留 <Levels> 层 envelope 扩展字段' -TestCases @(
+        @{ Levels = 12 }
+        @{ Levels = 55 }
+    ) {
+        param($Levels)
+        $deep = [pscustomobject]@{ terminal = "depth-$Levels" }
+        for ($i = 0; $i -lt $Levels; $i++) {
+            $deep = [pscustomobject]@{ next = $deep }
+        }
+        $payload = [pscustomobject]@{
+            pending_schema_version = 2
+            generated = 'deep'
+            actions = @()
+            observations = @()
+            suspicious = @()
+            extension = $deep
+        }
+        $path = Join-Path $TestDrive "deep-cli-$Levels.json"
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        $stream = $null
+        try {
+            $stream = Open-LockedPendingFile $path
+            Write-PendingToLockedStream -Stream $stream -Pending $payload
+        } finally {
+            if ($null -ne $stream) { $stream.Dispose() }
+        }
+
+        $roundTrip = Read-StrictPendingJsonFile $path
+        $cursor = $roundTrip.extension
+        for ($i = 0; $i -lt $Levels; $i++) { $cursor = $cursor.next }
+        $cursor | Should -BeOfType ([pscustomobject])
+        $cursor.terminal | Should -Be "depth-$Levels"
+    }
+
     It '初始授权全部拒绝也写回 skipped 并保留完整安全 envelope' {
         $path = Join-Path $TestDrive 'rejected-v2.json'
         $pending = [pscustomobject]@{
