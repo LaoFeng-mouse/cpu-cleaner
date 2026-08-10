@@ -363,6 +363,7 @@ Describe 'GUI 壳 (无窗口)' {
     It 'pending load failure cleans up and enters recoverable error' {
         Mock Read-GuiBackgroundJob { 'scan complete' }
         Mock Invoke-GuiBackgroundJobRemoval {}
+        Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); observations=@()} }
         Mock Get-PendingViewItems { throw 'pending parse failed' }
         $checkTimer = New-FakeTimer
         $scanTimer = New-FakeTimer
@@ -379,6 +380,7 @@ Describe 'GUI 壳 (无窗口)' {
     It 'results rendering failure rolls back then enters recoverable error' {
         Mock Read-GuiBackgroundJob { 'scan complete' }
         Mock Invoke-GuiBackgroundJobRemoval {}
+        Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); observations=@()} }
         Mock Get-PendingViewItems { @() }
         $realWindow = $window
         $failingSummary = New-OneShotFailingControl -RealControl $realWindow.FindName('ResultSummaryText') -PropertyName Text
@@ -418,6 +420,7 @@ Describe 'GUI 壳 (无窗口)' {
             $script:Lang = 'en'
             Mock Read-GuiBackgroundJob { 'scan complete' }
             Mock Invoke-GuiBackgroundJobRemoval {}
+            Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); observations=@()} }
             Mock Get-PendingViewItems {
                 @([pscustomobject]@{CanExecute=$true},[pscustomobject]@{CanExecute=$false})
             }
@@ -463,6 +466,7 @@ Describe 'GUI 壳 (无窗口)' {
     It 'completed scan stops timers, loads result counts, and enters results' {
         Mock Read-GuiBackgroundJob { 'scan complete' }
         Mock Invoke-GuiBackgroundJobRemoval {}
+        Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); observations=@()} }
         Mock Get-PendingViewItems {
             @([pscustomobject]@{CanExecute=$true},[pscustomobject]@{CanExecute=$false})
         }
@@ -697,6 +701,43 @@ Describe '勾选视图 (v1.5.5)' {
         $items[1].IsChecked | Should -BeFalse
     }
 
+    It 'Get-PendingViewItems 强制要求显式 validated Pending object' {
+        { Get-PendingViewItems } | Should -Throw '*Pending*'
+    }
+
+    It 'action status 只接受大小写精确的 truthful known set' {
+        foreach ($status in @('PENDING','unknown')) {
+            $pending = New-GuiReviewPendingFixture
+            $pending.actions[0].status = $status
+            { Assert-GuiPendingPresentationShape -Pending $pending } |
+                Should -Throw '*pending review shape*status*'
+        }
+
+        foreach ($status in @('pending','failed','success','skipped','manual_required')) {
+            $pending = New-GuiReviewPendingFixture
+            $pending.actions[0].status = $status
+            { Assert-GuiPendingPresentationShape -Pending $pending } | Should -Not -Throw
+        }
+    }
+
+    It 'projection 仅大小写精确选择 pending 和 failed actions' {
+        $pending = New-GuiReviewPendingFixture
+        $base = $pending.actions[0]
+        $pending.actions = @()
+        foreach ($status in @('pending','failed','success','skipped','manual_required','PENDING')) {
+            $row = $base.PSObject.Copy()
+            $row.id = "action-$status"
+            $row.service_name = "Service-$status"
+            $row.status = $status
+            $pending.actions += $row
+        }
+
+        $items = @(Get-PendingViewItems -Pending $pending)
+        $actionItems = @($items | Where-Object CanExecute)
+
+        @($actionItems.status) | Should -Be @('pending','failed')
+    }
+
     It 'review presentation shape 拒绝 null、数组标量和缺失 concrete identity' {
         $cases = @(
             @{ Label='actions container null'; Mutate={ param($p) $p.actions = $null } },
@@ -745,7 +786,8 @@ Describe '勾选视图 (v1.5.5)' {
             $script:PendingReadCount | Should -Be 1
             Assert-MockCalled Get-Content -Times 1 -Exactly -ParameterFilter { $Path -eq $pendingPath }
             $script:ReviewedPendingSnapshot.review_marker | Should -Be 'first'
-            @($script:ReviewedPendingIdentityKeys).Count | Should -Be 2
+            (,$script:ReviewedActionIdentityKeys) | Should -BeOfType ([System.Collections.ObjectModel.ReadOnlyCollection[string]])
+            @($script:ReviewedActionIdentityKeys).Count | Should -Be 1
             $script:Win.FindName('PendingList').Items[0]._raw.service_name | Should -Be 'FirstService'
         } finally {
             $script:Root = $oldRoot
@@ -764,7 +806,7 @@ Describe '勾选视图 (v1.5.5)' {
             Set-GuiState results -Force
             Invoke-GuiOpenReviewClick
             $firstSnapshot = $script:ReviewedPendingSnapshot
-            $firstKeys = @($script:ReviewedPendingIdentityKeys)
+            $firstKeys = @($script:ReviewedActionIdentityKeys)
 
             $second = New-GuiReviewPendingFixture -Marker 'second' -ActionServiceName 'SecondService'
             [System.IO.File]::WriteAllText($pendingPath, (ConvertTo-Json -InputObject $second -Depth 6), [System.Text.UTF8Encoding]::new($false))
@@ -773,9 +815,80 @@ Describe '勾选视图 (v1.5.5)' {
 
             [object]::ReferenceEquals($firstSnapshot, $script:ReviewedPendingSnapshot) | Should -BeFalse
             $script:ReviewedPendingSnapshot.review_marker | Should -Be 'second'
-            @($script:ReviewedPendingIdentityKeys).Count | Should -Be 2
-            $script:ReviewedPendingIdentityKeys[0] | Should -Not -Be $firstKeys[0]
+            @($script:ReviewedActionIdentityKeys).Count | Should -Be 1
+            $script:ReviewedActionIdentityKeys[0] | Should -Not -Be $firstKeys[0]
             $script:Win.FindName('PendingList').Items[0]._raw.service_name | Should -Be 'SecondService'
+        } finally {
+            $script:Root = $oldRoot
+        }
+    }
+
+    It 'review allowlist 仅含 selectable action key 且 observation view 篡改不能提升权限' {
+        $tmpRoot = Join-Path $TestDrive ('gui-action-allowlist-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $pending = New-GuiReviewPendingFixture
+        [System.IO.File]::WriteAllText(
+            (Join-Path $tmpRoot 'pending_actions.json'),
+            (ConvertTo-Json -InputObject $pending -Depth 6),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try {
+            Set-GuiState results -Force
+            Invoke-GuiOpenReviewClick
+
+            $list = $script:Win.FindName('PendingList')
+            $selectedAction = @($list.Items | Where-Object { $_.CanExecute -and $_.IsChecked })[0]
+            $observation = @($list.Items | Where-Object { -not $_.CanExecute })[0]
+            $actionKey = Get-PendingIdentityKey $selectedAction._raw
+            $observationKey = Get-PendingIdentityKey $observation._raw
+            $allowlist = $script:ReviewedActionIdentityKeys
+
+            (,$allowlist) | Should -BeOfType ([System.Collections.ObjectModel.ReadOnlyCollection[string]])
+            $allowlist.Contains($actionKey) | Should -BeTrue
+            $allowlist.Contains($observationKey) | Should -BeFalse
+            $observation.CanExecute = $true
+            $observation.IsChecked = $true
+            $allowlist.Contains((Get-PendingIdentityKey $observation._raw)) | Should -BeFalse
+            $genericList = [System.Collections.Generic.IList[string]]$allowlist
+            $genericList.IsReadOnly | Should -BeTrue
+            { $genericList.Add('promoted-observation') } | Should -Throw
+        } finally {
+            $script:Root = $oldRoot
+        }
+    }
+
+    It 'duplicate action identities 使 review 失败并清空 stale state' {
+        $tmpRoot = Join-Path $TestDrive ('gui-duplicate-action-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $pending = New-GuiReviewPendingFixture
+        $duplicate = $pending.actions[0].PSObject.Copy()
+        $duplicate.status = 'failed'
+        $pending.actions = @($pending.actions[0], $duplicate)
+        [System.IO.File]::WriteAllText(
+            (Join-Path $tmpRoot 'pending_actions.json'),
+            (ConvertTo-Json -InputObject $pending -Depth 6),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try {
+            $list = $script:Win.FindName('PendingList')
+            $list.ItemsSource = @([pscustomobject]@{ name_cn='stale' })
+            $script:ReviewedPendingSnapshot = [pscustomobject]@{ review_marker='stale' }
+            $script:ReviewedActionIdentityKeys = @('stale-key')
+            Set-GuiState results -Force
+            Invoke-GuiOpenReviewClick
+
+            $script:GuiState | Should -Be 'error'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Match 'duplicate action identity'
+            $list.ItemsSource | Should -BeNullOrEmpty
+            @($list.Items).Count | Should -Be 0
+            $script:ReviewedPendingSnapshot | Should -BeNullOrEmpty
+            @($script:ReviewedActionIdentityKeys).Count | Should -Be 0
         } finally {
             $script:Root = $oldRoot
         }
@@ -798,7 +911,7 @@ Describe '勾选视图 (v1.5.5)' {
             $list = $script:Win.FindName('PendingList')
             $list.ItemsSource = @([pscustomobject]@{ name_cn='stale' })
             $script:ReviewedPendingSnapshot = [pscustomobject]@{ review_marker='stale' }
-            $script:ReviewedPendingIdentityKeys = @('stale-key')
+            $script:ReviewedActionIdentityKeys = @('stale-key')
             Set-GuiState results -Force
             Invoke-GuiOpenReviewClick
 
@@ -806,7 +919,7 @@ Describe '勾选视图 (v1.5.5)' {
             $list.ItemsSource | Should -BeNullOrEmpty
             @($list.Items).Count | Should -Be 0
             $script:ReviewedPendingSnapshot | Should -BeNullOrEmpty
-            @($script:ReviewedPendingIdentityKeys).Count | Should -Be 0
+            @($script:ReviewedActionIdentityKeys).Count | Should -Be 0
         } finally {
             $script:Root = $oldRoot
         }
@@ -833,7 +946,7 @@ Describe '勾选视图 (v1.5.5)' {
             $list = $script:Win.FindName('PendingList')
             $list.ItemsSource = @([pscustomobject]@{ name_cn='旧数据' })
             $script:ReviewedPendingSnapshot = [pscustomobject]@{ review_marker='stale' }
-            $script:ReviewedPendingIdentityKeys = @('stale-key')
+            $script:ReviewedActionIdentityKeys = @('stale-key')
             Set-GuiState results -Force
 
             Invoke-GuiOpenReviewClick
@@ -845,7 +958,7 @@ Describe '勾选视图 (v1.5.5)' {
             $list.ItemsSource | Should -BeNullOrEmpty
             @($list.Items).Count | Should -Be 0
             $script:ReviewedPendingSnapshot | Should -BeNullOrEmpty
-            @($script:ReviewedPendingIdentityKeys).Count | Should -Be 0
+            @($script:ReviewedActionIdentityKeys).Count | Should -Be 0
         } finally {
             $script:Root = $oldRoot
             $script:Lang = $oldLang

@@ -134,7 +134,8 @@ foreach ($imgName in $script:ImgMap.Keys) {
 $script:GuiState = 'idle'
 $script:GuiActiveStage = 1
 $script:ReviewedPendingSnapshot = $null
-$script:ReviewedPendingIdentityKeys = @()
+$emptyReviewedActionKeys = [System.Collections.Generic.List[string]]::new()
+$script:ReviewedActionIdentityKeys = $emptyReviewedActionKeys.AsReadOnly()
 $script:StatePanels = @('IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel','ExecutingPanel','CompletedPanel','ErrorPanel')
 
 function Set-GuiState {
@@ -355,17 +356,12 @@ function Get-RuleDisplay($rule) {
 # v1.5.6: 构造勾选展示对象 — actions(可执行, 勾选) / observations(仅观察, checkbox disabled)
 # 数据流: scan → Save-PendingActions 已分流; 这里 actions 只读可执行集, observations 只读观察集
 function Get-PendingViewItems {
-    param($Pending = $null)
+    param([Parameter(Mandatory=$true)]$Pending)
     $p = $Pending
-    if ($null -eq $p) {
-        $pendingPath = Join-Path $script:Root 'pending_actions.json'
-        if (-not (Test-Path $pendingPath)) { return @() }
-        $p = Get-Content $pendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    }
     $map = Get-ProfileLookup
     $view = @()
     # 1) 可执行项: 默认勾选, 可勾选
-    foreach ($i in @($p.actions | Where-Object { $_ -and $_.status -in @('pending','failed') })) {
+    foreach ($i in @($p.actions | Where-Object { $_ -and $_.status -cin @('pending','failed') })) {
         $d = Get-RuleDisplay $map[$i.id]
         $view += [pscustomobject]@{
             IsChecked         = $true
@@ -422,7 +418,10 @@ function Assert-GuiPendingPresentationRow {
         $null = Get-GuiReviewScalarString -Item $Item -PropertyName $propertyName -Context $context
     }
     if ($Branch -eq 'actions') {
-        $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'status' -Context $context
+        $status = Get-GuiReviewScalarString -Item $Item -PropertyName 'status' -Context $context
+        if ($status -cnotin @('pending','failed','success','skipped','manual_required')) {
+            throw "pending review shape invalid: $context.status must be an exact known status."
+        }
         $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'reason_cn' -Context $context
     } else {
         $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'obs_reason' -Context $context
@@ -479,6 +478,28 @@ function Assert-GuiPendingPresentationShape {
             Assert-GuiPendingPresentationRow -Item $rows[$index] -Branch $branch -Index $index
         }
     }
+}
+
+function Get-GuiValidatedActionIdentityKeys {
+    param([Parameter(Mandatory=$true)]$Pending)
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $selectableKeys = [System.Collections.Generic.List[string]]::new()
+    foreach ($action in @($Pending.actions)) {
+        $key = Get-PendingIdentityKey $action
+        if (-not $seen.Add($key)) {
+            throw 'pending review shape invalid: duplicate action identity.'
+        }
+        if ($action.status -cin @('pending','failed')) {
+            $selectableKeys.Add($key)
+        }
+    }
+    return [string[]]$selectableKeys.ToArray()
+}
+
+function Read-GuiPendingFile {
+    param([string]$Path = '')
+    $pendingPath = if ($Path) { $Path } else { Join-Path $script:Root 'pending_actions.json' }
+    return Get-Content $pendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
 # v1.5.6: 全选/清空 — 全选跳过 CanExecute=false (观察项 checkbox disabled 且不可被全选勾上)
@@ -619,7 +640,8 @@ function Complete-ScanPoll {
         $window.FindName('BtnStartScan').IsEnabled = $true
         $window.FindName('ScanOutput').Text = [string]$result
         if ($job.State -eq 'Completed') {
-            $items = @(Get-PendingViewItems)
+            $pending = Read-GuiPendingFile
+            $items = @(Get-PendingViewItems -Pending $pending)
             $summary = Get-GuiItemSummary $items
             $window.FindName('ResultSummaryText').Text = ((Get-Text 'ScanResultSummary') -f $summary.executable, $summary.observation)
             Set-GuiState results
@@ -722,21 +744,26 @@ $window.FindName('BtnOpenReview').Add_Click({
     $list = $window.FindName('PendingList')
     try {
         $pendingPath = Join-Path $script:Root 'pending_actions.json'
-        $pending = Get-Content $pendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $pending = Read-GuiPendingFile -Path $pendingPath
         $null = Get-GuiPendingSchemaVersion $pending
         Assert-GuiPendingPresentationShape -Pending $pending
+        $validatedActionKeys = @(Get-GuiValidatedActionIdentityKeys -Pending $pending)
+        $actionKeyList = [System.Collections.Generic.List[string]]::new()
+        foreach ($key in $validatedActionKeys) { $actionKeyList.Add($key) }
+        $actionAllowlist = $actionKeyList.AsReadOnly()
         $items = @(Get-PendingViewItems -Pending $pending)
         $list.ItemsSource = $null
         $list.ItemsSource = $items
         $list.Items.Refresh()
         $script:ReviewedPendingSnapshot = $pending
-        $script:ReviewedPendingIdentityKeys = @($items | ForEach-Object { Get-PendingIdentityKey $_._raw })
+        $script:ReviewedActionIdentityKeys = $actionAllowlist
         Set-GuiState review
     } catch {
         $list.ItemsSource = $null
         $list.Items.Clear()
         $script:ReviewedPendingSnapshot = $null
-        $script:ReviewedPendingIdentityKeys = @()
+        $emptyActionKeys = [System.Collections.Generic.List[string]]::new()
+        $script:ReviewedActionIdentityKeys = $emptyActionKeys.AsReadOnly()
         $window.FindName('ErrorSummaryText').Text = (Get-Text 'ReviewErrorSummary')
         $window.FindName('ErrorMutationText').Text = (Get-Text 'ReviewNoMutation')
         $window.FindName('ErrorDetailText').Text = $_.Exception.Message
@@ -749,7 +776,8 @@ $legacyBtnLoadPending = $window.FindName('BtnLoadPending')
 if ($legacyBtnLoadPending) { $legacyBtnLoadPending.Add_Click({
     $list = $window.FindName('PendingList')
     $hint = $window.FindName('PendingHint')
-    $items = @(Get-PendingViewItems)
+    $pending = Read-GuiPendingFile
+    $items = @(Get-PendingViewItems -Pending $pending)
     if ($items.Count -eq 0) {
         $hint.Text = (Get-Text 'PendingNone')
         $list.ItemsSource = $null
