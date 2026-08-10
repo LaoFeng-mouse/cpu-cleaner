@@ -33,6 +33,7 @@ $script:I18N = @{
         ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
         BtnExec='处理已勾选项目（需要管理员）'; ExecEmpty='请先勾选要处理的项目（【2. 处理建议】页勾选）。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
         ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2}'
+        ExecUnauthorized='未授权、未开始处理。'; ExecNotStarted='管理员授权未完成，未开始处理，系统设置没有变化。'; ExecPartialPossible='执行进程异常结束，可能已有部分动作执行。'; ExecResultReadFailed='无法完整读取逐项结果。'
         BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
         NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。详见管理员窗口。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复出错或被取消: {0}'; RestorePartial='恢复完成，但部分条目验证失败（详见管理员窗口）。'
         State_idle_Title='鼠鼠开始幻想'; State_idle_Sub='先做只读扫描，不会修改系统。'
@@ -56,6 +57,7 @@ $script:I18N = @{
         ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
         BtnExec='Process Checked Items (admin)'; ExecEmpty='Check items first (tab 2).'; ExecStart='Processing {0} item(s). UAC requested, click YES…'; ExecDone='Processing done. See tab 4 (restart PC recommended).'
         ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2}'
+        ExecUnauthorized='Not authorized; processing did not start.'; ExecNotStarted='Administrator authorization was not completed. Processing did not start and no system settings changed.'; ExecPartialPossible='The execution process ended abnormally; some actions may already have run.'; ExecResultReadFailed='The per-item result could not be read completely.'
         BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
         NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}. See admin window.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed/cancelled: {0}'; RestorePartial='Restore finished, but some items failed verification (see admin window).'
         State_idle_Title='The fantasy begins'; State_idle_Sub='Start with a read-only scan. No system settings will change.'
@@ -136,6 +138,10 @@ $script:GuiActiveStage = 1
 $script:ReviewedPendingSnapshot = $null
 $emptyReviewedActionKeys = [System.Collections.Generic.List[string]]::new()
 $script:ReviewedActionIdentityKeys = $emptyReviewedActionKeys.AsReadOnly()
+$script:ExecutionProcess = $null
+$script:ExecutionTimer = $null
+$script:ExecutionTempPath = $null
+$script:ExecutionActions = @()
 $script:StatePanels = @('IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel','ExecutingPanel','CompletedPanel','ErrorPanel')
 
 function Set-GuiState {
@@ -524,7 +530,7 @@ function Merge-PendingStatus($SubsetPath) {
     if (-not $main.actions -or -not $subset.actions) { return }
     foreach ($sa in @($subset.actions)) {
         foreach ($ma in @($main.actions)) {
-            $sameKey = (Get-PendingIdentityKey $ma) -eq (Get-PendingIdentityKey $sa)
+            $sameKey = (Get-PendingIdentityKey $ma) -ceq (Get-PendingIdentityKey $sa)
             if ($sameKey) { $ma.status = $sa.status }
         }
     }
@@ -622,14 +628,23 @@ function Invoke-GuiScanResourceCleanup {
     $script:ScanTimer = $null
 }
 
+function Set-GuiError {
+    param(
+        [Parameter(Mandatory=$true)][string]$Summary,
+        [Parameter(Mandatory=$true)][string]$Mutation,
+        [AllowEmptyString()][string]$Detail = ''
+    )
+    $window.FindName('ErrorSummaryText').Text = $Summary
+    $window.FindName('ErrorMutationText').Text = $Mutation
+    $window.FindName('ErrorDetailText').Text = $Detail
+    Set-GuiState error
+}
+
 function Show-GuiScanError {
     param([string]$Status, [string]$Detail)
     $window.FindName('ScanProgress').IsIndeterminate = $false
     $window.FindName('BtnStartScan').IsEnabled = $true
-    $window.FindName('ErrorSummaryText').Text = ((Get-Text 'ScanErrorSummary') -f $Status)
-    $window.FindName('ErrorMutationText').Text = (Get-Text 'ScanNoMutation')
-    $window.FindName('ErrorDetailText').Text = $Detail
-    Set-GuiState error
+    Set-GuiError -Summary ((Get-Text 'ScanErrorSummary') -f $Status) -Mutation (Get-Text 'ScanNoMutation') -Detail $Detail
 }
 
 function Complete-ScanPoll {
@@ -769,10 +784,7 @@ $window.FindName('BtnOpenReview').Add_Click({
         $script:ReviewedPendingSnapshot = $null
         $emptyActionKeys = [System.Collections.Generic.List[string]]::new()
         $script:ReviewedActionIdentityKeys = $emptyActionKeys.AsReadOnly()
-        $window.FindName('ErrorSummaryText').Text = (Get-Text 'ReviewErrorSummary')
-        $window.FindName('ErrorMutationText').Text = (Get-Text 'ReviewNoMutation')
-        $window.FindName('ErrorDetailText').Text = $_.Exception.Message
-        Set-GuiState error
+        Set-GuiError -Summary (Get-Text 'ReviewErrorSummary') -Mutation (Get-Text 'ReviewNoMutation') -Detail $_.Exception.Message
     }
 })
 
@@ -805,74 +817,173 @@ $window.FindName('BtnClearAll').Add_Click({
     $window.FindName('PendingList').Items.Refresh()
 })
 
-# ---------- 处理已勾选项目 (v1.5.5: 勾选子集 → 临时清单 → clean -PendingFileArg) ----------
-function Invoke-GuiCheckedExecution {
-    param(
-        $List = $window.FindName('PendingList'),
-        $Hint = $window.FindName('ExecHint'),
-        $Out = $window.FindName('ExecOutput')
-    )
-    $checked = @($list.Items | Where-Object { $_.IsChecked -and $_.CanExecute })
-    if ($checked.Count -eq 0) {
-        $hint.Text = (Get-Text 'ExecEmpty')
-        return
+# ---------- 异步处理已选择项目 (review snapshot → 临时清单 → elevated clean) ----------
+function Remove-GuiExecutionTempFile {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    $leaf = [System.IO.Path]::GetFileName($Path)
+    if ($leaf -cnotmatch '^shushu_pending_[0-9a-f]{32}\.json$') { return }
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     }
-    $hint.Text = ((Get-Text 'ExecStart') -f $checked.Count)
-    $tmpPending = $null
+}
+
+function Clear-GuiExecutionResources {
+    param([switch]$RemoveTemp)
+    Invoke-GuiTimerStop $script:ExecutionTimer
+    if ($RemoveTemp) { Remove-GuiExecutionTempFile -Path $script:ExecutionTempPath }
+    $script:ExecutionProcess = $null
+    $script:ExecutionTimer = $null
+    $script:ExecutionTempPath = $null
+    $script:ExecutionActions = @()
+}
+
+function Resolve-GuiReviewedActions {
+    param($List)
+    if ($null -eq $script:ReviewedPendingSnapshot -or $null -eq $script:ReviewedActionIdentityKeys) {
+        throw '没有有效的 reviewed pending snapshot。请重新运行 scan 并审核。'
+    }
+    $null = Get-GuiPendingSchemaVersion $script:ReviewedPendingSnapshot
+    Assert-GuiPendingPresentationShape -Pending $script:ReviewedPendingSnapshot
+    $validatedKeys = @(Get-GuiValidatedActionIdentityKeys -Pending $script:ReviewedPendingSnapshot)
+    if ($validatedKeys.Count -ne $script:ReviewedActionIdentityKeys.Count) {
+        throw 'reviewed action allowlist 与审核快照不一致。请重新运行 scan 并审核。'
+    }
+    foreach ($key in $validatedKeys) {
+        if (-not $script:ReviewedActionIdentityKeys.Contains($key)) {
+            throw 'reviewed action allowlist 与审核快照不一致。请重新运行 scan 并审核。'
+        }
+    }
+
+    $actionByKey = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
+    foreach ($action in @($script:ReviewedPendingSnapshot.actions)) {
+        $actionByKey.Add((Get-PendingIdentityKey $action), $action)
+    }
+    $selectedRows = @($List.Items | Where-Object { $_.IsChecked })
+    if ($selectedRows.Count -eq 0) { return @() }
+
+    $resolved = @()
+    $seenSelected = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($row in $selectedRows) {
+        if ($null -eq $row._raw) { throw '选择项缺少审核身份。未开始处理。' }
+        $key = Get-PendingIdentityKey $row._raw
+        if (-not $script:ReviewedActionIdentityKeys.Contains($key) -or -not $actionByKey.ContainsKey($key)) {
+            throw '选择项不在 reviewed action allowlist 中。未开始处理。'
+        }
+        if (-not $seenSelected.Add($key)) { throw '选择项包含重复审核身份。未开始处理。' }
+        $resolved += [pscustomobject]@{ _raw = $actionByKey[$key] }
+    }
+    return @($resolved)
+}
+
+function Format-GuiExecutionDetail {
+    param($Rows, [string]$Prefix = '')
+    $lines = @()
+    if ($Prefix) { $lines += $Prefix }
+    foreach ($row in @($Rows)) {
+        $line = '[{0}] {1}' -f $row.State, $row.Name
+        if ($row.Reason) { $line += ': ' + $row.Reason }
+        $lines += $line
+    }
+    return ($lines -join [Environment]::NewLine)
+}
+
+function Complete-ExecutionPoll {
+    $process = $script:ExecutionProcess
+    if ($null -eq $process) { return $false }
     try {
-        # 构造勾选子集临时清单 (完整 payload 结构, 只含勾选条目; suspicious 原样带上)
-        $srcPendingPath = Join-Path $script:Root 'pending_actions.json'
-        $src = $null
-        if (Test-Path $srcPendingPath) {
-            $src = Get-Content $srcPendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        }
-        $payload = New-PendingSubsetPayload -Checked $checked -SourcePending $src
-        if (-not $payload) { throw '无法生成 pending 子集。请重新运行 scan 生成新清单。' }
-        $tmpPending = Join-Path $env:TEMP ("shushu_pending_" + [guid]::NewGuid().ToString('N') + ".json")
-        $json = ConvertTo-GuiPendingJson -InputObject $payload
-        [System.IO.File]::WriteAllText($tmpPending, $json, (New-Object System.Text.UTF8Encoding($true)))
-
-        $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll','-PendingFileArg',"`"$tmpPending`""
-        $proc.WaitForExit()
-        if ($proc.ExitCode -ne 0) {
-            # v1.5.3: 管理员进程异常退出 (UAC 取消会抛异常, 走到 catch; 非 0 = 脚本内致命错误)
-            $msg = (Get-Text 'ExecFailed') -f $proc.ExitCode
-            $hint.Text = $msg
-            $out.Text = $msg
-            return
-        }
-        # v1.5.3: 读回状态机统计 (从勾选子集临时文件, 不信任"进程结束=成功")
-        $sum = Get-CleanResultSummary -Path $tmpPending
-        # v1.5.5: 把子集处理结果同步回主清单, 避免下次加载仍是 pending
-        Merge-PendingStatus $tmpPending
-        $lines = @(
-            (Get-Text 'ExecDone'),
-            '',
-            ('结果汇总 (处理 {0} 项):' -f $checked.Count),
-            "  success: $($sum.success)",
-            "  failed:  $($sum.failed)",
-            "  skipped: $($sum.skipped)",
-            "  manual:  $($sum.manual_required)"
-        )
-        $latest = Get-ChildItem (Join-Path $script:Root 'backups') -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-        if ($latest) { $lines += ''; $lines += "备份目录: backups\$($latest.Name)" }
-        $hint.Text = ((Get-Text 'ExecDoneSum') -f $sum.success, $sum.failed, $sum.skipped)
-        $out.Text = ($lines -join "`r`n")
+        if (-not $process.HasExited) { return $false }
     } catch {
-        $message = "ERR: $($_.Exception.Message)"
-        $hint.Text = $message
-        $out.Text = $message
-    } finally {
-        if ($tmpPending -and (Test-Path -LiteralPath $tmpPending)) {
-            Remove-Item -LiteralPath $tmpPending -Force -ErrorAction SilentlyContinue
+        Clear-GuiExecutionResources -RemoveTemp
+        Set-GuiError -Summary (Get-Text 'ExecUnauthorized') -Mutation (Get-Text 'ExecNotStarted') -Detail $_.Exception.ToString()
+        return $true
+    }
+
+    Invoke-GuiTimerStop $script:ExecutionTimer
+    $exitCode = [int]$process.ExitCode
+    $rows = @()
+    $sum = $null
+    $readError = $null
+    try {
+        $resultItems = @(Get-PendingItems -Path $script:ExecutionTempPath)
+        $rows = @(ConvertTo-GuiExecutionRows $resultItems)
+        $sum = Get-CleanResultSummary -Path $script:ExecutionTempPath
+        Merge-PendingStatus $script:ExecutionTempPath
+    } catch {
+        $readError = $_.Exception.ToString()
+    }
+
+    try {
+        if ($exitCode -eq 0) {
+            $window.FindName('CompletedList').ItemsSource = $rows
+            $window.FindName('CompletedSummaryText').Text = if ($null -eq $readError) {
+                (Get-Text 'ExecDoneSum') -f $sum.success, $sum.failed, $sum.skipped
+            } else {
+                Get-Text 'ExecResultReadFailed'
+            }
+            Set-GuiState completed
+        } else {
+            $summary = (Get-Text 'ExecFailed') -f $exitCode
+            $prefix = if ($readError) { $readError } else { '' }
+            $detail = Format-GuiExecutionDetail -Rows $rows -Prefix $prefix
+            Set-GuiError -Summary $summary -Mutation (Get-Text 'ExecPartialPossible') -Detail $detail
         }
+    } finally {
+        Clear-GuiExecutionResources -RemoveTemp
+    }
+    return $true
+}
+
+function Start-GuiExecution {
+    param($List = $window.FindName('PendingList'))
+    Clear-GuiExecutionResources -RemoveTemp
+    $startedProcess = $false
+    try {
+        $checked = @(Resolve-GuiReviewedActions -List $List)
+        if ($checked.Count -eq 0) {
+            $window.FindName('ReviewBoundaryText').Text = (Get-Text 'ExecEmpty')
+            return $false
+        }
+
+        $payload = New-PendingSubsetPayload -Checked $checked -SourcePending $script:ReviewedPendingSnapshot
+        if (-not $payload) { throw '无法生成 pending 子集。请重新运行 scan 生成新清单。' }
+        $payload.observations = @()
+        $script:ExecutionTempPath = Join-Path $env:TEMP ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($script:ExecutionTempPath, (ConvertTo-GuiPendingJson -InputObject $payload), [System.Text.UTF8Encoding]::new($true))
+        $script:ExecutionActions = @($payload.actions)
+
+        $runningItems = foreach ($action in @($payload.actions)) {
+            $copy = Copy-PendingActionForSubset $action
+            $copy.status = 'running'
+            $copy
+        }
+        $window.FindName('ExecutionList').ItemsSource = @(ConvertTo-GuiExecutionRows $runningItems)
+
+        $script:ExecutionTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:ExecutionTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $script:ExecutionTimer.Add_Tick({ $null = Complete-ExecutionPoll })
+        Set-GuiState executing
+        $script:ExecutionTimer.Start()
+
+        $script:ExecutionProcess = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll','-PendingFileArg',"`"$script:ExecutionTempPath`""
+        if ($null -eq $script:ExecutionProcess) { throw '管理员进程未启动。' }
+        $startedProcess = $true
+        return $true
+    } catch {
+        $detail = $_.Exception.ToString()
+        Clear-GuiExecutionResources -RemoveTemp
+        if ($startedProcess) {
+            Set-GuiError -Summary (Get-Text 'ExecResultReadFailed') -Mutation (Get-Text 'ExecPartialPossible') -Detail $detail
+        } else {
+            Set-GuiError -Summary (Get-Text 'ExecUnauthorized') -Mutation (Get-Text 'ExecNotStarted') -Detail $detail
+        }
+        return $false
     }
 }
 
+$window.FindName('BtnExecute').Add_Click({ Start-GuiExecution })
 $legacyBtnExec = $window.FindName('BtnExec')
-if ($legacyBtnExec) {
-    $legacyBtnExec.Add_Click({ Invoke-GuiCheckedExecution })
-}
+if ($legacyBtnExec) { $legacyBtnExec.Add_Click({ Start-GuiExecution }) }
 
 # ---------- 查看最近结果 ----------
 $legacyBtnResult = $window.FindName('BtnResult')
