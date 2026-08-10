@@ -63,13 +63,30 @@ $script:I18N = @{
     }
 }
 
-function Get-Text($key) { return $script:I18N[$script:Lang][$key] }
+function Get-Text($key) {
+    $languageMap = $script:I18N[$script:Lang]
+    if (-not $languageMap -or -not $languageMap.ContainsKey($key) -or $null -eq $languageMap[$key]) {
+        throw "Missing localized text: $script:Lang/$key"
+    }
+    return $languageMap[$key]
+}
 
 function Update-GuiStateText {
-    $titleKey = 'State_{0}_Title' -f $script:GuiState
-    $subtitleKey = 'State_{0}_Sub' -f $script:GuiState
-    $window.FindName('StateTitle').Text = Get-Text $titleKey
-    $window.FindName('StateSubtitle').Text = Get-Text $subtitleKey
+    param(
+        [string]$StateName = $script:GuiState,
+        $TitleControl = $null,
+        $SubtitleControl = $null,
+        [AllowNull()][string]$TitleText = $null,
+        [AllowNull()][string]$SubtitleText = $null
+    )
+    if ($null -eq $TitleControl) { $TitleControl = $window.FindName('StateTitle') }
+    if ($null -eq $SubtitleControl) { $SubtitleControl = $window.FindName('StateSubtitle') }
+    if ($null -eq $TitleControl) { throw 'GUI control missing: StateTitle' }
+    if ($null -eq $SubtitleControl) { throw 'GUI control missing: StateSubtitle' }
+    if ($null -eq $TitleText) { $TitleText = Get-Text ('State_{0}_Title' -f $StateName) }
+    if ($null -eq $SubtitleText) { $SubtitleText = Get-Text ('State_{0}_Sub' -f $StateName) }
+    $TitleControl.Text = $TitleText
+    $SubtitleControl.Text = $SubtitleText
 }
 
 function Apply-Language {
@@ -121,19 +138,83 @@ function Set-GuiState {
         throw "非法界面状态转换: $script:GuiState -> $Name"
     }
     $definition = Get-GuiStateDefinition $Name
+
+    $panels = [ordered]@{}
     foreach ($panelName in $script:StatePanels) {
-        $window.FindName($panelName).Visibility = if ($panelName -eq $definition.Panel) { 'Visible' } else { 'Collapsed' }
+        $panel = $window.FindName($panelName)
+        if ($null -eq $panel) { throw "GUI control missing: $panelName" }
+        if (-not $panel.PSObject.Properties['Visibility']) { throw "GUI control invalid: $panelName.Visibility" }
+        $panels[$panelName] = $panel
     }
-    $activeStage = if ($definition.ActiveStage -eq 0) { $script:GuiActiveStage } else { $definition.ActiveStage }
+
+    $cards = [ordered]@{}
     for ($stage = 1; $stage -le 4; $stage++) {
-        $card = $window.FindName("StageCard$stage")
-        $card.Opacity = if ($stage -le $activeStage) { 1.0 } else { 0.46 }
-        $card.BorderBrush = if ($stage -eq $activeStage) { '#FFD21F' } else { '#D8CBAA' }
-        $card.BorderThickness = if ($stage -eq $activeStage) { 3 } else { 1 }
+        $cardName = "StageCard$stage"
+        $card = $window.FindName($cardName)
+        if ($null -eq $card) { throw "GUI control missing: $cardName" }
+        foreach ($propertyName in @('Opacity','BorderBrush','BorderThickness')) {
+            if (-not $card.PSObject.Properties[$propertyName]) { throw "GUI control invalid: $cardName.$propertyName" }
+        }
+        $cards[$cardName] = $card
     }
-    $script:GuiState = $Name
-    $script:GuiActiveStage = $activeStage
-    Update-GuiStateText
+
+    $titleControl = $window.FindName('StateTitle')
+    $subtitleControl = $window.FindName('StateSubtitle')
+    if ($null -eq $titleControl) { throw 'GUI control missing: StateTitle' }
+    if ($null -eq $subtitleControl) { throw 'GUI control missing: StateSubtitle' }
+    if (-not $titleControl.PSObject.Properties['Text']) { throw 'GUI control invalid: StateTitle.Text' }
+    if (-not $subtitleControl.PSObject.Properties['Text']) { throw 'GUI control invalid: StateSubtitle.Text' }
+
+    $titleText = Get-Text ('State_{0}_Title' -f $Name)
+    $subtitleText = Get-Text ('State_{0}_Sub' -f $Name)
+    $activeStage = if ($definition.ActiveStage -eq 0) { $script:GuiActiveStage } else { $definition.ActiveStage }
+
+    $previousState = $script:GuiState
+    $previousActiveStage = $script:GuiActiveStage
+    $previousPanels = [ordered]@{}
+    foreach ($panelName in $script:StatePanels) { $previousPanels[$panelName] = $panels[$panelName].Visibility }
+    $previousCards = [ordered]@{}
+    for ($stage = 1; $stage -le 4; $stage++) {
+        $cardName = "StageCard$stage"
+        $previousCards[$cardName] = [pscustomobject]@{
+            Opacity = $cards[$cardName].Opacity
+            BorderBrush = $cards[$cardName].BorderBrush
+            BorderThickness = $cards[$cardName].BorderThickness
+        }
+    }
+    $previousTitle = $titleControl.Text
+    $previousSubtitle = $subtitleControl.Text
+
+    try {
+        foreach ($panelName in $script:StatePanels) {
+            $panels[$panelName].Visibility = if ($panelName -eq $definition.Panel) { 'Visible' } else { 'Collapsed' }
+        }
+        for ($stage = 1; $stage -le 4; $stage++) {
+            $card = $cards["StageCard$stage"]
+            $card.Opacity = if ($stage -le $activeStage) { 1.0 } else { 0.46 }
+            $card.BorderBrush = if ($stage -eq $activeStage) { '#FFD21F' } else { '#D8CBAA' }
+            $card.BorderThickness = if ($stage -eq $activeStage) { 3 } else { 1 }
+        }
+        Update-GuiStateText -StateName $Name -TitleControl $titleControl -SubtitleControl $subtitleControl -TitleText $titleText -SubtitleText $subtitleText
+        $script:GuiState = $Name
+        $script:GuiActiveStage = $activeStage
+    } catch {
+        $originalError = $_
+        foreach ($panelName in $script:StatePanels) {
+            try { $panels[$panelName].Visibility = $previousPanels[$panelName] } catch {}
+        }
+        for ($stage = 1; $stage -le 4; $stage++) {
+            $cardName = "StageCard$stage"
+            try { $cards[$cardName].Opacity = $previousCards[$cardName].Opacity } catch {}
+            try { $cards[$cardName].BorderBrush = $previousCards[$cardName].BorderBrush } catch {}
+            try { $cards[$cardName].BorderThickness = $previousCards[$cardName].BorderThickness } catch {}
+        }
+        try { $titleControl.Text = $previousTitle } catch {}
+        try { $subtitleControl.Text = $previousSubtitle } catch {}
+        $script:GuiState = $previousState
+        $script:GuiActiveStage = $previousActiveStage
+        throw $originalError
+    }
 }
 
 function Get-PendingItems {

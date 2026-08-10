@@ -14,6 +14,69 @@ Describe 'GUI 壳 (无窗口)' {
             $t | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.Stopped = $true }
             return $t
         }
+
+        function Get-GuiRenderSnapshot {
+            $panels = [ordered]@{}
+            foreach ($name in $script:StatePanels) {
+                $panels[$name] = $script:Win.FindName($name).Visibility.ToString()
+            }
+            $cards = [ordered]@{}
+            for ($stage = 1; $stage -le 4; $stage++) {
+                $card = $script:Win.FindName("StageCard$stage")
+                $cards["StageCard$stage"] = [ordered]@{
+                    Opacity = $card.Opacity
+                    BorderBrush = $card.BorderBrush.ToString()
+                    BorderThickness = @($card.BorderThickness.Left, $card.BorderThickness.Top, $card.BorderThickness.Right, $card.BorderThickness.Bottom)
+                }
+            }
+            return [ordered]@{
+                GuiState = $script:GuiState
+                GuiActiveStage = $script:GuiActiveStage
+                StateTitle = $script:Win.FindName('StateTitle').Text
+                StateSubtitle = $script:Win.FindName('StateSubtitle').Text
+                Panels = $panels
+                Cards = $cards
+            }
+        }
+
+        function New-GuiWindowProxy {
+            param($RealWindow, [string]$MissingName = '', [string]$ReplacementName = '', $Replacement)
+            $proxy = [pscustomobject]@{
+                RealWindow = $RealWindow
+                MissingName = $MissingName
+                ReplacementName = $ReplacementName
+                Replacement = $Replacement
+            }
+            $proxy | Add-Member -MemberType ScriptMethod -Name FindName -Value {
+                param($name)
+                if ($name -eq $this.MissingName) { return $null }
+                if ($name -eq $this.ReplacementName) { return $this.Replacement }
+                return $this.RealWindow.FindName($name)
+            }
+            return $proxy
+        }
+
+        function New-OneShotFailingControl {
+            param($RealControl, [Parameter(Mandatory=$true)][string]$PropertyName)
+            $values = @{}
+            foreach ($name in @('Visibility','Opacity','BorderBrush','BorderThickness','Text')) {
+                if ($RealControl.PSObject.Properties[$name]) { $values[$name] = $RealControl.$name }
+            }
+            $control = [pscustomobject]@{ Values=$values; FailProperty=$PropertyName; HasFailed=$false }
+            foreach ($name in @($values.Keys)) {
+                $property = $name
+                $getter = { return $this.Values[$property] }.GetNewClosure()
+                $setter = {
+                    if ($property -eq $this.FailProperty -and -not $this.HasFailed) {
+                        $this.HasFailed = $true
+                        throw "Injected assignment failure: $property"
+                    }
+                    $this.Values[$property] = $args[0]
+                }.GetNewClosure()
+                $control | Add-Member -MemberType ScriptProperty -Name $name -Value $getter -SecondValue $setter
+            }
+            return $control
+        }
     }
 
     It 'loads the single-page fantasy comic shell' {
@@ -59,6 +122,127 @@ Describe 'GUI 壳 (无窗口)' {
         Set-GuiState -Name 'idle' -Force
         { Set-GuiState -Name 'executing' } | Should -Throw '*非法界面状态转换*'
         $script:GuiState | Should -Be 'idle'
+    }
+
+    It 'preflights missing <ControlName> without mutating UI or model' -TestCases @(
+        @{ ControlName='IdlePanel' }, @{ ControlName='ScanningPanel' }, @{ ControlName='ResultsPanel' },
+        @{ ControlName='ReviewPanel' }, @{ ControlName='ExecutingPanel' }, @{ ControlName='CompletedPanel' },
+        @{ ControlName='ErrorPanel' }, @{ ControlName='StageCard1' }, @{ ControlName='StageCard2' },
+        @{ ControlName='StageCard3' }, @{ ControlName='StageCard4' }, @{ ControlName='StateTitle' },
+        @{ ControlName='StateSubtitle' }
+    ) {
+        param($ControlName)
+        $script:Lang = 'zh'
+        Set-GuiState -Name 'idle' -Force
+        $before = Get-GuiRenderSnapshot | ConvertTo-Json -Compress -Depth 8
+        $realWindow = $window
+        $window = New-GuiWindowProxy -RealWindow $realWindow -MissingName $ControlName
+        try {
+            { Set-GuiState -Name 'review' -Force } | Should -Throw '*GUI control missing*'
+        } finally {
+            $window = $realWindow
+        }
+        (Get-GuiRenderSnapshot | ConvertTo-Json -Compress -Depth 8) | Should -Be $before
+    }
+
+    It 'rolls back UI and model when assigning <ControlName>.<PropertyName> fails' -TestCases @(
+        @{ ControlName='ReviewPanel'; PropertyName='Visibility' }
+        @{ ControlName='StageCard3'; PropertyName='BorderThickness' }
+        @{ ControlName='StateTitle'; PropertyName='Text' }
+        @{ ControlName='StateSubtitle'; PropertyName='Text' }
+    ) {
+        param($ControlName, $PropertyName)
+        $script:Lang = 'zh'
+        Set-GuiState -Name 'idle' -Force
+        $before = Get-GuiRenderSnapshot | ConvertTo-Json -Compress -Depth 8
+        $realWindow = $window
+        $failingControl = New-OneShotFailingControl -RealControl $realWindow.FindName($ControlName) -PropertyName $PropertyName
+        $window = New-GuiWindowProxy -RealWindow $realWindow -ReplacementName $ControlName -Replacement $failingControl
+        try {
+            { Set-GuiState -Name 'review' -Force } | Should -Throw '*Injected assignment failure*'
+        } finally {
+            $window = $realWindow
+        }
+        (Get-GuiRenderSnapshot | ConvertTo-Json -Compress -Depth 8) | Should -Be $before
+    }
+
+    It 'fails explicitly when localized state text is missing' {
+        $savedLang = $script:Lang
+        $saved = $script:I18N['en']['State_review_Title']
+        $script:Lang = 'en'
+        $script:I18N['en'].Remove('State_review_Title')
+        try {
+            { Get-Text 'State_review_Title' } | Should -Throw '*Missing localized text*'
+        } finally {
+            $script:I18N['en']['State_review_Title'] = $saved
+            $script:Lang = $savedLang
+        }
+    }
+
+    It 'preflights missing localized <Key> without mutating UI or model' -TestCases @(
+        @{ Key='State_review_Title' }
+        @{ Key='State_review_Sub' }
+    ) {
+        param($Key)
+        $script:Lang = 'zh'
+        Set-GuiState -Name 'idle' -Force
+        $before = Get-GuiRenderSnapshot | ConvertTo-Json -Compress -Depth 8
+        $saved = $script:I18N['zh'][$Key]
+        $script:I18N['zh'].Remove($Key)
+        try {
+            { Set-GuiState -Name 'review' -Force } | Should -Throw '*Missing localized text*'
+        } finally {
+            $script:I18N['zh'][$Key] = $saved
+        }
+        (Get-GuiRenderSnapshot | ConvertTo-Json -Compress -Depth 8) | Should -Be $before
+    }
+
+    It 'renders <Name> truthfully in <Lang>' -TestCases @(
+        @{ Name='idle'; Lang='zh'; Panel='IdlePanel'; Stage=1; Title='鼠鼠开始幻想'; Subtitle='先做只读扫描，不会修改系统。' }
+        @{ Name='scanning'; Lang='zh'; Panel='ScanningPanel'; Stage=2; Title='正在看清现实'; Subtitle='只展示真实阶段，不伪造完成百分比。' }
+        @{ Name='results'; Lang='zh'; Panel='ResultsPanel'; Stage=2; Title='扫描结论'; Subtitle='可处理项与观察项分开显示，目前尚未修改系统。' }
+        @{ Name='review'; Lang='zh'; Panel='ReviewPanel'; Stage=3; Title='确认处理边界'; Subtitle='只有安全、已测试且窄匹配命中的项目可以选择。' }
+        @{ Name='executing'; Lang='zh'; Panel='ExecutingPanel'; Stage=3; Title='鼠鼠正在谨慎整理'; Subtitle='每项都会重新验证、备份并记录结果。' }
+        @{ Name='completed'; Lang='zh'; Panel='CompletedPanel'; Stage=4; Title='幻想落地'; Subtitle='结果按成功、失败和跳过逐项展示。' }
+        @{ Name='error'; Lang='zh'; Panel='ErrorPanel'; Stage=1; Title='鼠鼠的幻想被打断了'; Subtitle='查看真实原因后可以安全重试。' }
+        @{ Name='idle'; Lang='en'; Panel='IdlePanel'; Stage=1; Title='The fantasy begins'; Subtitle='Start with a read-only scan. No system settings will change.' }
+        @{ Name='scanning'; Lang='en'; Panel='ScanningPanel'; Stage=2; Title='Looking at reality'; Subtitle='Showing real scan phases without a fabricated percentage.' }
+        @{ Name='results'; Lang='en'; Panel='ResultsPanel'; Stage=2; Title='Scan result'; Subtitle='Safe actions and observations are separated. Nothing has changed yet.' }
+        @{ Name='review'; Lang='en'; Panel='ReviewPanel'; Stage=3; Title='Review the safety boundary'; Subtitle='Only tested items produced by narrow matches can be selected.' }
+        @{ Name='executing'; Lang='en'; Panel='ExecutingPanel'; Stage=3; Title='Cleaning carefully'; Subtitle='Every item is revalidated, backed up, and recorded.' }
+        @{ Name='completed'; Lang='en'; Panel='CompletedPanel'; Stage=4; Title='Fantasy delivered'; Subtitle='Success, failure, and skipped results are shown item by item.' }
+        @{ Name='error'; Lang='en'; Panel='ErrorPanel'; Stage=1; Title='The fantasy was interrupted'; Subtitle='Read the real cause, then retry safely.' }
+    ) {
+        param($Name, $Lang, $Panel, $Stage, $Title, $Subtitle)
+        $script:Lang = $Lang
+        Set-GuiState -Name 'idle' -Force
+        Set-GuiState -Name $Name -Force
+
+        $visiblePanels = @($script:StatePanels | Where-Object { $script:Win.FindName($_).Visibility.ToString() -eq 'Visible' })
+        $visiblePanels.Count | Should -Be 1
+        $visiblePanels[0] | Should -Be $Panel
+        $script:GuiActiveStage | Should -Be $Stage
+        for ($index = 1; $index -le 4; $index++) {
+            $card = $script:Win.FindName("StageCard$index")
+            $card.Opacity | Should -Be $(if ($index -le $Stage) { 1.0 } else { 0.46 })
+            $card.BorderThickness.Left | Should -Be $(if ($index -eq $Stage) { 3 } else { 1 })
+            $card.BorderBrush.ToString() | Should -Be $(if ($index -eq $Stage) { '#FFFFD21F' } else { '#FFD8CBAA' })
+        }
+        $script:Win.FindName('StateTitle').Text | Should -Be $Title
+        $script:Win.FindName('StateSubtitle').Text | Should -Be $Subtitle
+    }
+
+    It 'preserves stage <Stage> when entering error from <Previous>' -TestCases @(
+        @{ Previous='review'; Stage=3 }
+        @{ Previous='completed'; Stage=4 }
+    ) {
+        param($Previous, $Stage)
+        $script:Lang = 'zh'
+        Set-GuiState -Name $Previous -Force
+        Set-GuiState -Name 'error'
+        $script:GuiActiveStage | Should -Be $Stage
+        $script:Win.FindName("StageCard$Stage").BorderThickness.Left | Should -Be 3
+        $script:Win.FindName('ErrorPanel').Visibility.ToString() | Should -Be 'Visible'
     }
 
     It '扫描轮询: Completed 恢复按钮并置进度 100' {
