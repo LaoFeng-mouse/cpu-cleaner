@@ -199,14 +199,10 @@ function Read-BackupManifestEntries($ManifestFile) {
     if (-not [System.IO.File]::Exists($ManifestFile)) { return @() }
     $raw = Get-Content -LiteralPath $ManifestFile -Raw -Encoding UTF8 -ErrorAction Stop
     if ([string]::IsNullOrWhiteSpace($raw)) { throw (New-RestoreCandidateRejectedException 'manifest 文件为空') }
-    try {
-        Assert-JsonPropertyNamesUnique $raw
-        $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
-        $entries = @($parsed | ForEach-Object { $_ })
-    } catch {
-        if (Test-RestoreResolutionExceptionKind -Exception $_.Exception -Kind 'CandidateRejected') { throw }
-        throw (New-RestoreCandidateRejectedException -Message ('manifest JSON 损坏: ' + $_.Exception.Message) -InnerException $_.Exception)
-    }
+    try { $parsed = $raw | ConvertFrom-Json -ErrorAction Stop }
+    catch [System.ArgumentException] { throw (New-RestoreCandidateRejectedException -Message ('manifest JSON 语法无效: ' + $_.Exception.Message) -InnerException $_.Exception) }
+    Assert-JsonPropertyNamesUnique $raw
+    $entries = @($parsed | ForEach-Object { $_ })
     if ($entries.Count -eq 0) { return @() }
     foreach ($entry in $entries) {
         if ($null -eq $entry -or $entry.entry_id -isnot [string] -or [string]::IsNullOrWhiteSpace($entry.entry_id)) {

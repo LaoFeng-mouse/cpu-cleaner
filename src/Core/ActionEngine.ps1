@@ -344,7 +344,7 @@ function Read-JsonValueAndValidatePropertyNames([string]$Json, [ref]$Index, [int
         while ($true) {
             Skip-JsonWhitespace $Json $Index
             $propertyName = Read-JsonStringToken $Json $Index
-            if (-not $propertyNames.Add($propertyName)) { throw "JSON 对象包含重复属性: $propertyName" }
+            if (-not $propertyNames.Add($propertyName)) { throw (New-RestoreCandidateRejectedException "JSON 对象包含重复属性: $propertyName") }
             Skip-JsonWhitespace $Json $Index
             if ($Index.Value -ge $Json.Length -or $Json[$Index.Value] -ne ':') { throw 'JSON 属性缺少冒号' }
             $Index.Value++
@@ -1111,7 +1111,8 @@ function Assert-BackupArtifactIdentity {
         }
         'task' {
             $normalizedTarget = Normalize-TaskPathIdentity $TargetIdentity
-            try { [xml]$xmlDoc = $content } catch { throw (New-RestoreCandidateRejectedException -Message ('任务备份格式无效: ' + $_.Exception.Message) -InnerException $_.Exception) }
+            $xmlDoc = New-Object System.Xml.XmlDocument
+            try { $xmlDoc.LoadXml($content) } catch [System.Xml.XmlException] { throw (New-RestoreCandidateRejectedException -Message ('任务备份格式无效: ' + $_.Exception.Message) -InnerException $_.Exception) }
             if ($null -eq $xmlDoc.DocumentElement -or $xmlDoc.DocumentElement.LocalName -cne 'Task') { throw (New-RestoreCandidateRejectedException '任务备份格式无效') }
             $uriNode = $xmlDoc.SelectSingleNode("//*[local-name()='RegistrationInfo']/*[local-name()='URI']")
             if ($null -eq $uriNode -or
@@ -1124,14 +1125,10 @@ function Assert-BackupArtifactIdentity {
             if ($Key -isnot [string] -or [string]::IsNullOrWhiteSpace($Key) -or $Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name)) {
                 throw (New-RestoreCandidateRejectedException '自启动目标身份无效')
             }
-            try {
-                Assert-JsonPropertyNamesUnique $content
-                $info = $content | ConvertFrom-Json -ErrorAction Stop
-                Assert-AutostartArtifactSchema $info
-            } catch {
-                if (Test-RestoreResolutionExceptionKind -Exception $_.Exception -Kind 'CandidateRejected') { throw }
-                throw (New-RestoreCandidateRejectedException -Message ('自启动备份格式无效: ' + $_.Exception.Message) -InnerException $_.Exception)
-            }
+            try { $info = $content | ConvertFrom-Json -ErrorAction Stop }
+            catch [System.ArgumentException] { throw (New-RestoreCandidateRejectedException -Message ('自启动备份 JSON 语法无效: ' + $_.Exception.Message) -InnerException $_.Exception) }
+            Assert-JsonPropertyNamesUnique $content
+            Assert-AutostartArtifactSchema $info
             if (-not [string]::Equals($info.key, $Key, [System.StringComparison]::OrdinalIgnoreCase) -or
                 -not [string]::Equals($info.name, $Name, [System.StringComparison]::OrdinalIgnoreCase)) {
                 throw (New-RestoreCandidateRejectedException '自启动备份目标身份不匹配')
@@ -1175,7 +1172,8 @@ function Assert-AutostartArtifactSchema($Info) {
 
 function Get-TaskDefinitionFingerprint($Xml) {
     if ($Xml -isnot [string] -or [string]::IsNullOrWhiteSpace($Xml)) { throw (New-RestoreCandidateRejectedException '任务 XML 为空') }
-    try { [xml]$doc = $Xml } catch { throw (New-RestoreCandidateRejectedException -Message '任务 XML 无效' -InnerException $_.Exception) }
+    $doc = New-Object System.Xml.XmlDocument
+    try { $doc.LoadXml($Xml) } catch [System.Xml.XmlException] { throw (New-RestoreCandidateRejectedException -Message '任务 XML 无效' -InnerException $_.Exception) }
     $uri = $doc.SelectSingleNode("//*[local-name()='RegistrationInfo']/*[local-name()='URI']")
     if ($null -eq $uri -or $null -eq $doc.DocumentElement -or $doc.DocumentElement.LocalName -cne 'Task') { throw (New-RestoreCandidateRejectedException '任务 XML 缺少关键定义') }
     $identity = (Normalize-TaskPathIdentity $uri.InnerText) + '|' + $doc.OuterXml

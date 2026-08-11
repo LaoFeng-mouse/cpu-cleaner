@@ -651,4 +651,47 @@ Invoke-Restore
 
         $result.ExitCode | Should -Be 1 -Because $result.Output
     }
+
+    It 'latest 入口 manifest 重复字段 helper 未知故障返回普通失败码而不是 3' {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        $root = Join-Path $TestDrive 'manifest-helper-error-root'
+        $candidate = Join-Path $root '20260811_120000'
+        [void][System.IO.Directory]::CreateDirectory($candidate)
+        [System.IO.File]::WriteAllText(
+            (Join-Path $candidate 'manifest.json'),
+            '[{"entry_id":"good","type":"process","name":"noop","path":""}]',
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $rootLiteral = $root.Replace("'", "''")
+        $overrides = "function Get-SecureBackupRoot { return '$rootLiteral' }; function Assert-TrustedBackupPackagePath { return `$BackupDir }; function Assert-TrustedBackupPathAcl {}; function Assert-JsonPropertyNamesUnique { throw [System.InvalidOperationException]::new('manifest helper crashed') }"
+
+        $result = Invoke-LatestRestoreEntryCase -ProjectRoot $projectRoot -CaseRoot $TestDrive -Overrides $overrides
+
+        $result.ExitCode | Should -Be 1 -Because $result.Output
+    }
+
+    It 'latest 入口真实重复字段新包回退旧可信包并返回 0' {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        $root = Join-Path $TestDrive 'real-damaged-fallback-root'
+        $newest = Join-Path $root '20260811_130000'
+        $trusted = Join-Path $root '20260811_120000'
+        [void][System.IO.Directory]::CreateDirectory($newest)
+        [void][System.IO.Directory]::CreateDirectory($trusted)
+        [System.IO.File]::WriteAllText(
+            (Join-Path $newest 'manifest.json'),
+            '[{"entry_id":"bad","entry_id":"duplicate","type":"process","name":"bad","path":""}]',
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        [System.IO.File]::WriteAllText(
+            (Join-Path $trusted 'manifest.json'),
+            '[{"entry_id":"good","type":"process","name":"noop","path":""}]',
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $rootLiteral = $root.Replace("'", "''")
+        $overrides = "function Get-SecureBackupRoot { return '$rootLiteral' }; function Assert-TrustedBackupPackagePath { return `$BackupDir }; function Assert-TrustedBackupPathAcl {}"
+
+        $result = Invoke-LatestRestoreEntryCase -ProjectRoot $projectRoot -CaseRoot $TestDrive -Overrides $overrides
+
+        $result.ExitCode | Should -Be 0 -Because $result.Output
+    }
 }
