@@ -44,7 +44,9 @@ function Test-TrustedBackupAclDescriptor($Descriptor, [bool]$RequireProtected = 
 
 function Assert-TrustedBackupPathAcl($Path, [bool]$RequireProtected = $true, [bool]$ParentOnly = $false) {
     $descriptor = Get-BackupAclDescriptor $Path
-    if (-not (Test-TrustedBackupAclDescriptor -Descriptor $descriptor -RequireProtected $RequireProtected -ParentOnly $ParentOnly)) { throw "备份路径 owner/DACL 不可信: $Path" }
+    if (-not (Test-TrustedBackupAclDescriptor -Descriptor $descriptor -RequireProtected $RequireProtected -ParentOnly $ParentOnly)) {
+        throw (New-RestoreCandidateRejectedException "备份路径 owner/DACL 不可信: $Path")
+    }
 }
 
 function New-ProtectedBackupSecurity([bool]$Directory = $true) {
@@ -80,19 +82,19 @@ function Protect-BackupPathIfSecure($Path, $BackupDir) {
 }
 
 function Assert-TrustedBackupPackagePath($BackupDir) {
-    if ($BackupDir -isnot [string] -or [string]::IsNullOrWhiteSpace($BackupDir)) { throw '备份包路径无效' }
+    if ($BackupDir -isnot [string] -or [string]::IsNullOrWhiteSpace($BackupDir)) { throw (New-RestoreCandidateRejectedException '备份包路径无效') }
     $secureRoot = [System.IO.Path]::GetFullPath((Get-SecureBackupRoot)).TrimEnd('\')
     $package = [System.IO.Path]::GetFullPath($BackupDir).TrimEnd('\')
     $prefix = $secureRoot + '\'
-    if (-not $package.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) -or $package.Substring($prefix.Length) -match '[\\/]') { throw '备份包不在受信任的安全备份根直属目录内' }
+    if (-not $package.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) -or $package.Substring($prefix.Length) -match '[\\/]') {
+        throw (New-RestoreCandidateRejectedException '备份包不在受信任的安全备份根直属目录内')
+    }
     $appRoot = Split-Path $secureRoot -Parent
     $programData = Split-Path $appRoot -Parent
-    try {
-        Assert-TrustedBackupPathAcl -Path $programData -RequireProtected $false -ParentOnly $true
-        Assert-TrustedBackupPathAcl -Path $appRoot -RequireProtected $true
-        Assert-TrustedBackupPathAcl -Path $secureRoot -RequireProtected $true
-        Assert-TrustedBackupPathAcl -Path $package -RequireProtected $true
-    } catch { throw ('备份包 ACL 信任验证失败: ' + $_.Exception.Message) }
+    Assert-TrustedBackupPathAcl -Path $programData -RequireProtected $false -ParentOnly $true
+    Assert-TrustedBackupPathAcl -Path $appRoot -RequireProtected $true
+    Assert-TrustedBackupPathAcl -Path $secureRoot -RequireProtected $true
+    Assert-TrustedBackupPathAcl -Path $package -RequireProtected $true
     return $package
 }
 
@@ -157,11 +159,11 @@ function Get-BytesSha256Hex([byte[]]$Bytes) {
 }
 
 function Open-LockedBackupArtifact($Path) {
-    if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path)) { throw '备份文件路径无效' }
+    if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path)) { throw (New-RestoreCandidateRejectedException '备份文件路径无效') }
     $stream = $null
     try {
         $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-        if ($stream.Length -le 0 -or $stream.Length -gt 10MB) { throw '备份文件为空或过大' }
+        if ($stream.Length -le 0 -or $stream.Length -gt 10MB) { throw (New-RestoreCandidateRejectedException '备份文件为空或过大') }
         $bytes = New-Object byte[] ([int]$stream.Length)
         $offset = 0
         while ($offset -lt $bytes.Length) {
@@ -177,7 +179,11 @@ function Open-LockedBackupArtifact($Path) {
             $encoding = New-Object System.Text.UnicodeEncoding($false, $true, $true)
             $start = 2
         }
-        $text = $encoding.GetString($bytes, $start, $bytes.Length - $start)
+        try {
+            $text = $encoding.GetString($bytes, $start, $bytes.Length - $start)
+        } catch [System.Text.DecoderFallbackException] {
+            throw (New-RestoreCandidateRejectedException -Message '备份文件文本编码无效' -InnerException $_.Exception)
+        }
         return [pscustomobject]@{ Path=$Path; Stream=$stream; Bytes=$bytes; Text=$text; Sha256=(Get-BytesSha256Hex $bytes) }
     } catch {
         if ($null -ne $stream) { $stream.Dispose() }
@@ -192,16 +198,19 @@ function Close-BackupArtifact($Artifact) {
 function Read-BackupManifestEntries($ManifestFile) {
     if (-not [System.IO.File]::Exists($ManifestFile)) { return @() }
     $raw = Get-Content -LiteralPath $ManifestFile -Raw -Encoding UTF8 -ErrorAction Stop
-    if ([string]::IsNullOrWhiteSpace($raw)) { throw 'manifest 文件为空' }
+    if ([string]::IsNullOrWhiteSpace($raw)) { throw (New-RestoreCandidateRejectedException 'manifest 文件为空') }
     try {
         Assert-JsonPropertyNamesUnique $raw
         $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
         $entries = @($parsed | ForEach-Object { $_ })
-    } catch { throw ('manifest JSON 损坏: ' + $_.Exception.Message) }
+    } catch {
+        if (Test-RestoreResolutionExceptionKind -Exception $_.Exception -Kind 'CandidateRejected') { throw }
+        throw (New-RestoreCandidateRejectedException -Message ('manifest JSON 损坏: ' + $_.Exception.Message) -InnerException $_.Exception)
+    }
     if ($entries.Count -eq 0) { return @() }
     foreach ($entry in $entries) {
         if ($null -eq $entry -or $entry.entry_id -isnot [string] -or [string]::IsNullOrWhiteSpace($entry.entry_id)) {
-            throw 'manifest 条目缺少 entry_id'
+            throw (New-RestoreCandidateRejectedException 'manifest 条目缺少 entry_id')
         }
     }
     return $entries

@@ -1080,10 +1080,10 @@ function Test-ServiceBackupInfo($Info) {
 }
 
 function Normalize-TaskPathIdentity($TaskPath) {
-    if ($TaskPath -isnot [string] -or [string]::IsNullOrWhiteSpace($TaskPath)) { throw '任务目标身份无效' }
+    if ($TaskPath -isnot [string] -or [string]::IsNullOrWhiteSpace($TaskPath)) { throw (New-RestoreCandidateRejectedException '任务目标身份无效') }
     $normalized = $TaskPath.Trim() -replace '/','\' -replace '\\+','\'
     if (-not $normalized.StartsWith('\')) { $normalized = '\' + $normalized }
-    if ($normalized.Length -le 1 -or $normalized.EndsWith('\') -or $normalized -match '[\r\n]') { throw '任务目标身份无效' }
+    if ($normalized.Length -le 1 -or $normalized.EndsWith('\') -or $normalized -match '[\r\n]') { throw (New-RestoreCandidateRejectedException '任务目标身份无效') }
     return $normalized
 }
 
@@ -1101,45 +1101,48 @@ function Assert-BackupArtifactIdentity {
             if ($TargetIdentity -isnot [string] -or $TargetIdentity -cnotmatch '^[A-Za-z0-9_.]+$' -or
                 $content -notmatch '^(Windows Registry Editor Version 5\.00|REGEDIT4)(\r?\n)' -or
                 $content -notmatch '(?m)^\[HKEY_[A-Z_]+\\[^\]]+\]\s*$') {
-                throw '服务备份格式或目标身份无效'
+                throw (New-RestoreCandidateRejectedException '服务备份格式或目标身份无效')
             }
             $escapedName = [regex]::Escape($TargetIdentity)
             if ($content -notmatch "(?mi)^\[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\$escapedName\]\s*$") {
-                throw '服务备份目标身份不匹配'
+                throw (New-RestoreCandidateRejectedException '服务备份目标身份不匹配')
             }
             return [pscustomobject]@{ Type='service'; Info=$null; Xml=$null }
         }
         'task' {
             $normalizedTarget = Normalize-TaskPathIdentity $TargetIdentity
-            try { [xml]$xmlDoc = $content } catch { throw ('任务备份格式无效: ' + $_.Exception.Message) }
-            if ($null -eq $xmlDoc.DocumentElement -or $xmlDoc.DocumentElement.LocalName -cne 'Task') { throw '任务备份格式无效' }
+            try { [xml]$xmlDoc = $content } catch { throw (New-RestoreCandidateRejectedException -Message ('任务备份格式无效: ' + $_.Exception.Message) -InnerException $_.Exception) }
+            if ($null -eq $xmlDoc.DocumentElement -or $xmlDoc.DocumentElement.LocalName -cne 'Task') { throw (New-RestoreCandidateRejectedException '任务备份格式无效') }
             $uriNode = $xmlDoc.SelectSingleNode("//*[local-name()='RegistrationInfo']/*[local-name()='URI']")
             if ($null -eq $uriNode -or
                 -not [string]::Equals((Normalize-TaskPathIdentity $uriNode.InnerText), $normalizedTarget, [System.StringComparison]::OrdinalIgnoreCase)) {
-                throw '任务备份目标身份不匹配'
+                throw (New-RestoreCandidateRejectedException '任务备份目标身份不匹配')
             }
             return [pscustomobject]@{ Type='task'; Info=$null; Xml=$xmlDoc.OuterXml; TaskFingerprint=(Get-TaskDefinitionFingerprint $xmlDoc.OuterXml) }
         }
         'autostart' {
             if ($Key -isnot [string] -or [string]::IsNullOrWhiteSpace($Key) -or $Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name)) {
-                throw '自启动目标身份无效'
+                throw (New-RestoreCandidateRejectedException '自启动目标身份无效')
             }
             try {
                 Assert-JsonPropertyNamesUnique $content
                 $info = $content | ConvertFrom-Json -ErrorAction Stop
                 Assert-AutostartArtifactSchema $info
-            } catch { throw ('自启动备份格式无效: ' + $_.Exception.Message) }
+            } catch {
+                if (Test-RestoreResolutionExceptionKind -Exception $_.Exception -Kind 'CandidateRejected') { throw }
+                throw (New-RestoreCandidateRejectedException -Message ('自启动备份格式无效: ' + $_.Exception.Message) -InnerException $_.Exception)
+            }
             if (-not [string]::Equals($info.key, $Key, [System.StringComparison]::OrdinalIgnoreCase) -or
                 -not [string]::Equals($info.name, $Name, [System.StringComparison]::OrdinalIgnoreCase)) {
-                throw '自启动备份目标身份不匹配'
+                throw (New-RestoreCandidateRejectedException '自启动备份目标身份不匹配')
             }
             if ($null -ne $ExpectedValue -and
                 ($info.value -isnot [string] -or -not [string]::Equals($info.value, $ExpectedValue, [System.StringComparison]::OrdinalIgnoreCase))) {
-                throw '自启动备份 Value 与目标不匹配'
+                throw (New-RestoreCandidateRejectedException '自启动备份 Value 与目标不匹配')
             }
             return [pscustomobject]@{ Type='autostart'; Info=$info; Xml=$null }
         }
-        default { throw '备份 artifact 类型不受支持' }
+        default { throw (New-RestoreCandidateRejectedException '备份 artifact 类型不受支持') }
     }
     } finally {
         if ($ownedArtifact) { Close-BackupArtifact $Artifact }
@@ -1152,29 +1155,29 @@ function Test-StrictInteger($Value) {
 }
 
 function Assert-AutostartArtifactSchema($Info) {
-    if ($null -eq $Info) { throw '自启动备份对象为空' }
+    if ($null -eq $Info) { throw (New-RestoreCandidateRejectedException '自启动备份对象为空') }
     $allowed = @('key','name','value_type','value')
-    foreach ($property in $Info.PSObject.Properties) { if ($property.Name -cnotin $allowed) { throw '自启动备份包含未知字段' } }
+    foreach ($property in $Info.PSObject.Properties) { if ($property.Name -cnotin $allowed) { throw (New-RestoreCandidateRejectedException '自启动备份包含未知字段') } }
     foreach ($field in @('key','name','value_type')) {
         if ($Info.PSObject.Properties.Name -cnotcontains $field -or $Info.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($Info.$field)) {
-            throw "自启动备份字段 $field 无效"
+            throw (New-RestoreCandidateRejectedException "自启动备份字段 $field 无效")
         }
     }
-    if ($Info.PSObject.Properties.Name -cnotcontains 'value') { throw '自启动备份缺少 value' }
-    if ($Info.value_type -cnotin @('String','ExpandString','DWord','QWord','Binary','MultiString')) { throw '自启动备份 value_type 不受支持' }
+    if ($Info.PSObject.Properties.Name -cnotcontains 'value') { throw (New-RestoreCandidateRejectedException '自启动备份缺少 value') }
+    if ($Info.value_type -cnotin @('String','ExpandString','DWord','QWord','Binary','MultiString')) { throw (New-RestoreCandidateRejectedException '自启动备份 value_type 不受支持') }
     switch -CaseSensitive ($Info.value_type) {
-        { $_ -in @('String','ExpandString') } { if ($Info.value -isnot [string]) { throw '自启动字符串 value 类型无效' } }
-        { $_ -in @('DWord','QWord') } { if (-not (Test-StrictInteger $Info.value)) { throw '自启动整数 value 类型无效' } }
-        'Binary' { foreach ($item in @($Info.value)) { if (-not (Test-StrictInteger $item) -or [int64]$item -lt 0 -or [int64]$item -gt 255) { throw '自启动 Binary value 无效' } } }
-        'MultiString' { foreach ($item in @($Info.value)) { if ($item -isnot [string]) { throw '自启动 MultiString value 无效' } } }
+        { $_ -in @('String','ExpandString') } { if ($Info.value -isnot [string]) { throw (New-RestoreCandidateRejectedException '自启动字符串 value 类型无效') } }
+        { $_ -in @('DWord','QWord') } { if (-not (Test-StrictInteger $Info.value)) { throw (New-RestoreCandidateRejectedException '自启动整数 value 类型无效') } }
+        'Binary' { foreach ($item in @($Info.value)) { if (-not (Test-StrictInteger $item) -or [int64]$item -lt 0 -or [int64]$item -gt 255) { throw (New-RestoreCandidateRejectedException '自启动 Binary value 无效') } } }
+        'MultiString' { foreach ($item in @($Info.value)) { if ($item -isnot [string]) { throw (New-RestoreCandidateRejectedException '自启动 MultiString value 无效') } } }
     }
 }
 
 function Get-TaskDefinitionFingerprint($Xml) {
-    if ($Xml -isnot [string] -or [string]::IsNullOrWhiteSpace($Xml)) { throw '任务 XML 为空' }
-    try { [xml]$doc = $Xml } catch { throw '任务 XML 无效' }
+    if ($Xml -isnot [string] -or [string]::IsNullOrWhiteSpace($Xml)) { throw (New-RestoreCandidateRejectedException '任务 XML 为空') }
+    try { [xml]$doc = $Xml } catch { throw (New-RestoreCandidateRejectedException -Message '任务 XML 无效' -InnerException $_.Exception) }
     $uri = $doc.SelectSingleNode("//*[local-name()='RegistrationInfo']/*[local-name()='URI']")
-    if ($null -eq $uri -or $null -eq $doc.DocumentElement -or $doc.DocumentElement.LocalName -cne 'Task') { throw '任务 XML 缺少关键定义' }
+    if ($null -eq $uri -or $null -eq $doc.DocumentElement -or $doc.DocumentElement.LocalName -cne 'Task') { throw (New-RestoreCandidateRejectedException '任务 XML 缺少关键定义') }
     $identity = (Normalize-TaskPathIdentity $uri.InnerText) + '|' + $doc.OuterXml
     return Get-BytesSha256Hex ((New-Object System.Text.UTF8Encoding($false)).GetBytes($identity))
 }
@@ -1318,9 +1321,9 @@ function Invoke-TaskDisableAction {
 }
 
 function Get-ServiceRestorePlan($Manifest) {
-    if ($null -eq $Manifest) { throw '服务恢复 manifest 为空' }
+    if ($null -eq $Manifest) { throw (New-RestoreCandidateRejectedException '服务恢复 manifest 为空') }
     if ($Manifest.PSObject.Properties.Name -contains 'backup_verified' -and $Manifest.backup_verified -ne $true) {
-        throw '服务恢复 manifest 未绑定验证过的备份'
+        throw (New-RestoreCandidateRejectedException '服务恢复 manifest 未绑定验证过的备份')
     }
     $scVal = $null
     if ($Manifest.PSObject.Properties.Name -contains 'start_type_sc' -and $Manifest.start_type_sc) {
@@ -1332,13 +1335,13 @@ function Get-ServiceRestorePlan($Manifest) {
     } else {
         $scVal = 'disabled'
     }
-    if ($scVal -cnotin @('auto','demand','disabled','boot','system')) { throw '服务恢复启动类型无效' }
-    if ($Manifest.status -isnot [string] -or $Manifest.status -cnotin @('Running','Stopped')) { throw '服务恢复只允许稳定 Running 或 Stopped 状态' }
+    if ($scVal -cnotin @('auto','demand','disabled','boot','system')) { throw (New-RestoreCandidateRejectedException '服务恢复启动类型无效') }
+    if ($Manifest.status -isnot [string] -or $Manifest.status -cnotin @('Running','Stopped')) { throw (New-RestoreCandidateRejectedException '服务恢复只允许稳定 Running 或 Stopped 状态') }
     $expectedStatus = $Manifest.status
     $shouldStart = ($expectedStatus -ceq 'Running')
     if ($Manifest.PSObject.Properties.Name -contains 'restart_after_restore') {
-        if ($Manifest.restart_after_restore -isnot [bool]) { throw 'restart_after_restore 必须是真正 Boolean' }
-        if ($Manifest.restart_after_restore -ne $shouldStart) { throw 'restart_after_restore 与严格 ExpectedStatus 冲突' }
+        if ($Manifest.restart_after_restore -isnot [bool]) { throw (New-RestoreCandidateRejectedException 'restart_after_restore 必须是真正 Boolean') }
+        if ($Manifest.restart_after_restore -ne $shouldStart) { throw (New-RestoreCandidateRejectedException 'restart_after_restore 与严格 ExpectedStatus 冲突') }
     }
     return [pscustomobject]@{ StartType=$scVal; ExpectedStatus=$expectedStatus; ShouldStart=$shouldStart }
 }
@@ -1350,35 +1353,36 @@ function Get-BackupPathAttributes($Path) {
 function Resolve-ValidatedBackupPath($BackupDir, $BackupPath) {
     if ($BackupDir -isnot [string] -or [string]::IsNullOrWhiteSpace($BackupDir) -or
         $BackupPath -isnot [string] -or [string]::IsNullOrWhiteSpace($BackupPath)) {
-        throw '备份目录或文件路径无效'
+        throw (New-RestoreCandidateRejectedException '备份目录或文件路径无效')
     }
     $rootPath = [System.IO.Path]::GetFullPath($BackupDir).TrimEnd('\')
-    if (-not [System.IO.Directory]::Exists($rootPath)) { throw '真实备份根目录不存在' }
+    if (-not [System.IO.Directory]::Exists($rootPath)) { throw (New-RestoreCandidateRejectedException '真实备份根目录不存在') }
     $root = $rootPath + '\'
     $candidate = if ([System.IO.Path]::IsPathRooted($BackupPath)) {
         [System.IO.Path]::GetFullPath($BackupPath)
     } else {
         [System.IO.Path]::GetFullPath((Join-Path $BackupDir $BackupPath))
     }
-    if (-not $candidate.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { throw '备份文件不在指定备份目录内' }
-    if (-not [System.IO.File]::Exists($candidate) -or (Get-Item -LiteralPath $candidate).Length -le 0) { throw '备份文件缺失或为空' }
+    if (-not $candidate.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { throw (New-RestoreCandidateRejectedException '备份文件不在指定备份目录内') }
+    if (-not [System.IO.File]::Exists($candidate)) { throw (New-RestoreCandidateRejectedException '备份文件缺失') }
+    if ((Get-Item -LiteralPath $candidate -ErrorAction Stop).Length -le 0) { throw (New-RestoreCandidateRejectedException '备份文件为空') }
     $current = $rootPath
     $pathsToCheck = @($rootPath)
     $relative = $candidate.Substring($root.Length)
     foreach ($segment in ($relative -split '\\')) {
-        if ([string]::IsNullOrWhiteSpace($segment)) { throw '备份路径包含空层级' }
+        if ([string]::IsNullOrWhiteSpace($segment)) { throw (New-RestoreCandidateRejectedException '备份路径包含空层级') }
         $current = Join-Path $current $segment
         $pathsToCheck += $current
     }
     foreach ($path in $pathsToCheck) {
         $attributes = Get-BackupPathAttributes $path
-        if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "备份路径包含重解析点: $path" }
+        if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw (New-RestoreCandidateRejectedException "备份路径包含重解析点: $path") }
         Assert-TrustedBackupPathAcl -Path $path -RequireProtected $true
     }
     $finalPath = [System.IO.Path]::GetFullPath($current)
     if (-not [string]::Equals($finalPath, $candidate, [System.StringComparison]::OrdinalIgnoreCase) -or
         -not $finalPath.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw '规范化最终备份路径不在真实根目录内'
+        throw (New-RestoreCandidateRejectedException '规范化最终备份路径不在真实根目录内')
     }
     return $finalPath
 }
@@ -1386,48 +1390,48 @@ function Resolve-ValidatedBackupPath($BackupDir, $BackupPath) {
 function Assert-NewManifestBackupBinding($Manifest, $Artifact, $ExpectedIdentity) {
     $version = if ($Manifest.PSObject.Properties.Name -contains 'backup_format_version') { $Manifest.backup_format_version } else { $null }
     if (($version -isnot [int32] -and $version -isnot [int64]) -or [int64]$version -ne 1) {
-        throw 'manifest 缺少受支持的明确备份格式版本'
+        throw (New-RestoreCandidateRejectedException 'manifest 缺少受支持的明确备份格式版本')
     }
     if ($Manifest.PSObject.Properties.Name -notcontains 'backup_verified' -or $Manifest.backup_verified -isnot [bool] -or -not $Manifest.backup_verified) {
-        throw 'manifest 未标记验证过的备份'
+        throw (New-RestoreCandidateRejectedException 'manifest 未标记验证过的备份')
     }
     if ($Manifest.target_identity -isnot [string] -or
         -not [string]::Equals($Manifest.target_identity, $ExpectedIdentity, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw 'manifest 目标身份不匹配'
+        throw (New-RestoreCandidateRejectedException 'manifest 目标身份不匹配')
     }
     if ($Manifest.backup_sha256 -isnot [string] -or $Manifest.backup_sha256 -notmatch '^[0-9A-Fa-f]{64}$' -or
         -not [string]::Equals($Artifact.Sha256, $Manifest.backup_sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw '备份 SHA-256 验证失败'
+        throw (New-RestoreCandidateRejectedException '备份 SHA-256 验证失败')
     }
 }
 
 function Assert-RestoreManifestSchema($Manifest) {
-    if ($null -eq $Manifest -or $Manifest.type -isnot [string] -or $Manifest.type -cnotin @('service','autostart','task','process')) { throw 'manifest 记录类型无效' }
+    if ($null -eq $Manifest -or $Manifest.type -isnot [string] -or $Manifest.type -cnotin @('service','autostart','task','process')) { throw (New-RestoreCandidateRejectedException 'manifest 记录类型无效') }
     if ($Manifest.type -eq 'process') { return }
     $version = if ($Manifest.PSObject.Properties.Name -contains 'backup_format_version') { $Manifest.backup_format_version } else { $null }
-    if (($version -isnot [int32] -and $version -isnot [int64]) -or [int64]$version -ne 1) { throw 'manifest 缺少受支持的明确备份格式版本' }
-    if ($Manifest.PSObject.Properties.Name -notcontains 'backup_verified' -or $Manifest.backup_verified -isnot [bool] -or -not $Manifest.backup_verified) { throw 'manifest 未标记验证过的备份' }
+    if (($version -isnot [int32] -and $version -isnot [int64]) -or [int64]$version -ne 1) { throw (New-RestoreCandidateRejectedException 'manifest 缺少受支持的明确备份格式版本') }
+    if ($Manifest.PSObject.Properties.Name -notcontains 'backup_verified' -or $Manifest.backup_verified -isnot [bool] -or -not $Manifest.backup_verified) { throw (New-RestoreCandidateRejectedException 'manifest 未标记验证过的备份') }
     $common = @('backup_format_version','entry_id','type','name','target_identity','backup','backup_verified','backup_sha256','execution_status','verified','note')
     $specific = switch -CaseSensitive ($Manifest.type) {
         'service' { @('start_type_sc','start_type_display','status','delayed_autostart','restart_after_restore') }
         'autostart' { @('key') }
         'task' { @() }
     }
-    foreach ($property in $Manifest.PSObject.Properties) { if ($property.Name -cnotin @($common + $specific)) { throw "manifest 包含未知字段: $($property.Name)" } }
+    foreach ($property in $Manifest.PSObject.Properties) { if ($property.Name -cnotin @($common + $specific)) { throw (New-RestoreCandidateRejectedException "manifest 包含未知字段: $($property.Name)") } }
     foreach ($field in @('entry_id','type','name','target_identity','backup','backup_sha256','execution_status')) {
-        if ($Manifest.PSObject.Properties.Name -cnotcontains $field -or $Manifest.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.$field)) { throw "manifest 字段 $field 必须是非空字符串" }
+        if ($Manifest.PSObject.Properties.Name -cnotcontains $field -or $Manifest.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.$field)) { throw (New-RestoreCandidateRejectedException "manifest 字段 $field 必须是非空字符串") }
     }
-    if ($Manifest.execution_status -cnotin @('prepared','success','failed')) { throw 'manifest 执行状态不允许恢复' }
-    if ($Manifest.PSObject.Properties.Name -contains 'verified' -and $Manifest.verified -isnot [bool]) { throw 'manifest verified 必须是 Boolean' }
-    if ($Manifest.PSObject.Properties.Name -contains 'note' -and $Manifest.note -isnot [string]) { throw 'manifest note 必须是字符串' }
+    if ($Manifest.execution_status -cnotin @('prepared','success','failed')) { throw (New-RestoreCandidateRejectedException 'manifest 执行状态不允许恢复') }
+    if ($Manifest.PSObject.Properties.Name -contains 'verified' -and $Manifest.verified -isnot [bool]) { throw (New-RestoreCandidateRejectedException 'manifest verified 必须是 Boolean') }
+    if ($Manifest.PSObject.Properties.Name -contains 'note' -and $Manifest.note -isnot [string]) { throw (New-RestoreCandidateRejectedException 'manifest note 必须是字符串') }
     if ($Manifest.type -eq 'service') {
-        if ($Manifest.start_type_sc -isnot [string] -or $Manifest.start_type_sc -cnotin @('auto','demand','disabled','boot','system')) { throw '服务启动类型无效' }
-        if ($Manifest.PSObject.Properties.Name -contains 'start_type_display' -and ($Manifest.start_type_display -isnot [string] -or $Manifest.start_type_display -cnotin @('Automatic','Manual','Disabled','Boot','System'))) { throw '服务显示启动类型无效' }
-        if ($Manifest.status -isnot [string] -or $Manifest.status -cnotin @('Running','Stopped')) { throw '服务状态必须是稳定 Running 或 Stopped' }
-        if ($Manifest.PSObject.Properties.Name -contains 'delayed_autostart' -and (-not (Test-StrictInteger $Manifest.delayed_autostart) -or [int64]$Manifest.delayed_autostart -notin @(0,1))) { throw 'delayed_autostart 无效' }
-        if ($Manifest.PSObject.Properties.Name -contains 'restart_after_restore' -and $Manifest.restart_after_restore -isnot [bool]) { throw 'restart_after_restore 必须是真正 Boolean' }
+        if ($Manifest.start_type_sc -isnot [string] -or $Manifest.start_type_sc -cnotin @('auto','demand','disabled','boot','system')) { throw (New-RestoreCandidateRejectedException '服务启动类型无效') }
+        if ($Manifest.PSObject.Properties.Name -contains 'start_type_display' -and ($Manifest.start_type_display -isnot [string] -or $Manifest.start_type_display -cnotin @('Automatic','Manual','Disabled','Boot','System'))) { throw (New-RestoreCandidateRejectedException '服务显示启动类型无效') }
+        if ($Manifest.status -isnot [string] -or $Manifest.status -cnotin @('Running','Stopped')) { throw (New-RestoreCandidateRejectedException '服务状态必须是稳定 Running 或 Stopped') }
+        if ($Manifest.PSObject.Properties.Name -contains 'delayed_autostart' -and (-not (Test-StrictInteger $Manifest.delayed_autostart) -or [int64]$Manifest.delayed_autostart -notin @(0,1))) { throw (New-RestoreCandidateRejectedException 'delayed_autostart 无效') }
+        if ($Manifest.PSObject.Properties.Name -contains 'restart_after_restore' -and $Manifest.restart_after_restore -isnot [bool]) { throw (New-RestoreCandidateRejectedException 'restart_after_restore 必须是真正 Boolean') }
     }
-    if ($Manifest.type -eq 'autostart' -and ($Manifest.key -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.key))) { throw '自启动 key 必须是字符串' }
+    if ($Manifest.type -eq 'autostart' -and ($Manifest.key -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.key))) { throw (New-RestoreCandidateRejectedException '自启动 key 必须是字符串') }
 }
 
 function Get-RestorePlan {
@@ -1437,7 +1441,7 @@ function Get-RestorePlan {
     try {
     switch -CaseSensitive ($Manifest.type) {
         'service' {
-            if ($Manifest.name -isnot [string] -or $Manifest.name -cnotmatch '^[A-Za-z0-9_.]+$') { throw '服务目标身份无效' }
+            if ($Manifest.name -isnot [string] -or $Manifest.name -cnotmatch '^[A-Za-z0-9_.]+$') { throw (New-RestoreCandidateRejectedException '服务目标身份无效') }
             $backupPath = Resolve-ValidatedBackupPath $BackupDir $Manifest.backup
             $artifact = Open-LockedBackupArtifact $backupPath
             Assert-NewManifestBackupBinding $Manifest $artifact $Manifest.name
@@ -1452,12 +1456,12 @@ function Get-RestorePlan {
         }
         'autostart' {
             if (-not (Test-AllowedAutostartRegistrySource $Manifest.key) -or
-                $Manifest.name -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.name)) { throw '自启动目标身份无效' }
+                $Manifest.name -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.name)) { throw (New-RestoreCandidateRejectedException '自启动目标身份无效') }
             $identity = $Manifest.key + '|' + $Manifest.name
             $backupPath = Resolve-ValidatedBackupPath $BackupDir $Manifest.backup
             $artifact = Open-LockedBackupArtifact $backupPath
             Assert-NewManifestBackupBinding $Manifest $artifact $identity
-            if (-not $backupPath.EndsWith('.autostart.json', [System.StringComparison]::OrdinalIgnoreCase)) { throw '自启动备份扩展名无效' }
+            if (-not $backupPath.EndsWith('.autostart.json', [System.StringComparison]::OrdinalIgnoreCase)) { throw (New-RestoreCandidateRejectedException '自启动备份扩展名无效') }
             $parsed = Assert-BackupArtifactIdentity -Type 'autostart' -Artifact $artifact -Key $Manifest.key -Name $Manifest.name
             return [pscustomobject]@{ Type='autostart'; Format='single_value'; Key=$Manifest.key; Name=$Manifest.name; BackupPath=$backupPath; Info=$parsed.Info; Artifact=$artifact }
         }
@@ -1472,7 +1476,7 @@ function Get-RestorePlan {
             return [pscustomobject]@{ Type='task'; Name=$normalizedTaskName; TaskName=$taskName; TaskPath=$taskFolder; BackupPath=$backupPath; Xml=$parsed.Xml; TaskFingerprint=$parsed.TaskFingerprint; Artifact=$artifact }
         }
         'process' { return [pscustomobject]@{ Type='process'; Name=$Manifest.name; Path=$Manifest.path } }
-        default { throw 'manifest 记录类型不受支持' }
+        default { throw (New-RestoreCandidateRejectedException 'manifest 记录类型不受支持') }
     }
     } catch {
         Close-BackupArtifact $artifact
@@ -1620,7 +1624,7 @@ function Get-TrustedRestorePackage($BackupDir) {
     $manifestFile = Join-Path $resolvedBackupDir 'manifest.json'
     Assert-TrustedBackupPathAcl -Path $manifestFile -RequireProtected $true
     $manifest = @(Read-BackupManifestEntries $manifestFile)
-    if ($manifest.Count -eq 0) { throw '可信备份清单为空' }
+    if ($manifest.Count -eq 0) { throw (New-RestoreCandidateRejectedException '可信备份清单为空') }
 
     $plans = @()
     try {

@@ -501,6 +501,38 @@ Invoke-Restore
         Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
     }
 
+    It 'latest 通过真实候选验证跳过重复 JSON 字段的新包并选择旧可信包' {
+        $newestDir = Join-Path $TestDrive '20260811_130000'
+        $trustedDir = Join-Path $TestDrive '20260811_120000'
+        [void][System.IO.Directory]::CreateDirectory($newestDir)
+        [void][System.IO.Directory]::CreateDirectory($trustedDir)
+        [System.IO.File]::WriteAllText(
+            (Join-Path $newestDir 'manifest.json'),
+            '[{"entry_id":"bad","entry_id":"duplicate","type":"process","name":"bad","path":""}]',
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        [System.IO.File]::WriteAllText(
+            (Join-Path $trustedDir 'manifest.json'),
+            '[{"entry_id":"good","type":"process","name":"noop","path":""}]',
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        Mock Get-SecureBackupRoot { $TestDrive }
+        Mock Assert-TrustedBackupPackagePath { return $BackupDir }
+        Mock Assert-TrustedBackupPathAcl {}
+        Mock Get-ChildItem {
+            @(
+                [pscustomobject]@{ Name='20260811_130000'; FullName=$newestDir },
+                [pscustomobject]@{ Name='20260811_120000'; FullName=$trustedDir }
+            )
+        }
+
+        $selected = Resolve-LatestTrustedRestorePackage
+
+        $selected.BackupDir | Should -BeExactly $trustedDir
+        @($selected.Manifest).Count | Should -Be 1
+        $selected.Manifest[0].entry_id | Should -BeExactly 'good'
+    }
+
     It 'latest 在管理员核心内跳过无效新包并选择最新可信包' {
         $newest = [pscustomobject]@{ Name='20260811_130000'; FullName=(Join-Path $TestDrive '20260811_130000') }
         $trusted = [pscustomobject]@{ Name='20260811_120000'; FullName=(Join-Path $TestDrive '20260811_120000') }
