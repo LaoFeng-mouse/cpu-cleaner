@@ -640,15 +640,48 @@ Describe 'Schema 3.0 格式校验' {
 }
 
 Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
-    It 'detect 对象化后服务命中正常 (contains, 真实 lenovo-serviceas 规则)' {
-        $svc = [pscustomobject]@{ Name = 'LenovoServiceAS'; DisplayName = '联想服务'; State = 'Running'; StartMode = 'Automatic' }
-        $hits = Match-Profiles -Services @($svc) -AutoStarts @() -Tasks @() -TopProcs @()
-        $hit = @($hits | Where-Object { $_.hit_type -eq 'service' -and $_.id -eq 'lenovo-serviceas' }) | Select-Object -First 1
-        $hit | Should -Not -BeNullOrEmpty
-        $hit.action | Should -Be 'investigate'
-        $hit.matched_pattern | Should -Be 'LenovoServiceAS'
-        $hit.matched_type | Should -Be 'contains'
-        $hit.matched_field | Should -Be 'service_name'
+    It '七个已验证 Lenovo 清理规则使用 exact 内部服务名且 evidence.tested=true' {
+        $profiles = Load-Profiles -Path $script:ProfileFile
+        $expected = @{
+            'lenovo-lemcpmanager' = 'LeMCPManagerService'
+            'lenovo-xlsmart' = 'XLSmartService'
+            'lenovo-lisf' = 'LISFService'
+            'lenovo-serviceas' = 'LenovoServiceAS'
+            'lenovo-gaserivce' = 'GAService'
+            'lenovo-smartconnect' = 'SmartConnect'
+            'lenovo-lnvvcam' = 'LnvVCamInstaller'
+        }
+
+        foreach ($id in $expected.Keys) {
+            $profile = @($profiles.profiles | Where-Object { $_.id -eq $id }) | Select-Object -First 1
+            $matcher = @($profile.detect.services | Where-Object { $_.match -ceq $expected[$id] }) | Select-Object -First 1
+
+            $profile | Should -Not -BeNullOrEmpty
+            $matcher | Should -Not -BeNullOrEmpty
+            $matcher.type | Should -BeExactly 'exact'
+            $profile.evidence.tested | Should -BeTrue
+        }
+    }
+    It '真实 LeMCPManager 服务可执行但后缀伪装仅由备用 broad matcher 调查' {
+        $services = @(
+            [pscustomobject]@{ Name = 'LeMCPManagerService'; DisplayName = 'Real'; State = 'Running'; StartMode = 'Automatic' },
+            [pscustomobject]@{ Name = 'LeMCPManagerServiceFake'; DisplayName = 'Fake'; State = 'Running'; StartMode = 'Automatic' }
+        )
+        $hits = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @())
+        $real = @($hits | Where-Object { $_.id -eq 'lenovo-lemcpmanager' -and $_.service_name -eq 'LeMCPManagerService' }) | Select-Object -First 1
+        $fake = @($hits | Where-Object { $_.id -eq 'lenovo-lemcpmanager' -and $_.service_name -eq 'LeMCPManagerServiceFake' }) | Select-Object -First 1
+
+        $real | Should -Not -BeNullOrEmpty
+        $real.action | Should -BeExactly 'disable_service'
+        $real.matched_pattern | Should -BeExactly 'LeMCPManagerService'
+        $real.matched_type | Should -BeExactly 'exact'
+        $real.matched_field | Should -BeExactly 'service_name'
+
+        $fake | Should -Not -BeNullOrEmpty
+        $fake.action | Should -BeExactly 'investigate'
+        $fake.matched_pattern | Should -BeExactly 'LeMcpManager'
+        $fake.matched_type | Should -BeExactly 'contains'
+        $fake.matched_field | Should -BeExactly 'service_name'
     }
     It '授权验证 target 检查兼容对象化 detect' {
         $profiles = Load-Profiles
