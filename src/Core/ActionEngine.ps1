@@ -1557,6 +1557,12 @@ function Invoke-ValidatedRestoreManifest($Manifest, $BackupDir) {
         throw
     }
     try {
+        # 所有 plan 已完成且尚未执行任何 mutation；此处再次验证信任链，封闭规划阶段 TOCTOU。
+        $BackupDir = Assert-TrustedBackupPackagePath $BackupDir
+        Assert-TrustedBackupPathAcl -Path (Join-Path $BackupDir 'manifest.json') -RequireProtected $true
+        foreach ($plannedArtifact in @($plans | Where-Object { $_.PSObject.Properties.Name -contains 'BackupPath' })) {
+            Assert-TrustedBackupPathAcl -Path $plannedArtifact.BackupPath -RequireProtected $true
+        }
         $results = @()
         foreach ($plan in $plans) {
             try {
@@ -1810,17 +1816,20 @@ function Invoke-Restore {
         Write-Host '错误: restore 模式需要管理员权限。' -ForegroundColor Red
         exit 1
     }
-    try { $manifest = @(Read-BackupManifestEntries $manifestFile) } catch {
-        Write-Host ('备份清单验证失败，未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
-        exit 1
-    }
     try { $BackupDir = Resolve-TrustedRestoreBackupDirectory -RequestedPath $BackupDir -LegacyRoot $script:BackupRoot } catch {
         Write-Host ('备份包信任验证失败，未读取包且未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
         exit 1
     }
     $manifestFile = Join-Path $BackupDir 'manifest.json'
-    try { Assert-TrustedBackupPathAcl -Path $manifestFile -RequireProtected $true } catch {
-        Write-Host ('manifest ACL 信任验证失败，未读取包且未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
+    try {
+        $BackupDir = Assert-TrustedBackupPackagePath $BackupDir
+        Assert-TrustedBackupPathAcl -Path $manifestFile -RequireProtected $true
+    } catch {
+        Write-Host ('备份包/manifest ACL 信任验证失败，未读取包且未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
+        exit 1
+    }
+    try { $manifest = @(Read-BackupManifestEntries $manifestFile) } catch {
+        Write-Host ('备份清单验证失败，未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
         exit 1
     }
     if (-not $manifest -or @($manifest).Count -eq 0) {

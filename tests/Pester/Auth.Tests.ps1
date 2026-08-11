@@ -521,7 +521,7 @@ Describe '执行前最终授权防 TOCTOU' {
         $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
         $loop = $source.IndexOf('foreach ($idx in $indexes)')
         $guard = $source.IndexOf('Test-SelectedPendingActionAuthorized', $loop)
-        $mutations = @('New-Item -ItemType Directory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Invoke-LiteralAutostartRemoval', 'Disable-ScheduledTask', 'Stop-Process') |
+        $mutations = @('Initialize-ProtectedBackupDirectory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Invoke-LiteralAutostartRemoval', 'Disable-ScheduledTask', 'Stop-Process') |
             ForEach-Object { $source.IndexOf($_, $loop) }
 
         $loop | Should -BeGreaterOrEqual 0
@@ -529,6 +529,55 @@ Describe '执行前最终授权防 TOCTOU' {
         foreach ($mutation in $mutations) {
             $mutation | Should -BeGreaterThan $guard
         }
+    }
+
+    It 'restore 主入口严格按 resolve join ACL read plan-mutation 顺序且不继承空 manifestFile' {
+        $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
+        $start = $source.IndexOf('function Invoke-Restore {')
+        $end = $source.IndexOf('function Update-Profiles {', $start)
+        $body = $source.Substring($start, $end - $start)
+        $resolve = $body.IndexOf('Resolve-TrustedRestoreBackupDirectory')
+        $join = $body.IndexOf('$manifestFile = Join-Path')
+        $packageAcl = $body.IndexOf('Assert-TrustedBackupPackagePath')
+        $manifestAcl = $body.IndexOf('Assert-TrustedBackupPathAcl')
+        $read = $body.IndexOf('Read-BackupManifestEntries $manifestFile')
+
+        $resolve | Should -BeGreaterOrEqual 0
+        $join | Should -BeGreaterThan $resolve
+        $packageAcl | Should -BeGreaterThan $join
+        $manifestAcl | Should -BeGreaterThan $packageAcl
+        $read | Should -BeGreaterThan $manifestAcl
+
+        $driver = Join-Path $TestDrive 'restore-order-driver.ps1'
+        $orderFile = Join-Path $TestDrive 'restore-order.txt'
+        $projectRootLiteral = $script:Root.Replace("'", "''")
+        $orderFileLiteral = $orderFile.Replace("'", "''")
+        $driverSource = @"
+`$projectRoot = '$projectRootLiteral'
+`$orderFile = '$orderFileLiteral'
+`$src = Get-Content (Join-Path `$projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
+`$idx = `$src.IndexOf("switch (```$Mode)")
+`$defs = `$src.Substring(0, `$idx).Replace('`$script:Root = Split-Path -Parent `$MyInvocation.MyCommand.Path', '`$script:Root = `$projectRoot')
+Invoke-Expression `$defs
+`$BackupDir = 'C:\legacy\20260811_120000'
+`$script:BackupRoot = 'C:\legacy'
+`$manifestFile = `$null
+`$script:Order = @()
+function Is-Admin { return `$true }
+function Resolve-TrustedRestoreBackupDirectory { param(`$RequestedPath, `$LegacyRoot); `$script:Order += 'resolve'; return 'C:\trusted\20260811_120000' }
+function Assert-TrustedBackupPackagePath { param(`$BackupDir); `$script:Order += 'package-acl'; return `$BackupDir }
+function Assert-TrustedBackupPathAcl { param(`$Path, `$RequireProtected); if ([System.IO.Path]::GetFileName(`$Path) -cne 'manifest.json' -or `$Path -notmatch 'trusted') { throw ('wrong manifest path: ' + `$Path) }; `$script:Order += 'manifest-acl' }
+function Read-BackupManifestEntries { param(`$ManifestFile); if ([string]::IsNullOrWhiteSpace(`$ManifestFile)) { throw 'empty manifestFile' }; `$script:Order += 'read'; return [pscustomobject]@{type='process';name='noop';path=''} }
+function Invoke-ValidatedRestoreManifest { `$script:Order += 'plans-then-pre-mutation'; [System.IO.File]::WriteAllText(`$orderFile, ('ORDER=' + (`$script:Order -join ','))); return [pscustomobject]@{success=`$true} }
+function Write-Step {}
+Invoke-Restore
+"@
+        [System.IO.File]::WriteAllText($driver, $driverSource, [System.Text.UTF8Encoding]::new($false))
+
+        $output = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $driver 2>&1
+
+        $LASTEXITCODE | Should -Be 0 -Because ($output -join "`n")
+        (Get-Content -LiteralPath $orderFile -Raw) | Should -BeExactly 'ORDER=resolve,package-acl,manifest-acl,read,plans-then-pre-mutation'
     }
 }
 

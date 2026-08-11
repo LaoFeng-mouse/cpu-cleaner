@@ -455,4 +455,21 @@ Describe '恢复逻辑' {
             { Get-ServiceRestorePlan $manifest } | Should -Throw '*稳定*'
         }
     }
+
+    It '全部 restore plan 构建后 mutation 前再次验证信任链' {
+        $script:TrustChecks = 0
+        Mock Assert-TrustedBackupPackagePath {
+            $script:TrustChecks++
+            if ($script:TrustChecks -eq 2) { throw 'trust changed after planning' }
+            return $BackupDir
+        }
+        Mock Get-RestorePlan { [pscustomobject]@{Type='process';Name='noop'} }
+        Mock Invoke-RestorePlanAction {}
+
+        { Invoke-ValidatedRestoreManifest -Manifest @([pscustomobject]@{type='process';name='noop';path=''}) -BackupDir $TestDrive } | Should -Throw '*trust changed*'
+
+        $script:TrustChecks | Should -Be 2
+        Should -Invoke Get-RestorePlan -Times 1 -Exactly
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
 }
