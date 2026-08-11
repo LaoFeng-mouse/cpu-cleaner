@@ -15,11 +15,11 @@
 **Files:**
 - Modify: `tests/Gui.Tests.ps1`
 
-- [ ] **Step 1: Add a real job-boundary regression test**
+- [x] **Step 1: Add a real job-boundary regression test**
 
-Create a temporary UTF-8 PowerShell script that sets its native output encoding to UTF-8 and writes `读取系统信息`. Launch it through the production `$script:ScanJobScript`, wait for completion, and assert that `Receive-Job` returns the exact Chinese text and not `璇诲彇绯荤粺淇℃伅`.
+Created a temporary UTF-8 PowerShell script that sets its native output encoding to UTF-8 and writes `==> 读取系统信息...`. The regression launches it through the production `$script:ScanJobScript`, waits for completion, and asserts that `Receive-Job` returns the exact Chinese text rather than mojibake.
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 
@@ -27,7 +27,7 @@ Run:
 powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 5.9.0; `$c=New-PesterConfiguration; `$c.Run.Path='.\tests\Gui.Tests.ps1'; `$c.Filter.FullName='*preserves UTF-8 Chinese scanner output*'; `$c.Output.Verbosity='Detailed'; `$r=Invoke-Pester -Configuration `$c; if(`$r.FailedCount -gt 0){exit 1}"
 ```
 
-Expected: FAIL because the default background job encoding is GB2312 and the native UTF-8 bytes are decoded as mojibake.
+Actual RED evidence before the production fix: the background job decoded the native UTF-8 bytes as `==> 璇诲彇绯荤粺淇℃伅...` instead of `==> 读取系统信息...`.
 
 ### Task 2: Configure the actual background job boundary
 
@@ -35,15 +35,15 @@ Expected: FAIL because the default background job encoding is GB2312 and the nat
 - Modify: `gui-cleaner.ps1`
 - Test: `tests/Gui.Tests.ps1`
 
-- [ ] **Step 1: Apply the minimal production fix**
+- [x] **Step 1: Apply the minimal production fix**
 
 At the start of `$script:ScanJobScript`, set `[Console]::OutputEncoding` and `$OutputEncoding` to a BOM-less `System.Text.UTF8Encoding`. Do this before invoking the native child `powershell.exe`; preserve exit-code handling and all existing scan logic.
 
-- [ ] **Step 2: Run the focused test and verify GREEN**
+- [x] **Step 2: Run the focused test and verify GREEN**
 
-Run the same filtered Pester command. Expected: PASS with the exact `读取系统信息` string.
+Actual GREEN evidence: the same filtered Pester command passed 1/1 and returned the exact output `==> 读取系统信息...`.
 
-- [ ] **Step 3: Run the complete GUI gate**
+- [x] **Step 3: Run the complete GUI gate**
 
 Run:
 
@@ -51,16 +51,16 @@ Run:
 powershell.exe -STA -NoProfile -ExecutionPolicy Bypass -File .\tests\run-gui-tests.ps1
 ```
 
-Expected: all GUI tests pass with zero failures.
+Actual result: 150/150 GUI tests passed with zero failures.
 
 ### Task 3: Verify the complete software path without destructive cleanup
 
 **Files:**
 - No additional production files expected.
 
-- [ ] **Step 1: Run all core and legacy tests**
+- [x] **Step 1: Run all core and legacy tests**
 
-Run the 235-test Pester suite, `tests\run-unit.ps1`, PowerShell AST parsing, JSON parsing, and `git diff --check`. Expected: zero failures.
+Actual results: core Pester 235/235, legacy 38/38, schema 12/12, PowerShell AST parsing passed, JSON parsing passed, and `git diff --check` passed.
 
 - [ ] **Step 2: Run a real read-only scanner process**
 
@@ -70,6 +70,6 @@ Run `cpu-cleaner.ps1 -Mode scan` without elevation, capture its exit code and ou
 
 Start `gui-cleaner.ps1` visibly from the isolated worktree. The user confirms the UI and scan transcript; no cleanup action is performed unless separately authorized in the application.
 
-- [ ] **Step 4: Review branch scope before any integration**
+- [x] **Step 4: Review branch scope before any integration**
 
-Inspect `git status`, `git diff`, test evidence, and the GitHub `master` baseline. Do not merge, commit, or push until the complete verification evidence supports it and the user requests that integration step.
+The user selected execution after reviewing `git status`, `git diff`, and the recorded test evidence. The runtime-encoding slice was committed as `f4165b0`; it was not pushed.
