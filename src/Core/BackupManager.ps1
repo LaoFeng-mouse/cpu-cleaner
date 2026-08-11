@@ -11,6 +11,93 @@ function Test-RegistryBackupFile($Path) {
     } catch { return $false }
 }
 
+function Get-FileSha256Hex($Path) {
+    if ($Path -isnot [string] -or -not [System.IO.File]::Exists($Path) -or (Get-Item -LiteralPath $Path).Length -le 0) {
+        throw '备份文件不存在或为空'
+    }
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
+}
+
+function Read-BackupManifestEntries($ManifestFile) {
+    if (-not [System.IO.File]::Exists($ManifestFile)) { return @() }
+    $raw = Get-Content -LiteralPath $ManifestFile -Raw -Encoding UTF8 -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($raw)) { throw 'manifest 文件为空' }
+    try {
+        $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+        $entries = @($parsed | ForEach-Object { $_ })
+    } catch { throw ('manifest JSON 损坏: ' + $_.Exception.Message) }
+    if ($entries.Count -eq 0) { return @() }
+    foreach ($entry in $entries) {
+        if ($null -eq $entry -or $entry.entry_id -isnot [string] -or [string]::IsNullOrWhiteSpace($entry.entry_id)) {
+            throw 'manifest 条目缺少 entry_id'
+        }
+    }
+    return $entries
+}
+
+function Write-BackupManifestAtomic($BackupDir, $Entries) {
+    if ($BackupDir -isnot [string] -or [string]::IsNullOrWhiteSpace($BackupDir)) { throw '备份目录无效' }
+    if (-not [System.IO.Directory]::Exists($BackupDir)) { [System.IO.Directory]::CreateDirectory($BackupDir) | Out-Null }
+    $manifestFile = Join-Path $BackupDir 'manifest.json'
+    $tempFile = Join-Path $BackupDir ('.manifest.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $previousFile = Join-Path $BackupDir ('.manifest.' + [guid]::NewGuid().ToString('N') + '.previous')
+    $stream = $null
+    $writer = $null
+    try {
+        $json = ConvertTo-Json -InputObject @($Entries) -Depth 100
+        $stream = [System.IO.File]::Open($tempFile, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $writer = New-Object System.IO.StreamWriter($stream, (New-Object System.Text.UTF8Encoding($true)))
+        $writer.Write($json)
+        $writer.Flush()
+        $stream.Flush($true)
+        $writer.Dispose(); $writer = $null
+        $stream.Dispose(); $stream = $null
+
+        $verified = @(Read-BackupManifestEntries $tempFile)
+        if ($verified.Count -ne @($Entries).Count) { throw 'manifest 临时文件验证计数不一致' }
+        $tempHash = Get-FileSha256Hex $tempFile
+        if ([System.IO.File]::Exists($manifestFile)) {
+            [System.IO.File]::Replace($tempFile, $manifestFile, $previousFile)
+        } else {
+            [System.IO.File]::Move($tempFile, $manifestFile)
+        }
+        if ((Get-FileSha256Hex $manifestFile) -cne $tempHash) { throw 'manifest 原子提交后校验失败' }
+        $final = @(Read-BackupManifestEntries $manifestFile)
+        if ($final.Count -ne @($Entries).Count) { throw 'manifest 原子提交后条目数不一致' }
+        if ([System.IO.File]::Exists($previousFile)) { [System.IO.File]::Delete($previousFile) }
+        return $manifestFile
+    } finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ([System.IO.File]::Exists($tempFile)) { [System.IO.File]::Delete($tempFile) }
+    }
+}
+
+function Add-BackupManifestEntryAtomic($BackupDir, $Entry) {
+    if ($null -eq $Entry -or $Entry.entry_id -isnot [string] -or [string]::IsNullOrWhiteSpace($Entry.entry_id)) {
+        throw '待持久化 manifest 条目缺少 entry_id'
+    }
+    $manifestFile = Join-Path $BackupDir 'manifest.json'
+    $entries = @(Read-BackupManifestEntries $manifestFile)
+    if (@($entries | Where-Object { $_.entry_id -ceq $Entry.entry_id }).Count -gt 0) { throw 'manifest entry_id 重复' }
+    $entries += $Entry
+    $null = Write-BackupManifestAtomic -BackupDir $BackupDir -Entries $entries
+    $saved = @(Read-BackupManifestEntries $manifestFile | Where-Object { $_.entry_id -ceq $Entry.entry_id })
+    if ($saved.Count -ne 1) { throw 'manifest write-ahead 条目验证失败' }
+    return $manifestFile
+}
+
+function Update-BackupManifestEntryAtomic($BackupDir, $EntryId, $ExecutionStatus, $Verified) {
+    $manifestFile = Join-Path $BackupDir 'manifest.json'
+    $entries = @(Read-BackupManifestEntries $manifestFile)
+    $matches = @($entries | Where-Object { $_.entry_id -ceq $EntryId })
+    if ($matches.Count -ne 1) { throw 'manifest 状态更新目标不唯一' }
+    $matches[0].execution_status = $ExecutionStatus
+    $matches[0].verified = [bool]$Verified
+    $null = Write-BackupManifestAtomic -BackupDir $BackupDir -Entries $entries
+    return $manifestFile
+}
+
 function Backup-RegistryKey($keyPath, $backupDir, $tag) {
     $regPath = $keyPath -replace '^HKLM:', 'HKLM' -replace '^HKCU:', 'HKCU'
     $out = Join-Path $backupDir ("$tag.reg")

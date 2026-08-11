@@ -8,6 +8,12 @@ Describe '清理动作逻辑' {
         $defs = $src.Substring(0, $idx)
         $defs = $defs.Replace('$script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path', '$script:Root = $projectRoot')
         Invoke-Expression $defs
+        if (-not (Get-Command Add-BackupManifestEntryAtomic -ErrorAction SilentlyContinue)) {
+            function Add-BackupManifestEntryAtomic { throw 'write-ahead manifest not implemented' }
+        }
+        if (-not (Get-Command Update-BackupManifestEntryAtomic -ErrorAction SilentlyContinue)) {
+            function Update-BackupManifestEntryAtomic { throw 'manifest status update not implemented' }
+        }
         # Pester 5 固定版本 (5.9.0): 直接使用原生断言, 不做 3.4/5.x 兼容包装
     }
 
@@ -126,5 +132,84 @@ Describe '清理动作逻辑' {
 
         $result.status | Should -BeExactly 'failed'
         Should -Invoke Disable-ScheduledTask -Times 0 -Exactly
+    }
+
+    It '服务 write-ahead manifest 持久化失败时 mutation 为 0' {
+        Mock Get-ServiceBackupInfo {
+            [pscustomobject]@{ start_type_sc='auto'; start_type_display='Automatic'; status='Running'; delayed_autostart=0 }
+        }
+        Mock Backup-RegistryKey {
+            $out = Join-Path $TestDrive 'service.reg'
+            [System.IO.File]::WriteAllText($out, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\ExactSvc]`r`n")
+            return $out
+        }
+        Mock Add-BackupManifestEntryAtomic { throw 'manifest write failed' }
+        Mock Invoke-ServiceConfigDisable {}
+
+        $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'svc-journal'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Invoke-ServiceConfigDisable -Times 0 -Exactly
+    }
+
+    It '计划任务 write-ahead manifest 持久化失败时禁用调用为 0' {
+        Mock Get-ScheduledTask { [pscustomobject]@{State='Ready'} }
+        Mock Export-ScheduledTask { '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo></Task>' }
+        Mock Add-BackupManifestEntryAtomic { throw 'manifest write failed' }
+        Mock Disable-ScheduledTask {}
+
+        $result = Invoke-TaskDisableAction -Pending ([pscustomobject]@{task_path='\Vendor\Task'}) -BackupDir $TestDrive -Tag 'task-journal'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Disable-ScheduledTask -Times 0 -Exactly
+    }
+
+    It '自启动 write-ahead manifest 持久化失败时删除调用为 0' {
+        $key = [pscustomobject]@{}
+        $key | Add-Member ScriptMethod GetValueNames { @('Updater') }
+        $key | Add-Member ScriptMethod GetValue { param($name,$default,$options) 'C:\Apps\old.exe' }
+        $key | Add-Member ScriptMethod GetValueKind { param($name) [Microsoft.Win32.RegistryValueKind]::String }
+        Mock Write-AutostartValueBackup {
+            $out = Join-Path $TestDrive 'auto.autostart.json'
+            [System.IO.File]::WriteAllText($out, '{"key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run","name":"Updater","value_type":"String","value":"C:\\Apps\\old.exe"}')
+            return $out
+        }
+        Mock Add-BackupManifestEntryAtomic { throw 'manifest write failed' }
+        Mock Remove-LiteralRegistryValueFromKey {}
+
+        $result = Invoke-LiteralAutostartRemovalFromKey -RegistryKey $key -Source 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Updater' -ExpectedValue 'C:\Apps\old.exe' -BackupDir $TestDrive -Tag 'auto-journal'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Remove-LiteralRegistryValueFromKey -Times 0 -Exactly
+    }
+
+    It '逐项原子追加 manifest 时保留之前已经持久化的项目' {
+        $first = [pscustomobject]@{ entry_id='one'; type='service'; name='SvcOne'; execution_status='prepared' }
+        $second = [pscustomobject]@{ entry_id='two'; type='task'; name='\Vendor\Task'; execution_status='prepared' }
+
+        Add-BackupManifestEntryAtomic -BackupDir $TestDrive -Entry $first
+        Add-BackupManifestEntryAtomic -BackupDir $TestDrive -Entry $second
+
+        $saved = @(Get-Content (Join-Path $TestDrive 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json)
+        @($saved.entry_id) | Should -Be @('one','two')
+    }
+
+    It '计划任务禁用后回读不存在时返回 failed 并保留已持久化备份' {
+        $script:TaskReadCount = 0
+        Mock Get-ScheduledTask {
+            $script:TaskReadCount++
+            if ($script:TaskReadCount -eq 1) { return [pscustomobject]@{State='Ready'} }
+            return $null
+        }
+        Mock Export-ScheduledTask { '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo></Task>' }
+        Mock Add-BackupManifestEntryAtomic {}
+        Mock Update-BackupManifestEntryAtomic {}
+        Mock Disable-ScheduledTask {}
+
+        $result = Invoke-TaskDisableAction -Pending ([pscustomobject]@{task_path='\Vendor\Task'}) -BackupDir $TestDrive -Tag 'task-missing'
+
+        $result.status | Should -BeExactly 'failed'
+        $result.manifest.backup_verified | Should -BeTrue
+        Should -Invoke Disable-ScheduledTask -Times 1 -Exactly
     }
 }
