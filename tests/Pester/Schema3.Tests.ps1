@@ -38,6 +38,15 @@ Describe 'Test-DetectMatch (match_type 分发)' {
     It 'regex 非法表达式不抛错返回 false' {
         Test-DetectMatch 'abc' @{ match = '['; type = 'regex' } | Should -BeFalse
     }
+    It 'publisher 非法表达式不抛错返回 false' {
+        $context = [pscustomobject]@{
+            Signature = [pscustomobject]@{ SignerCertificate = [pscustomobject]@{ Subject = 'CN=Trusted Publisher' } }
+        }
+        $result = [pscustomobject]@{ Value = $true }
+
+        { $result.Value = Test-DetectMatch 'C:\Trusted\ExactSvc.exe' @{ match = '['; type = 'publisher' } -Context $context } | Should -Not -Throw
+        $result.Value | Should -BeFalse
+    }
     It 'path 前缀匹配' {
         Test-DetectMatch 'C:\Program Files\Lenovo\ImController\Lenovo.Modern.ImController.exe' @{ match = 'C:\Program Files\Lenovo'; type = 'path' } | Should -BeTrue
         Test-DetectMatch 'D:\Games\steam.exe' @{ match = 'C:\Program Files'; type = 'path' } | Should -BeFalse
@@ -272,6 +281,27 @@ Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
 }
 
 Describe 'Schema 3.0 命中证据与逐命中执行闸门' {
+    It 'keeps an earlier exact match when a later publisher expression is invalid' {
+        $context = [pscustomobject]@{
+            Path = 'C:\Trusted\ExactSvc.exe'
+            Signature = [pscustomobject]@{ SignerCertificate = [pscustomobject]@{ Subject = 'CN=Trusted Publisher' } }
+        }
+        $patterns = @(
+            [pscustomobject]@{ match='ExactSvc'; type='exact' },
+            [pscustomobject]@{ match='['; type='publisher' }
+        )
+        $candidates = @(
+            [pscustomobject]@{ field='service_name'; value='ExactSvc'; context=$context },
+            [pscustomobject]@{ field='service_path'; value='C:\Trusted\ExactSvc.exe'; context=$context }
+        )
+        $result = [pscustomobject]@{ Evidence = $null }
+
+        { $result.Evidence = Find-DetectMatch $patterns $candidates } | Should -Not -Throw
+        $result.Evidence.matched_pattern | Should -BeExactly 'ExactSvc'
+        $result.Evidence.matched_type | Should -BeExactly 'exact'
+        $result.Evidence.matched_field | Should -BeExactly 'service_name'
+    }
+
     It 'assigns deterministic strengths to matcher types' {
         @(
             [pscustomobject]@{ Type='exact'; Expected=0 },
