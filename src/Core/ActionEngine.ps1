@@ -1581,6 +1581,41 @@ function Invoke-ValidatedRestoreManifest($Manifest, $BackupDir) {
     }
 }
 
+function Get-TrustedRestorePackage($BackupDir) {
+    $resolvedBackupDir = Assert-TrustedBackupPackagePath $BackupDir
+    $manifestFile = Join-Path $resolvedBackupDir 'manifest.json'
+    Assert-TrustedBackupPathAcl -Path $manifestFile -RequireProtected $true
+    $manifest = @(Read-BackupManifestEntries $manifestFile)
+    if ($manifest.Count -eq 0) { throw '可信备份清单为空' }
+
+    $plans = @()
+    try {
+        foreach ($entry in $manifest) {
+            $plans += Get-RestorePlan -Manifest $entry -BackupDir $resolvedBackupDir
+        }
+    } finally {
+        foreach ($plan in $plans) { Close-BackupArtifact $plan.Artifact }
+    }
+
+    return [pscustomobject]@{
+        BackupDir = $resolvedBackupDir
+        Manifest = $manifest
+    }
+}
+
+function Resolve-LatestTrustedRestorePackage {
+    $secureRoot = Get-SecureBackupRoot
+    if (-not [System.IO.Directory]::Exists($secureRoot)) { throw '没有可用的可信备份' }
+    Assert-TrustedBackupPathAcl -Path $secureRoot -RequireProtected $true
+    $candidates = @(Get-ChildItem -LiteralPath $secureRoot -Directory -ErrorAction Stop |
+        Where-Object { $_.Name -cmatch '^\d{8}_\d{6}$' } |
+        Sort-Object Name -Descending)
+    foreach ($candidate in $candidates) {
+        try { return Get-TrustedRestorePackage -BackupDir $candidate.FullName } catch { continue }
+    }
+    throw '没有通过 owner、DACL、manifest、哈希和身份验证的可信备份'
+}
+
 function Invoke-Clean {
     if (-not (Is-Admin)) {
         Write-Host '错误: clean 模式需要管理员权限。请右键以管理员身份运行 PowerShell 再执行。' -ForegroundColor Red
@@ -1816,24 +1851,18 @@ function Invoke-Restore {
         Write-Host '错误: restore 模式需要管理员权限。' -ForegroundColor Red
         exit 1
     }
-    try { $BackupDir = Resolve-TrustedRestoreBackupDirectory -RequestedPath $BackupDir -LegacyRoot $script:BackupRoot } catch {
-        Write-Host ('备份包信任验证失败，未读取包且未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
-        exit 1
-    }
-    $manifestFile = Join-Path $BackupDir 'manifest.json'
     try {
-        $BackupDir = Assert-TrustedBackupPackagePath $BackupDir
-        Assert-TrustedBackupPathAcl -Path $manifestFile -RequireProtected $true
+        if ($BackupDir -ceq 'latest') {
+            $package = Resolve-LatestTrustedRestorePackage
+        } else {
+            $resolvedBackupDir = Resolve-TrustedRestoreBackupDirectory -RequestedPath $BackupDir -LegacyRoot $script:BackupRoot
+            $package = Get-TrustedRestorePackage -BackupDir $resolvedBackupDir
+        }
+        $BackupDir = $package.BackupDir
+        $manifest = @($package.Manifest)
     } catch {
-        Write-Host ('备份包/manifest ACL 信任验证失败，未读取包且未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
-        exit 1
-    }
-    try { $manifest = @(Read-BackupManifestEntries $manifestFile) } catch {
-        Write-Host ('备份清单验证失败，未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
-        exit 1
-    }
-    if (-not $manifest -or @($manifest).Count -eq 0) {
-        Write-Host "备份清单为空: $manifestFile (可能是损坏的备份)" -ForegroundColor Red
+        Write-Host ('备份包信任验证失败，未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
+        if ($BackupDir -ceq 'latest') { exit 3 }
         exit 1
     }
     Write-Step "从备份恢复: $BackupDir"

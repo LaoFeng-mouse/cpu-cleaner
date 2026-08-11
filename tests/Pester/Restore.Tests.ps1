@@ -472,4 +472,35 @@ Describe '恢复逻辑' {
         Should -Invoke Get-RestorePlan -Times 1 -Exactly
         Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
     }
+
+    It 'latest 在管理员核心内跳过无效新包并选择最新可信包' {
+        $newest = [pscustomobject]@{ Name='20260811_130000'; FullName=(Join-Path $TestDrive '20260811_130000') }
+        $trusted = [pscustomobject]@{ Name='20260811_120000'; FullName=(Join-Path $TestDrive '20260811_120000') }
+        Mock Get-SecureBackupRoot { $TestDrive }
+        Mock Assert-TrustedBackupPathAcl {}
+        Mock Get-ChildItem { @($newest, $trusted) }
+        Mock Get-TrustedRestorePackage {
+            param($BackupDir)
+            if ($BackupDir -eq $newest.FullName) { throw 'invalid package' }
+            [pscustomobject]@{ BackupDir=$BackupDir; Manifest=@([pscustomobject]@{type='process';name='noop';path=''}) }
+        }
+
+        $selected = Resolve-LatestTrustedRestorePackage
+
+        $selected.BackupDir | Should -BeExactly $trusted.FullName
+        Should -Invoke Get-TrustedRestorePackage -Times 2 -Exactly
+    }
+
+    It 'latest 无目录或所有包验证失败时失败关闭' {
+        Mock Get-SecureBackupRoot { $TestDrive }
+        Mock Assert-TrustedBackupPathAcl {}
+        Mock Invoke-RestorePlanAction {}
+        Mock Get-ChildItem { @() }
+        { Resolve-LatestTrustedRestorePackage } | Should -Throw '*可信备份*'
+
+        Mock Get-ChildItem { @([pscustomobject]@{Name='20260811_120000';FullName=(Join-Path $TestDrive '20260811_120000')}) }
+        Mock Get-TrustedRestorePackage { throw 'bad hash or identity' }
+        { Resolve-LatestTrustedRestorePackage } | Should -Throw '*可信备份*'
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
 }

@@ -39,7 +39,7 @@ $script:I18N = @{
         ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2} / manual {3}'; ExecCloseBlocked='管理员处理仍在启动、运行或状态未知，暂不能关闭窗口。'; ExecStatusUnknown='管理员进程状态未知'
         ExecUnauthorized='未授权、未开始处理。'; ExecNotStarted='管理员授权未完成，未开始处理，系统设置没有变化。'; ExecPartialPossible='执行进程异常结束，可能已有部分动作执行。'; ExecResultReadFailed='无法完整读取逐项结果。'
         BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
-        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复失败: {0}'; RestorePartial='恢复已执行，但部分条目验证失败。'; RestoreNotStarted='管理员授权未完成，恢复没有开始。'; RestoreMayHaveChanged='恢复进程异常结束，部分设置可能已经改变。'
+        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复最近的可信备份。'; RestoreNone='没有通过安全验证的可信备份。'; RestoreErr='恢复失败: {0}'; RestorePartial='恢复已执行，但部分条目验证失败。'; RestoreNotStarted='管理员授权未完成，恢复没有开始。'; RestoreMayHaveChanged='恢复进程异常结束，部分设置可能已经改变。'; LegacyBackupUnsupported='旧版项目目录备份不可自动恢复，请重新执行一次安全处理生成可信备份。'
         AutoStage1='轻盈幻想阶段插图'; AutoStage2='看清现实阶段插图'; AutoStage3='谨慎整理阶段插图'; AutoStage4='幻想落地阶段插图'; AutoResult='扫描结果摘要'; AutoCompleted='处理或恢复结果摘要'; AutoError='错误摘要'
         State_idle_Title='鼠鼠开始幻想'; State_idle_Sub='先做只读扫描，不会修改系统。'
         State_scanning_Title='正在看清现实'; State_scanning_Sub='只展示真实阶段，不伪造完成百分比。'
@@ -68,7 +68,7 @@ $script:I18N = @{
         ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2} / manual {3}'; ExecCloseBlocked='The elevated operation is starting, running, or has unknown status. Keep this window open.'; ExecStatusUnknown='Elevated process status is unknown'
         ExecUnauthorized='Not authorized; processing did not start.'; ExecNotStarted='Administrator authorization was not completed. Processing did not start and no system settings changed.'; ExecPartialPossible='The execution process ended abnormally; some actions may already have run.'; ExecResultReadFailed='The per-item result could not be read completely.'
         BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
-        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed: {0}'; RestorePartial='Restore ran, but some items failed verification.'; RestoreNotStarted='Administrator authorization was not completed; restore did not start.'; RestoreMayHaveChanged='The restore process ended abnormally; some settings may already have changed.'
+        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored the latest trusted backup.'; RestoreNone='No backup passed the trust validation.'; RestoreErr='Restore failed: {0}'; RestorePartial='Restore ran, but some items failed verification.'; RestoreNotStarted='Administrator authorization was not completed; restore did not start.'; RestoreMayHaveChanged='The restore process ended abnormally; some settings may already have changed.'; LegacyBackupUnsupported='Legacy project-folder backups cannot be restored automatically. Run one safe cleanup to create a trusted backup.'
         AutoStage1='Light fantasy stage illustration'; AutoStage2='Face reality stage illustration'; AutoStage3='Careful cleanup stage illustration'; AutoStage4='Fantasy delivered stage illustration'; AutoResult='Scan result summary'; AutoCompleted='Cleanup or restore result summary'; AutoError='Error summary'
         State_idle_Title='The fantasy begins'; State_idle_Sub='Start with a read-only scan. No system settings will change.'
         State_scanning_Title='Looking at reality'; State_scanning_Sub='Showing real scan phases without a fabricated percentage.'
@@ -236,6 +236,15 @@ $script:ExecutionLifecycle = 'idle'
 $script:ExecutionUnknownProbeCount = 0
 $script:ExecutionUnknownProbeLimit = 3
 $script:StatePanels = @('IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel','ExecutingPanel','CompletedPanel','ErrorPanel')
+
+function Update-GuiExecuteAvailability {
+    param($List = $window.FindName('PendingList'))
+    $selectedExecutable = @($List.Items | Where-Object {
+        ($_.CanExecute -is [bool]) -and $_.CanExecute -and
+        ($_.IsChecked -is [bool]) -and $_.IsChecked
+    })
+    $window.FindName('BtnExecute').IsEnabled = ($selectedExecutable.Count -gt 0 -and -not $script:ExecutionInProgress)
+}
 
 function Set-GuiState {
     param(
@@ -1012,6 +1021,7 @@ $window.FindName('BtnOpenReview').Add_Click({
         $script:ReviewedPendingGenerationSha256 = $reviewSnapshot.Sha256
         $script:ReviewedActionIdentityKeys = $actionAllowlist
         Set-GuiState review
+        Update-GuiExecuteAvailability -List $list
     } catch {
         $list.ItemsSource = $null
         $list.Items.Clear()
@@ -1019,6 +1029,7 @@ $window.FindName('BtnOpenReview').Add_Click({
         $script:ReviewedPendingGenerationSha256 = $null
         $emptyActionKeys = [System.Collections.Generic.List[string]]::new()
         $script:ReviewedActionIdentityKeys = $emptyActionKeys.AsReadOnly()
+        Update-GuiExecuteAvailability -List $list
         Set-GuiError -Summary (Get-Text 'ReviewErrorSummary') -Mutation (Get-Text 'ReviewNoMutation') -Detail $_.Exception.Message
     }
 })
@@ -1040,17 +1051,29 @@ if ($legacyBtnLoadPending) { $legacyBtnLoadPending.Add_Click({
         $list.ItemsSource = $items
         $list.Items.Refresh()
     }
+    Update-GuiExecuteAvailability -List $list
 }) }
 
 # v1.5.5: 全选 / 清空 勾选 (v1.5.6: 全选跳过观察项 CanExecute=false)
 $window.FindName('BtnSelectAll').Add_Click({
     Set-AllChecked $window.FindName('PendingList') $true
     $window.FindName('PendingList').Items.Refresh()
+    Update-GuiExecuteAvailability
 })
 $window.FindName('BtnClearAll').Add_Click({
     Set-AllChecked $window.FindName('PendingList') $false
     $window.FindName('PendingList').Items.Refresh()
+    Update-GuiExecuteAvailability
 })
+
+$script:PendingSelectionChangedHandler = [System.Windows.RoutedEventHandler]{
+    param($sender, $eventArgs)
+    Update-GuiExecuteAvailability -List $window.FindName('PendingList')
+}
+$window.FindName('PendingList').AddHandler(
+    [System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,
+    $script:PendingSelectionChangedHandler
+)
 
 # ---------- 异步处理已选择项目 (review snapshot → 临时清单 → elevated clean) ----------
 function Remove-GuiExecutionTempFile {
@@ -1090,6 +1113,7 @@ function Clear-GuiExecutionResources {
     $script:ExecutionInProgress = $false
     $script:ExecutionLifecycle = 'idle'
     $script:ExecutionUnknownProbeCount = 0
+    Update-GuiExecuteAvailability
     return $true
 }
 
@@ -1353,6 +1377,7 @@ function Start-GuiExecution {
     $script:ExecutionInProgress = $true
     $script:ExecutionLifecycle = 'starting'
     $script:ExecutionUnknownProbeCount = 0
+    Update-GuiExecuteAvailability -List $List
     $startedProcess = $false
     try {
         $checked = @(Resolve-GuiReviewedActions -List $List)
@@ -1410,23 +1435,7 @@ if ($legacyBtnExec) { $legacyBtnExec.Add_Click({ Start-GuiExecution }) }
 $legacyBtnResult = $window.FindName('BtnResult')
 if ($legacyBtnResult) { $legacyBtnResult.Add_Click({
     $out = $window.FindName('ResultOutput')
-    $backupRoot = Join-Path $script:Root 'backups'
-    if (-not (Test-Path $backupRoot)) { $out.Text = (Get-Text 'NoBackup'); return }
-    $latest = Get-ChildItem $backupRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $latest) { $out.Text = (Get-Text 'NoBackup'); return }
-    $mf = Join-Path $latest.FullName 'manifest.json'
-    if (-not (Test-Path $mf)) { $out.Text = "manifest not found: $mf"; return }
-    $man = Get-Content $mf -Raw -Encoding UTF8 | ConvertFrom-Json
-    $lines = @("latest: $($latest.Name)", '')
-    $ok = 0; $bad = 0
-    foreach ($m in $man) {
-        $v = if ($m.verified) { 'OK' } else { 'FAIL' }
-        $lines += "  [$v] $($m.type) $($m.name)"
-        if ($m.verified) { $ok++ } else { $bad++ }
-    }
-    $lines += ''; $lines += "success $ok, failed $bad"
-    $lines += ''; $lines += "restore: cpu-cleaner.ps1 -Mode restore -BackupDir `".\backups\$($latest.Name)`""
-    $out.Text = ($lines -join "`r`n")
+    $out.Text = Get-Text 'LegacyBackupUnsupported'
 }) }
 
 function Show-GuiMessage {
@@ -1437,44 +1446,28 @@ function Show-GuiMessage {
     [System.Windows.MessageBox]::Show($Message, (Get-Text 'AppName'), 'OK', $Icon) | Out-Null
 }
 
-function Get-GuiRestoreRows {
-    param([Parameter(Mandatory=$true)][string]$BackupPath)
-    $manifestPath = Join-Path $BackupPath 'manifest.json'
-    if (-not (Test-Path -LiteralPath $manifestPath)) { return @() }
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $rows = foreach ($item in @($manifest)) {
-        $state = if ($item.verified -eq $true) { 'success' } else { 'failed' }
-        [pscustomobject]@{
-            State = $state
-            StateLabel = ('[{0}] {1} {2}' -f $state, [string]$item.type, [string]$item.name)
-            Name = [string]$item.name
-            Type = [string]$item.type
-            Reason = [string]$item.note
-        }
-    }
-    return @($rows)
-}
-
 function Invoke-GuiRestoreLatest {
-    $backupRoot = Join-Path $script:Root 'backups'
-    $latest = Get-ChildItem $backupRoot -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $latest) {
-        Show-GuiMessage -Message (Get-Text 'RestoreNone') -Icon Information
-        return $false
-    }
     $window.FindName('CompletedSummaryText').Text = ''
     $window.FindName('CompletedList').ItemsSource = $null
     try {
-        $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','restore','-BackupDir',"`"$script:Root\backups\$($latest.Name)`""
+        $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','restore','-BackupDir','latest'
         if ($null -eq $proc) { throw '管理员恢复进程未启动。' }
         $proc.WaitForExit()
         $exitCode = [int]$proc.ExitCode
-        if ($exitCode -in @(0,2)) {
-            $window.FindName('CompletedList').ItemsSource = @(Get-GuiRestoreRows -BackupPath $latest.FullName)
-            $restoreSummary = if ($exitCode -eq 0) { (Get-Text 'RestoreOk') -f $latest.Name } else { Get-Text 'RestorePartial' }
-            Set-GuiCompletedSummary -Failed $(if ($exitCode -eq 2) { 1 } else { 0 }) -Text $restoreSummary
+        if ($exitCode -eq 0) {
+            Set-GuiCompletedSummary -Text (Get-Text 'RestoreOk')
             Set-GuiState completed -Force
             return $true
+        }
+        if ($exitCode -eq 2) {
+            Set-GuiCompletedSummary -Failed 1 -Text (Get-Text 'RestorePartial')
+            Set-GuiState completed -Force
+            return $false
+        }
+        if ($exitCode -eq 3) {
+            $summary = Get-Text 'RestoreNone'
+            Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreNotStarted') -Detail $summary
+            return $false
         }
         $summary = (Get-Text 'RestoreErr') -f "ExitCode=$exitCode"
         Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreMayHaveChanged') -Detail $summary

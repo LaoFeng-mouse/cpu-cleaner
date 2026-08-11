@@ -1236,6 +1236,64 @@ Describe '勾选视图 (v1.5.5)' {
         $items[0].IsChecked | Should -Be $false
     }
 
+    It '没有已选择的可执行项时禁用执行按钮' {
+        $list = $script:Win.FindName('PendingList')
+        $list.ItemsSource = @([pscustomobject]@{CanExecute=$false;IsChecked=$false})
+        $script:ExecutionInProgress = $false
+
+        Update-GuiExecuteAvailability -List $list
+
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+    }
+
+    It '执行按钮跟随可执行项选择并在执行中保持禁用' {
+        $list = $script:Win.FindName('PendingList')
+        $row = [pscustomobject]@{CanExecute=$true;IsChecked=$false}
+        $list.ItemsSource = @($row)
+        $script:ExecutionInProgress = $false
+        Update-GuiExecuteAvailability -List $list
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+
+        $row.IsChecked = $true
+        Update-GuiExecuteAvailability -List $list
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeTrue
+
+        $script:ExecutionInProgress = $true
+        Update-GuiExecuteAvailability -List $list
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+
+        $script:ExecutionInProgress = $false
+        Set-AllChecked $list $false
+        Update-GuiExecuteAvailability -List $list
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+    }
+
+    It '执行按钮拒绝字符串 true 和其他非布尔选择状态' {
+        $list = $script:Win.FindName('PendingList')
+        $list.ItemsSource = @([pscustomobject]@{CanExecute='true';IsChecked='true'})
+        $script:ExecutionInProgress = $false
+
+        Update-GuiExecuteAvailability -List $list
+
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+    }
+
+    It '单项 checkbox 点击通过列表路由事件立即重算执行按钮' {
+        $list = $script:Win.FindName('PendingList')
+        $row = [pscustomobject]@{CanExecute=$true;IsChecked=$false}
+        $list.ItemsSource = @($row)
+        $script:ExecutionInProgress = $false
+        Update-GuiExecuteAvailability -List $list
+
+        $row.IsChecked = $true
+        $list.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeTrue
+
+        $row.IsChecked = $false
+        $list.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+    }
+
     It 'Get-CleanResultSummary 支持自定义路径 (-Path)' {
         $tmpRoot = Join-Path $env:TEMP ("gui_sum2_" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
@@ -2268,22 +2326,29 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $mainBytes
     }
 
-    It '恢复 exit 0 在单页 completed 状态展示成功且不弹成功模态框' {
-        $tmpRoot = Join-Path $TestDrive ('restore-ok-' + [guid]::NewGuid().ToString('N'))
-        $backup = Join-Path $tmpRoot 'backups\20260811_010101'
-        [void][System.IO.Directory]::CreateDirectory($backup)
-        [System.IO.File]::WriteAllText((Join-Path $backup 'manifest.json'), '[{"type":"service","name":"DemoService","verified":true}]', [System.Text.UTF8Encoding]::new($false))
+    It '恢复只把固定 latest 哨兵交给管理员核心且不读取旧 backups 或 manifest' {
         $process = [pscustomobject]@{ ExitCode=0; Waited=$false }
         $process | Add-Member ScriptMethod WaitForExit { $this.Waited=$true }
-        Mock Start-Process { $process }
+        Mock Start-Process {
+            $ArgumentList | Should -Contain '-BackupDir'
+            $ArgumentList | Should -Contain 'latest'
+            ($ArgumentList -join ' ') | Should -Not -Match '\\backups\\|manifest\.json'
+            $process
+        }
         Mock Show-GuiMessage {}
-        $oldRoot=$script:Root; $script:Root=$tmpRoot
-        try { Invoke-GuiRestoreLatest | Should -BeTrue } finally { $script:Root=$oldRoot }
+        Invoke-GuiRestoreLatest | Should -BeTrue
 
         $process.Waited | Should -BeTrue
         $script:GuiState | Should -Be 'completed'
         $script:Win.FindName('CompletedSummaryText').Text | Should -Match '已恢复'
+        $script:Win.FindName('CompletedList').ItemsSource | Should -BeNullOrEmpty
         Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
+
+        $source = Get-Content -LiteralPath (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw -Encoding UTF8
+        $restoreStart = $source.IndexOf('function Invoke-GuiRestoreLatest')
+        $restoreEnd = $source.IndexOf('# ---------- 恢复最近一次处理', $restoreStart)
+        $restoreBody = $source.Substring($restoreStart, $restoreEnd - $restoreStart)
+        $restoreBody | Should -Not -Match 'Join-Path \$script:Root ''backups''|Get-ChildItem|Get-Content|manifest\.json'
     }
 
     It 'completed 摘要在存在失败项时使用危险色强调' {
@@ -2294,34 +2359,38 @@ Describe '勾选视图 (v1.5.5)' {
         $summary.Foreground.ToString() | Should -Be $script:Win.Resources['Danger'].ToString()
     }
 
-    It '恢复 exit 2 在单页 completed 状态如实展示部分失败与 manifest 明细' {
-        $tmpRoot = Join-Path $TestDrive ('restore-partial-' + [guid]::NewGuid().ToString('N'))
-        $backup = Join-Path $tmpRoot 'backups\20260811_020202'
-        [void][System.IO.Directory]::CreateDirectory($backup)
-        [System.IO.File]::WriteAllText((Join-Path $backup 'manifest.json'), '[{"type":"service","name":"GoodService","verified":true},{"type":"task","name":"FailedTask","verified":false}]', [System.Text.UTF8Encoding]::new($false))
+    It '恢复 exit 2 只展示脱敏的部分失败状态且不伪报成功' {
         $process = [pscustomobject]@{ ExitCode=2 }
         $process | Add-Member ScriptMethod WaitForExit {}
         Mock Start-Process { $process }
         Mock Show-GuiMessage {}
-        $oldRoot=$script:Root; $script:Root=$tmpRoot
-        try { Invoke-GuiRestoreLatest | Should -BeTrue } finally { $script:Root=$oldRoot }
+        Invoke-GuiRestoreLatest | Should -BeFalse
 
         $script:GuiState | Should -Be 'completed'
         $script:Win.FindName('CompletedSummaryText').Text | Should -Match '部分'
-        @($script:Win.FindName('CompletedList').ItemsSource | Where-Object { $_.State -eq 'failed' -and $_.Name -eq 'FailedTask' }).Count | Should -Be 1
+        $script:Win.FindName('CompletedList').ItemsSource | Should -BeNullOrEmpty
         Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
     }
 
+    It '恢复 exit 3 如实显示无可信备份且失败关闭' {
+        $process = [pscustomobject]@{ ExitCode=3 }
+        $process | Add-Member ScriptMethod WaitForExit {}
+        Mock Start-Process { $process }
+        Mock Show-GuiMessage {}
+
+        Invoke-GuiRestoreLatest | Should -BeFalse
+
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorSummaryText').Text | Should -Match '备份|backup'
+        $script:Win.FindName('CompletedSummaryText').Text | Should -Not -Match '已恢复|Restored'
+    }
+
     It '恢复非零错误进入 error 且只显示警告模态框' {
-        $tmpRoot = Join-Path $TestDrive ('restore-error-' + [guid]::NewGuid().ToString('N'))
-        $backup = Join-Path $tmpRoot 'backups\20260811_030303'
-        [void][System.IO.Directory]::CreateDirectory($backup)
         $process = [pscustomobject]@{ ExitCode=7 }
         $process | Add-Member ScriptMethod WaitForExit {}
         Mock Start-Process { $process }
         Mock Show-GuiMessage {}
-        $oldRoot=$script:Root; $script:Root=$tmpRoot
-        try { Invoke-GuiRestoreLatest | Should -BeFalse } finally { $script:Root=$oldRoot }
+        Invoke-GuiRestoreLatest | Should -BeFalse
 
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '7'
@@ -2329,13 +2398,9 @@ Describe '勾选视图 (v1.5.5)' {
     }
 
     It '恢复 UAC 取消进入 error 且不宣称恢复成功' {
-        $tmpRoot = Join-Path $TestDrive ('restore-uac-' + [guid]::NewGuid().ToString('N'))
-        $backup = Join-Path $tmpRoot 'backups\20260811_040404'
-        [void][System.IO.Directory]::CreateDirectory($backup)
         Mock Start-Process { throw 'simulated UAC cancellation' }
         Mock Show-GuiMessage {}
-        $oldRoot=$script:Root; $script:Root=$tmpRoot
-        try { Invoke-GuiRestoreLatest | Should -BeFalse } finally { $script:Root=$oldRoot }
+        Invoke-GuiRestoreLatest | Should -BeFalse
 
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '恢复|Restore'
