@@ -425,6 +425,7 @@ Invoke-Clean
     }
     It '数组、非字符串、null 或空 hit_type 不能进入执行队列' {
         $cases = @(
+            [pscustomobject]@{ label='unknown string'; hit_type='bogus' },
             [pscustomobject]@{ label='array bypass'; hit_type=@('bogus','service') },
             [pscustomobject]@{ label='number'; hit_type=1 },
             [pscustomobject]@{ label='null'; hit_type=$null },
@@ -560,8 +561,7 @@ Invoke-Clean
         $cases = @(
             [pscustomobject]@{ action='disable_service'; hit_type='task'; pattern='\X\T1'; field='task_path'; service=''; task='\X\T1'; autoSource=''; autoName=''; process=''; pid=0; path='' },
             [pscustomobject]@{ action='disable_task'; hit_type='service'; pattern='S1'; field='service_name'; service='S1'; task=''; autoSource=''; autoName=''; process=''; pid=0; path='' },
-            [pscustomobject]@{ action='remove_autostart'; hit_type='process'; pattern='P1'; field='process_name'; service=''; task=''; autoSource=''; autoName=''; process='P1'; pid=101; path='C:\Apps\P1.exe' },
-            [pscustomobject]@{ action='uninstall'; hit_type='autostart'; pattern='X'; field='autostart_name'; service=''; task=''; autoSource='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autoName='X'; process=''; pid=0; path='' }
+            [pscustomobject]@{ action='remove_autostart'; hit_type='process'; pattern='P1'; field='process_name'; service=''; task=''; autoSource=''; autoName=''; process='P1'; pid=101; path='C:\Apps\P1.exe' }
         )
         foreach ($case in $cases) {
             $hit = [pscustomobject]@{
@@ -577,6 +577,30 @@ Invoke-Clean
             @($p.actions).Count | Should -Be 0 -Because "$($case.action) cannot target $($case.hit_type)"
             @($p.observations).Count | Should -Be 1 -Because "$($case.action) cannot target $($case.hit_type)"
             $p.observations[0].obs_reason | Should -Match '动作.*命中类型.*不匹配'
+        }
+    }
+    It 'uninstall 保持 service process autostart task 四类 profile 契约' {
+        $cases = @(
+            [pscustomobject]@{ hit_type='service'; pattern='S1'; field='service_name'; service='S1'; task=''; autoSource=''; autoName=''; process=''; pid=0; path='' },
+            [pscustomobject]@{ hit_type='process'; pattern='P1'; field='process_name'; service=''; task=''; autoSource=''; autoName=''; process='P1'; pid=101; path='C:\Apps\P1.exe' },
+            [pscustomobject]@{ hit_type='autostart'; pattern='X'; field='autostart_name'; service=''; task=''; autoSource='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autoName='X'; process=''; pid=0; path='' },
+            [pscustomobject]@{ hit_type='task'; pattern='\X\T1'; field='task_path'; service=''; task='\X\T1'; autoSource=''; autoName=''; process=''; pid=0; path='' }
+        )
+        foreach ($case in $cases) {
+            $hit = [pscustomobject]@{
+                id=('uninstall-' + $case.hit_type); vendor='T'; name_cn='Uninstall'; action='uninstall'; hit_type=$case.hit_type; detail='target'; reason_cn='r'
+                service_name=$case.service; autostart_source=$case.autoSource; autostart_name=$case.autoName; task_path=$case.task
+                process_name=$case.process; process_id=$case.pid; process_path=$case.path
+                safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern=$case.pattern; matched_type='exact'; matched_field=$case.field
+            }
+
+            Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth ([pscustomobject]@{ system_info='complete'; services='complete'; tasks='complete' }) -ScanWarnings @()
+            $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+            @($p.actions).Count | Should -Be 1 -Because "uninstall is valid for $($case.hit_type)"
+            @($p.observations).Count | Should -Be 0 -Because "uninstall is valid for $($case.hit_type)"
+            $p.actions[0].action | Should -BeExactly 'uninstall'
+            $p.actions[0].hit_type | Should -BeExactly $case.hit_type
         }
     }
     It '服务已禁用且停止时不写入 action 或 observation' {

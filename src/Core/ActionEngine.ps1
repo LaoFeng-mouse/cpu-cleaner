@@ -39,11 +39,13 @@ function Test-HitMatcherEvidenceShape {
 
 function Test-ActionMatchesHitType($Action, $HitType) {
     if ($Action -isnot [string] -or $HitType -isnot [string]) { return $false }
+    if ($Action -ceq 'uninstall') {
+        return @('service','process','autostart','task') -ccontains $HitType
+    }
     switch -CaseSensitive ($HitType) {
         'service'   { return $Action -ceq 'disable_service' }
         'autostart' { return $Action -ceq 'remove_autostart' }
         'task'      { return $Action -ceq 'disable_task' }
-        'process'   { return $Action -ceq 'uninstall' }
         default     { return $false }
     }
 }
