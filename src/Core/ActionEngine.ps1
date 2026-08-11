@@ -119,6 +119,8 @@ function New-AutostartRemovalResult($Status, $Reason, $Backup = '', $Manifest = 
 
 function Invoke-LiteralAutostartRemovalFromKey {
     param($RegistryKey, $Source, $Name, $ExpectedValue, $BackupDir, $Tag, [bool]$RequireArtifactIdentity = $false)
+    $artifact = $null
+    try {
     if ($null -eq $RegistryKey) { return New-AutostartRemovalResult 'failed' '注册表键未打开' }
     if ($Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name) -or
         $ExpectedValue -isnot [string] -or [string]::IsNullOrWhiteSpace($ExpectedValue)) {
@@ -159,7 +161,8 @@ function Invoke-LiteralAutostartRemovalFromKey {
     if ($RequireArtifactIdentity) {
         try {
             $backup = Resolve-ValidatedBackupPath $BackupDir $backup
-            $null = Assert-BackupArtifactIdentity -Type 'autostart' -Path $backup -Key $Source -Name $literalName -ExpectedValue $currentValue
+            $artifact = Open-LockedBackupArtifact $backup
+            $null = Assert-BackupArtifactIdentity -Type 'autostart' -Artifact $artifact -Key $Source -Name $literalName -ExpectedValue $currentValue
         } catch {
             return New-AutostartRemovalResult 'failed' ('单值备份身份验证失败: ' + $_.Exception.Message) $backup
         }
@@ -168,7 +171,7 @@ function Invoke-LiteralAutostartRemovalFromKey {
     $manifestEntry = [pscustomobject]@{
         backup_format_version=1; entry_id=$Tag; type='autostart'; key=$Source; name=$literalName
         target_identity=($Source + '|' + $literalName); backup=$backup
-        backup_verified=$true; backup_sha256=(Get-FileSha256Hex $backup)
+        backup_verified=$true; backup_sha256=$(if ($null -ne $artifact) { $artifact.Sha256 } else { Get-FileSha256Hex $backup })
         execution_status='prepared'; verified=$false; note='restore: 单值恢复'
     }
     try {
@@ -210,6 +213,7 @@ function Invoke-LiteralAutostartRemovalFromKey {
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
         return New-AutostartRemovalResult 'failed' ('字面删除或验证失败: ' + $_.Exception.Message) $backup $manifestEntry
     }
+    } finally { Close-BackupArtifact $artifact }
 }
 
 function Invoke-LiteralAutostartRemoval {
@@ -1076,16 +1080,21 @@ function Normalize-TaskPathIdentity($TaskPath) {
 }
 
 function Assert-BackupArtifactIdentity {
-    param($Type, $Path, $TargetIdentity, $Key = '', $Name = '', $ExpectedValue = $null)
-    if ($Path -isnot [string] -or -not [System.IO.File]::Exists($Path) -or (Get-Item -LiteralPath $Path).Length -le 0) {
-        throw '备份文件缺失或为空'
+    param($Type, $Path, $Artifact, $TargetIdentity, $Key = '', $Name = '', $ExpectedValue = $null)
+    $ownedArtifact = $false
+    if ($null -eq $Artifact) {
+        $Artifact = Open-LockedBackupArtifact $Path
+        $ownedArtifact = $true
     }
+    try {
+    $content = $Artifact.Text
     switch -CaseSensitive ($Type) {
         'service' {
-            if ($TargetIdentity -isnot [string] -or $TargetIdentity -cnotmatch '^[A-Za-z0-9_.]+$' -or -not (Test-RegistryBackupFile $Path)) {
+            if ($TargetIdentity -isnot [string] -or $TargetIdentity -cnotmatch '^[A-Za-z0-9_.]+$' -or
+                $content -notmatch '^(Windows Registry Editor Version 5\.00|REGEDIT4)(\r?\n)' -or
+                $content -notmatch '(?m)^\[HKEY_[A-Z_]+\\[^\]]+\]\s*$') {
                 throw '服务备份格式或目标身份无效'
             }
-            $content = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
             $escapedName = [regex]::Escape($TargetIdentity)
             if ($content -notmatch "(?mi)^\[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\$escapedName\]\s*$") {
                 throw '服务备份目标身份不匹配'
@@ -1094,20 +1103,24 @@ function Assert-BackupArtifactIdentity {
         }
         'task' {
             $normalizedTarget = Normalize-TaskPathIdentity $TargetIdentity
-            try { [xml]$xmlDoc = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop } catch { throw ('任务备份格式无效: ' + $_.Exception.Message) }
+            try { [xml]$xmlDoc = $content } catch { throw ('任务备份格式无效: ' + $_.Exception.Message) }
             if ($null -eq $xmlDoc.DocumentElement -or $xmlDoc.DocumentElement.LocalName -cne 'Task') { throw '任务备份格式无效' }
             $uriNode = $xmlDoc.SelectSingleNode("//*[local-name()='RegistrationInfo']/*[local-name()='URI']")
             if ($null -eq $uriNode -or
                 -not [string]::Equals((Normalize-TaskPathIdentity $uriNode.InnerText), $normalizedTarget, [System.StringComparison]::OrdinalIgnoreCase)) {
                 throw '任务备份目标身份不匹配'
             }
-            return [pscustomobject]@{ Type='task'; Info=$null; Xml=$xmlDoc.OuterXml }
+            return [pscustomobject]@{ Type='task'; Info=$null; Xml=$xmlDoc.OuterXml; TaskFingerprint=(Get-TaskDefinitionFingerprint $xmlDoc.OuterXml) }
         }
         'autostart' {
             if ($Key -isnot [string] -or [string]::IsNullOrWhiteSpace($Key) -or $Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name)) {
                 throw '自启动目标身份无效'
             }
-            try { $info = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch { throw ('自启动备份格式无效: ' + $_.Exception.Message) }
+            try {
+                Assert-JsonPropertyNamesUnique $content
+                $info = $content | ConvertFrom-Json -ErrorAction Stop
+                Assert-AutostartArtifactSchema $info
+            } catch { throw ('自启动备份格式无效: ' + $_.Exception.Message) }
             if (-not [string]::Equals($info.key, $Key, [System.StringComparison]::OrdinalIgnoreCase) -or
                 -not [string]::Equals($info.name, $Name, [System.StringComparison]::OrdinalIgnoreCase)) {
                 throw '自启动备份目标身份不匹配'
@@ -1116,11 +1129,54 @@ function Assert-BackupArtifactIdentity {
                 ($info.value -isnot [string] -or -not [string]::Equals($info.value, $ExpectedValue, [System.StringComparison]::OrdinalIgnoreCase))) {
                 throw '自启动备份 Value 与目标不匹配'
             }
-            if ($info.value_type -isnot [string] -or [string]::IsNullOrWhiteSpace($info.value_type)) { throw '自启动备份类型无效' }
             return [pscustomobject]@{ Type='autostart'; Info=$info; Xml=$null }
         }
         default { throw '备份 artifact 类型不受支持' }
     }
+    } finally {
+        if ($ownedArtifact) { Close-BackupArtifact $Artifact }
+    }
+}
+
+function Test-StrictInteger($Value) {
+    return ($Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64])
+}
+
+function Assert-AutostartArtifactSchema($Info) {
+    if ($null -eq $Info) { throw '自启动备份对象为空' }
+    $allowed = @('key','name','value_type','value')
+    foreach ($property in $Info.PSObject.Properties) { if ($property.Name -cnotin $allowed) { throw '自启动备份包含未知字段' } }
+    foreach ($field in @('key','name','value_type')) {
+        if ($Info.PSObject.Properties.Name -cnotcontains $field -or $Info.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($Info.$field)) {
+            throw "自启动备份字段 $field 无效"
+        }
+    }
+    if ($Info.PSObject.Properties.Name -cnotcontains 'value') { throw '自启动备份缺少 value' }
+    if ($Info.value_type -cnotin @('String','ExpandString','DWord','QWord','Binary','MultiString')) { throw '自启动备份 value_type 不受支持' }
+    switch -CaseSensitive ($Info.value_type) {
+        { $_ -in @('String','ExpandString') } { if ($Info.value -isnot [string]) { throw '自启动字符串 value 类型无效' } }
+        { $_ -in @('DWord','QWord') } { if (-not (Test-StrictInteger $Info.value)) { throw '自启动整数 value 类型无效' } }
+        'Binary' { foreach ($item in @($Info.value)) { if (-not (Test-StrictInteger $item) -or [int64]$item -lt 0 -or [int64]$item -gt 255) { throw '自启动 Binary value 无效' } } }
+        'MultiString' { foreach ($item in @($Info.value)) { if ($item -isnot [string]) { throw '自启动 MultiString value 无效' } } }
+    }
+}
+
+function Get-TaskDefinitionFingerprint($Xml) {
+    if ($Xml -isnot [string] -or [string]::IsNullOrWhiteSpace($Xml)) { throw '任务 XML 为空' }
+    try { [xml]$doc = $Xml } catch { throw '任务 XML 无效' }
+    $uri = $doc.SelectSingleNode("//*[local-name()='RegistrationInfo']/*[local-name()='URI']")
+    if ($null -eq $uri -or $null -eq $doc.DocumentElement -or $doc.DocumentElement.LocalName -cne 'Task') { throw '任务 XML 缺少关键定义' }
+    $identity = (Normalize-TaskPathIdentity $uri.InnerText) + '|' + $doc.OuterXml
+    return Get-BytesSha256Hex ((New-Object System.Text.UTF8Encoding($false)).GetBytes($identity))
+}
+
+function Test-AutostartValueEqual($Expected, $Actual) {
+    if ($null -eq $Expected -or $null -eq $Actual) { return $false }
+    if ($Expected.value_type -cne $Actual.value_type -or
+        -not [string]::Equals($Expected.key, $Actual.key, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($Expected.name, $Actual.name, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    return ((ConvertTo-Json -InputObject $Expected.value -Compress -Depth 20) -ceq (ConvertTo-Json -InputObject $Actual.value -Compress -Depth 20))
 }
 
 function Invoke-ServiceConfigDisable($ServiceName) {
@@ -1130,6 +1186,8 @@ function Invoke-ServiceConfigDisable($ServiceName) {
 
 function Invoke-ServiceDisableAction {
     param($Pending, $BackupDir, $Tag)
+    $artifact = $null
+    try {
     $srvName = $Pending.service_name
     if ($srvName -isnot [string] -or $srvName -cnotmatch '^[A-Za-z0-9_.]+$') {
         return [pscustomobject]@{ status='skipped'; reason='服务名无效'; backup=''; manifest=$null }
@@ -1139,14 +1197,15 @@ function Invoke-ServiceDisableAction {
         if (-not (Test-ServiceBackupInfo $info)) { throw '服务原始配置不完整，无法安全备份' }
         $bak = Backup-RegistryKey "HKLM:\SYSTEM\CurrentControlSet\Services\$srvName" $BackupDir $Tag
         $bak = Resolve-ValidatedBackupPath $BackupDir $bak
-        $null = Assert-BackupArtifactIdentity -Type 'service' -Path $bak -TargetIdentity $srvName
+        $artifact = Open-LockedBackupArtifact $bak
+        $null = Assert-BackupArtifactIdentity -Type 'service' -Artifact $artifact -TargetIdentity $srvName
     } catch {
         return [pscustomobject]@{ status='failed'; reason=('服务备份失败: ' + $_.Exception.Message); backup=''; manifest=$null }
     }
 
     $manifest = [pscustomobject]@{
         backup_format_version=1; entry_id=$Tag; type='service'; name=$srvName; target_identity=$srvName
-        backup=$bak; backup_verified=$true; backup_sha256=(Get-FileSha256Hex $bak)
+        backup=$bak; backup_verified=$true; backup_sha256=$artifact.Sha256
         start_type_sc=$info.start_type_sc; start_type_display=$info.start_type_display
         status=$info.status; delayed_autostart=$info.delayed_autostart
         execution_status='prepared'; verified=$false; note='restore: sc config <name> start= <start_type_sc>'
@@ -1172,6 +1231,7 @@ function Invoke-ServiceDisableAction {
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
         return [pscustomobject]@{ status='failed'; reason=('服务修改或验证失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
     }
+    } finally { Close-BackupArtifact $artifact }
 }
 
 function Write-TaskXmlBackup($Xml, $BackupDir, $Tag) {
@@ -1188,6 +1248,8 @@ function Write-TaskXmlBackup($Xml, $BackupDir, $Tag) {
 
 function Invoke-TaskDisableAction {
     param($Pending, $BackupDir, $Tag)
+    $artifact = $null
+    try {
     try { $taskPath = Normalize-TaskPathIdentity $Pending.task_path } catch {
         return [pscustomobject]@{ status='skipped'; reason='计划任务路径无效'; backup=''; manifest=$null }
     }
@@ -1199,14 +1261,15 @@ function Invoke-TaskDisableAction {
         $xml = Export-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop
         $bak = Write-TaskXmlBackup -Xml $xml -BackupDir $BackupDir -Tag $Tag
         $bak = Resolve-ValidatedBackupPath $BackupDir $bak
-        $null = Assert-BackupArtifactIdentity -Type 'task' -Path $bak -TargetIdentity $taskPath
+        $artifact = Open-LockedBackupArtifact $bak
+        $null = Assert-BackupArtifactIdentity -Type 'task' -Artifact $artifact -TargetIdentity $taskPath
     } catch {
         return [pscustomobject]@{ status='failed'; reason=('计划任务备份失败: ' + $_.Exception.Message); backup=''; manifest=$null }
     }
 
     $manifest = [pscustomobject]@{
         backup_format_version=1; entry_id=$Tag; type='task'; name=$taskPath; target_identity=$taskPath
-        backup=$bak; backup_verified=$true; backup_sha256=(Get-FileSha256Hex $bak)
+        backup=$bak; backup_verified=$true; backup_sha256=$artifact.Sha256
         execution_status='prepared'; verified=$false
         note='restore: Register-ScheduledTask -Xml <backup> -TaskName <name> -TaskPath <path> -Force'
     }
@@ -1230,6 +1293,7 @@ function Invoke-TaskDisableAction {
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
         return [pscustomobject]@{ status='failed'; reason=('计划任务禁用或验证失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
     }
+    } finally { Close-BackupArtifact $artifact }
 }
 
 function Get-ServiceRestorePlan($Manifest) {
@@ -1249,7 +1313,10 @@ function Get-ServiceRestorePlan($Manifest) {
     }
     if ($scVal -cnotin @('auto','demand','disabled','boot','system')) { throw '服务恢复启动类型无效' }
     $shouldStart = ($Manifest.status -eq 'Running')
-    if ($Manifest.PSObject.Properties.Name -contains 'restart_after_restore') { $shouldStart = [bool]$Manifest.restart_after_restore }
+    if ($Manifest.PSObject.Properties.Name -contains 'restart_after_restore') {
+        if ($Manifest.restart_after_restore -isnot [bool]) { throw 'restart_after_restore 必须是真正 Boolean' }
+        $shouldStart = $Manifest.restart_after_restore
+    }
     return [pscustomobject]@{ StartType=$scVal; ShouldStart=$shouldStart }
 }
 
@@ -1292,7 +1359,7 @@ function Resolve-ValidatedBackupPath($BackupDir, $BackupPath) {
     return $finalPath
 }
 
-function Assert-NewManifestBackupBinding($Manifest, $BackupPath, $ExpectedIdentity) {
+function Assert-NewManifestBackupBinding($Manifest, $Artifact, $ExpectedIdentity) {
     $version = if ($Manifest.PSObject.Properties.Name -contains 'backup_format_version') { $Manifest.backup_format_version } else { $null }
     if (($version -isnot [int32] -and $version -isnot [int64]) -or [int64]$version -ne 1) {
         throw 'manifest 缺少受支持的明确备份格式版本'
@@ -1305,30 +1372,58 @@ function Assert-NewManifestBackupBinding($Manifest, $BackupPath, $ExpectedIdenti
         throw 'manifest 目标身份不匹配'
     }
     if ($Manifest.backup_sha256 -isnot [string] -or $Manifest.backup_sha256 -notmatch '^[0-9A-Fa-f]{64}$' -or
-        -not [string]::Equals((Get-FileSha256Hex $BackupPath), $Manifest.backup_sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+        -not [string]::Equals($Artifact.Sha256, $Manifest.backup_sha256, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw '备份 SHA-256 验证失败'
     }
 }
 
+function Assert-RestoreManifestSchema($Manifest) {
+    if ($null -eq $Manifest -or $Manifest.type -isnot [string] -or $Manifest.type -cnotin @('service','autostart','task','process')) { throw 'manifest 记录类型无效' }
+    if ($Manifest.type -eq 'process') { return }
+    $version = if ($Manifest.PSObject.Properties.Name -contains 'backup_format_version') { $Manifest.backup_format_version } else { $null }
+    if (($version -isnot [int32] -and $version -isnot [int64]) -or [int64]$version -ne 1) { throw 'manifest 缺少受支持的明确备份格式版本' }
+    if ($Manifest.PSObject.Properties.Name -notcontains 'backup_verified' -or $Manifest.backup_verified -isnot [bool] -or -not $Manifest.backup_verified) { throw 'manifest 未标记验证过的备份' }
+    $common = @('backup_format_version','entry_id','type','name','target_identity','backup','backup_verified','backup_sha256','execution_status','verified','note')
+    $specific = switch -CaseSensitive ($Manifest.type) {
+        'service' { @('start_type_sc','start_type_display','status','delayed_autostart','restart_after_restore') }
+        'autostart' { @('key') }
+        'task' { @() }
+    }
+    foreach ($property in $Manifest.PSObject.Properties) { if ($property.Name -cnotin @($common + $specific)) { throw "manifest 包含未知字段: $($property.Name)" } }
+    foreach ($field in @('entry_id','type','name','target_identity','backup','backup_sha256','execution_status')) {
+        if ($Manifest.PSObject.Properties.Name -cnotcontains $field -or $Manifest.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.$field)) { throw "manifest 字段 $field 必须是非空字符串" }
+    }
+    if ($Manifest.execution_status -cnotin @('prepared','success','failed')) { throw 'manifest 执行状态不允许恢复' }
+    if ($Manifest.PSObject.Properties.Name -contains 'verified' -and $Manifest.verified -isnot [bool]) { throw 'manifest verified 必须是 Boolean' }
+    if ($Manifest.PSObject.Properties.Name -contains 'note' -and $Manifest.note -isnot [string]) { throw 'manifest note 必须是字符串' }
+    if ($Manifest.type -eq 'service') {
+        if ($Manifest.start_type_sc -isnot [string] -or $Manifest.start_type_sc -cnotin @('auto','demand','disabled','boot','system')) { throw '服务启动类型无效' }
+        if ($Manifest.PSObject.Properties.Name -contains 'start_type_display' -and ($Manifest.start_type_display -isnot [string] -or $Manifest.start_type_display -cnotin @('Automatic','Manual','Disabled','Boot','System'))) { throw '服务显示启动类型无效' }
+        if ($Manifest.PSObject.Properties.Name -contains 'status' -and ($Manifest.status -isnot [string] -or $Manifest.status -cnotin @('Running','Stopped','Paused','StartPending','StopPending','ContinuePending','PausePending'))) { throw '服务状态无效' }
+        if ($Manifest.PSObject.Properties.Name -contains 'delayed_autostart' -and (-not (Test-StrictInteger $Manifest.delayed_autostart) -or [int64]$Manifest.delayed_autostart -notin @(0,1))) { throw 'delayed_autostart 无效' }
+        if ($Manifest.PSObject.Properties.Name -contains 'restart_after_restore' -and $Manifest.restart_after_restore -isnot [bool]) { throw 'restart_after_restore 必须是真正 Boolean' }
+    }
+    if ($Manifest.type -eq 'autostart' -and ($Manifest.key -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.key))) { throw '自启动 key 必须是字符串' }
+}
+
 function Get-RestorePlan {
     param($Manifest, $BackupDir)
-    if ($null -eq $Manifest -or $Manifest.type -isnot [string]) { throw 'manifest 记录类型无效' }
-    if ($Manifest.PSObject.Properties.Name -contains 'execution_status' -and
-        $Manifest.execution_status -cnotin @('prepared','success','failed')) {
-        throw 'manifest 执行状态不允许恢复'
-    }
+    Assert-RestoreManifestSchema $Manifest
+    $artifact = $null
+    try {
     switch -CaseSensitive ($Manifest.type) {
         'service' {
             if ($Manifest.name -isnot [string] -or $Manifest.name -cnotmatch '^[A-Za-z0-9_.]+$') { throw '服务目标身份无效' }
             $backupPath = Resolve-ValidatedBackupPath $BackupDir $Manifest.backup
-            Assert-NewManifestBackupBinding $Manifest $backupPath $Manifest.name
-            $null = Assert-BackupArtifactIdentity -Type 'service' -Path $backupPath -TargetIdentity $Manifest.name
+            $artifact = Open-LockedBackupArtifact $backupPath
+            Assert-NewManifestBackupBinding $Manifest $artifact $Manifest.name
+            $null = Assert-BackupArtifactIdentity -Type 'service' -Artifact $artifact -TargetIdentity $Manifest.name
             $servicePlan = Get-ServiceRestorePlan $Manifest
             return [pscustomobject]@{
                 Type='service'; Name=$Manifest.name; BackupPath=$backupPath
                 StartType=$servicePlan.StartType; ShouldStart=$servicePlan.ShouldStart
                 HasDelayed=($Manifest.PSObject.Properties.Name -contains 'delayed_autostart')
-                DelayedAutoStart=($(if ($Manifest.delayed_autostart -eq 1 -or $Manifest.delayed_autostart -eq $true) { 1 } else { 0 }))
+                DelayedAutoStart=($(if ($Manifest.delayed_autostart -eq 1) { 1 } else { 0 })); Artifact=$artifact
             }
         }
         'autostart' {
@@ -1336,22 +1431,28 @@ function Get-RestorePlan {
                 $Manifest.name -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.name)) { throw '自启动目标身份无效' }
             $identity = $Manifest.key + '|' + $Manifest.name
             $backupPath = Resolve-ValidatedBackupPath $BackupDir $Manifest.backup
-            Assert-NewManifestBackupBinding $Manifest $backupPath $identity
+            $artifact = Open-LockedBackupArtifact $backupPath
+            Assert-NewManifestBackupBinding $Manifest $artifact $identity
             if (-not $backupPath.EndsWith('.autostart.json', [System.StringComparison]::OrdinalIgnoreCase)) { throw '自启动备份扩展名无效' }
-            $artifact = Assert-BackupArtifactIdentity -Type 'autostart' -Path $backupPath -Key $Manifest.key -Name $Manifest.name
-            return [pscustomobject]@{ Type='autostart'; Format='single_value'; Key=$Manifest.key; Name=$Manifest.name; BackupPath=$backupPath; Info=$artifact.Info }
+            $parsed = Assert-BackupArtifactIdentity -Type 'autostart' -Artifact $artifact -Key $Manifest.key -Name $Manifest.name
+            return [pscustomobject]@{ Type='autostart'; Format='single_value'; Key=$Manifest.key; Name=$Manifest.name; BackupPath=$backupPath; Info=$parsed.Info; Artifact=$artifact }
         }
         'task' {
             $normalizedTaskName = Normalize-TaskPathIdentity $Manifest.name
             $backupPath = Resolve-ValidatedBackupPath $BackupDir $Manifest.backup
-            Assert-NewManifestBackupBinding $Manifest $backupPath $normalizedTaskName
-            $artifact = Assert-BackupArtifactIdentity -Type 'task' -Path $backupPath -TargetIdentity $normalizedTaskName
+            $artifact = Open-LockedBackupArtifact $backupPath
+            Assert-NewManifestBackupBinding $Manifest $artifact $normalizedTaskName
+            $parsed = Assert-BackupArtifactIdentity -Type 'task' -Artifact $artifact -TargetIdentity $normalizedTaskName
             $taskName = $normalizedTaskName.Split('\')[-1]
             $taskFolder = $normalizedTaskName.Substring(0, $normalizedTaskName.Length - $taskName.Length)
-            return [pscustomobject]@{ Type='task'; Name=$normalizedTaskName; TaskName=$taskName; TaskPath=$taskFolder; BackupPath=$backupPath; Xml=$artifact.Xml }
+            return [pscustomobject]@{ Type='task'; Name=$normalizedTaskName; TaskName=$taskName; TaskPath=$taskFolder; BackupPath=$backupPath; Xml=$parsed.Xml; TaskFingerprint=$parsed.TaskFingerprint; Artifact=$artifact }
         }
         'process' { return [pscustomobject]@{ Type='process'; Name=$Manifest.name; Path=$Manifest.path } }
         default { throw 'manifest 记录类型不受支持' }
+    }
+    } catch {
+        Close-BackupArtifact $artifact
+        throw
     }
 }
 
@@ -1369,15 +1470,22 @@ function Invoke-RestorePlanAction($Plan) {
         }
         'autostart' {
             if ($Plan.Format -eq 'single_value') { Restore-AutostartValue $Plan.Info }
-            else { reg import $Plan.BackupPath | Out-Null }
-            $keyAfter = Get-ItemProperty $Plan.Key -ErrorAction SilentlyContinue
-            $success = $keyAfter -and ($keyAfter.PSObject.Properties | Where-Object { $_.Name -eq $Plan.Name })
+            else { throw '不允许从未绑定的旧式自启动备份自动恢复' }
+            $actualInfo = Get-AutostartValueInfo $Plan.Key $Plan.Name
+            $success = Test-AutostartValueEqual $Plan.Info $actualInfo
             return [pscustomobject]@{ success=[bool]$success; type='autostart'; name=$Plan.Name }
         }
         'task' {
-            Register-ScheduledTask -Xml $Plan.Xml -TaskName $Plan.TaskName -TaskPath $Plan.TaskPath -Force | Out-Null
+            Register-ScheduledTask -Xml $Plan.Xml -TaskName $Plan.TaskName -TaskPath $Plan.TaskPath -Force -ErrorAction Stop | Out-Null
             $after = Get-ScheduledTask -TaskName $Plan.TaskName -TaskPath $Plan.TaskPath -ErrorAction SilentlyContinue
-            return [pscustomobject]@{ success=[bool]$after; type='task'; name=$Plan.Name }
+            $success = $false
+            if ($after) {
+                try {
+                    $restoredXml = Export-ScheduledTask -TaskName $Plan.TaskName -TaskPath $Plan.TaskPath -ErrorAction Stop
+                    $success = (Get-TaskDefinitionFingerprint $restoredXml) -ceq $Plan.TaskFingerprint
+                } catch { $success = $false }
+            }
+            return [pscustomobject]@{ success=[bool]$success; type='task'; name=$Plan.Name }
         }
         'process' { return [pscustomobject]@{ success=$true; type='process'; name=$Plan.Name } }
         default { throw '恢复计划类型不受支持' }
@@ -1386,10 +1494,28 @@ function Invoke-RestorePlanAction($Plan) {
 
 function Invoke-ValidatedRestoreManifest($Manifest, $BackupDir) {
     $plans = @()
-    foreach ($entry in @($Manifest)) { $plans += Get-RestorePlan -Manifest $entry -BackupDir $BackupDir }
-    $results = @()
-    foreach ($plan in $plans) { $results += Invoke-RestorePlanAction -Plan $plan }
-    return $results
+    try {
+        foreach ($entry in @($Manifest)) { $plans += Get-RestorePlan -Manifest $entry -BackupDir $BackupDir }
+    } catch {
+        foreach ($openedPlan in $plans) { Close-BackupArtifact $openedPlan.Artifact }
+        throw
+    }
+    try {
+        $results = @()
+        foreach ($plan in $plans) {
+            try {
+                $actionResult = Invoke-RestorePlanAction -Plan $plan
+                if ($null -eq $actionResult -or $actionResult.success -isnot [bool]) { throw '恢复动作未返回明确 Boolean 结果' }
+                $status = if ($actionResult.success) { 'success' } else { 'failed' }
+                $results += [pscustomobject]@{ success=$actionResult.success; status=$status; type=$actionResult.type; name=$actionResult.name; reason=$(if ($actionResult.success) { '' } else { '恢复后回读验证失败' }) }
+            } catch {
+                $results += [pscustomobject]@{ success=$false; status='failed'; type=$plan.Type; name=$plan.Name; reason=$_.Exception.Message }
+            }
+        }
+        return $results
+    } finally {
+        foreach ($plan in $plans) { Close-BackupArtifact $plan.Artifact }
+    }
 }
 
 function Invoke-Clean {
@@ -1626,7 +1752,10 @@ function Invoke-Restore {
         Write-Host '错误: restore 模式需要管理员权限。' -ForegroundColor Red
         exit 1
     }
-    $manifest = Get-Content $manifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    try { $manifest = @(Read-BackupManifestEntries $manifestFile) } catch {
+        Write-Host ('备份清单验证失败，未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
+        exit 1
+    }
     if (-not $manifest -or @($manifest).Count -eq 0) {
         Write-Host "备份清单为空: $manifestFile (可能是损坏的备份)" -ForegroundColor Red
         exit 1
@@ -1640,6 +1769,9 @@ function Invoke-Restore {
         exit 1
     }
     if (@($restoreResults | Where-Object { -not $_.success }).Count -gt 0) {
+        foreach ($failedRestore in @($restoreResults | Where-Object { -not $_.success })) {
+            Write-Host ('恢复失败: {0} {1}: {2}' -f $failedRestore.type, $failedRestore.name, $failedRestore.reason) -ForegroundColor Red
+        }
         Write-Step '恢复完成, 但存在验证失败的条目 (见上方红色提示)。'
         exit 2
     }

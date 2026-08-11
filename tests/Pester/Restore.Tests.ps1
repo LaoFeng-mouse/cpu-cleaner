@@ -229,4 +229,121 @@ Describe '恢复逻辑' {
         { Invoke-ValidatedRestoreManifest -Manifest $manifest -BackupDir $TestDrive } | Should -Throw '*重解析点*'
         Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
     }
+
+    It 'restore 对 artifact 使用同一锁定字节快照计算 SHA 并解析' {
+        $backup = Join-Path $TestDrive 'snapshot-task.xml'
+        $safeXml = '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo><Actions><Exec><Command>safe.exe</Command></Exec></Actions></Task>'
+        $evilXml = '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo><Actions><Exec><Command>evil.exe</Command></Exec></Actions></Task>'
+        [System.IO.File]::WriteAllText($backup, $safeXml)
+        $hash = (Get-FileHash $backup -Algorithm SHA256).Hash
+        $manifest = [pscustomobject]@{
+            backup_format_version=1; type='task'; name='\Vendor\Task'; target_identity='\Vendor\Task'; backup_verified=$true
+            backup=$backup; backup_sha256=$hash; entry_id='task'; execution_status='success'; verified=$true; note='restore task'
+        }
+        Mock Get-FileSha256Hex {
+            [System.IO.File]::WriteAllText($Path, $evilXml)
+            return $hash
+        }
+
+        $plan = Get-RestorePlan -Manifest $manifest -BackupDir $TestDrive
+
+        $plan.Xml | Should -Match 'safe\.exe'
+        $plan.Xml | Should -Not -Match 'evil\.exe'
+        if ($plan.Artifact) { $plan.Artifact.Stream.Dispose() }
+    }
+
+    It 'restore 执行逐项隔离失败并继续记录后续结果' {
+        $plans = @(
+            [pscustomobject]@{Type='process';Name='one'},
+            [pscustomobject]@{Type='process';Name='two'},
+            [pscustomobject]@{Type='process';Name='three'}
+        )
+        $script:ActionCount = 0
+        Mock Get-RestorePlan { return $Manifest }
+        Mock Invoke-RestorePlanAction {
+            $script:ActionCount++
+            if ($Plan.Name -eq 'two') { throw 'second failed after first mutation' }
+            return [pscustomobject]@{success=$true;type=$Plan.Type;name=$Plan.Name}
+        }
+
+        $results = @(Invoke-ValidatedRestoreManifest -Manifest $plans -BackupDir $TestDrive)
+
+        $results.Count | Should -Be 3
+        $results[0].status | Should -BeExactly 'success'
+        $results[1].status | Should -BeExactly 'failed'
+        $results[2].status | Should -BeExactly 'success'
+        $script:ActionCount | Should -Be 3
+    }
+
+    It '任务注册使用 ErrorAction Stop 且定义回读不一致时失败' {
+        $plan = [pscustomobject]@{
+            Type='task';Name='\Vendor\Task';TaskName='Task';TaskPath='\Vendor\'
+            Xml='<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo><Actions><Exec><Command>safe.exe</Command></Exec></Actions></Task>'
+            TaskFingerprint='expected'
+        }
+        Mock Register-ScheduledTask {}
+        Mock Export-ScheduledTask { '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo><Actions><Exec><Command>evil.exe</Command></Exec></Actions></Task>' }
+
+        $result = Invoke-RestorePlanAction -Plan $plan
+
+        $result.success | Should -BeFalse
+        Should -Invoke Register-ScheduledTask -Times 1 -Exactly -ParameterFilter { $ErrorAction -eq 'Stop' }
+    }
+
+    It '自启动回读 value type 或完整 data 不一致时失败' {
+        $info = [pscustomobject]@{key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run';name='Updater';value_type='ExpandString';value='%TEMP%\updater.exe'}
+        $plan = [pscustomobject]@{Type='autostart';Format='single_value';Key=$info.key;Name=$info.name;Info=$info}
+        Mock Restore-AutostartValue {}
+        Mock Get-ItemProperty { [pscustomobject]@{Updater='anything'} }
+        Mock Get-AutostartValueInfo { [pscustomobject]@{key=$info.key;name=$info.name;value_type='String';value='C:\Temp\updater.exe'} }
+
+        $result = Invoke-RestorePlanAction -Plan $plan
+
+        $result.success | Should -BeFalse
+    }
+
+    It '严格 manifest 拒绝字符串布尔 数组标量 未知状态和字符串 restart_after_restore' {
+        $backup = Join-Path $TestDrive 'strict-service.reg'
+        [System.IO.File]::WriteAllText($backup, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\ExactSvc]`r`n")
+        $base = @{
+            backup_format_version=1;type='service';name='ExactSvc';target_identity='ExactSvc';backup_verified=$true
+            backup=$backup;backup_sha256=(Get-FileHash $backup -Algorithm SHA256).Hash;entry_id='svc';execution_status='success'
+            verified=$true;note='restore';start_type_sc='auto';start_type_display='Automatic';status='Running';delayed_autostart=0
+        }
+        $cases = @(
+            @{field='backup_verified';value='true'},
+            @{field='target_identity';value=@('ExactSvc')},
+            @{field='execution_status';value='unknown'},
+            @{field='restart_after_restore';value='false'}
+        )
+        foreach($case in $cases) {
+            $copy = [ordered]@{}; foreach($key in $base.Keys){$copy[$key]=$base[$key]}; $copy[$case.field]=$case.value
+            { Get-RestorePlan -Manifest ([pscustomobject]$copy) -BackupDir $TestDrive } | Should -Throw -Because $case.field
+        }
+    }
+
+    It '严格 autostart artifact 拒绝未知 value_type 和重复 JSON 字段' {
+        foreach($json in @(
+            '{"key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run","name":"Updater","value_type":"Mystery","value":"x"}',
+            '{"key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run","name":"Updater","name":"Other","value_type":"String","value":"x"}'
+        )) {
+            $backup = Join-Path $TestDrive (([guid]::NewGuid().ToString('N')) + '.autostart.json')
+            [System.IO.File]::WriteAllText($backup, $json)
+            $manifest = [pscustomobject]@{
+                backup_format_version=1;type='autostart';key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run';name='Updater'
+                target_identity='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run|Updater';backup_verified=$true
+                backup=$backup;backup_sha256=(Get-FileHash $backup -Algorithm SHA256).Hash;entry_id='auto';execution_status='success';verified=$true;note='restore'
+            }
+            { Get-RestorePlan -Manifest $manifest -BackupDir $TestDrive } | Should -Throw
+        }
+    }
+
+    It '严格 manifest JSON 拒绝重复字段且 mutation 为 0' {
+        $manifestFile = Join-Path $TestDrive 'manifest.json'
+        [System.IO.File]::WriteAllText($manifestFile, '[{"entry_id":"one","type":"task","type":"service"}]')
+        Mock Invoke-RestorePlanAction {}
+
+        { Read-BackupManifestEntries $manifestFile } | Should -Throw '*重复*'
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
 }

@@ -14,6 +14,9 @@ Describe '清理动作逻辑' {
         if (-not (Get-Command Update-BackupManifestEntryAtomic -ErrorAction SilentlyContinue)) {
             function Update-BackupManifestEntryAtomic { throw 'manifest status update not implemented' }
         }
+        if (-not (Get-Command Confirm-BackupManifestFile -ErrorAction SilentlyContinue)) {
+            function Confirm-BackupManifestFile { return $true }
+        }
         # Pester 5 固定版本 (5.9.0): 直接使用原生断言, 不做 3.4/5.x 兼容包装
     }
 
@@ -263,5 +266,65 @@ Describe '清理动作逻辑' {
         $result.status | Should -BeExactly 'failed'
         Should -Invoke Add-BackupManifestEntryAtomic -Times 0 -Exactly
         Should -Invoke Remove-LiteralRegistryValueFromKey -Times 0 -Exactly
+    }
+
+    It 'clean 对任务备份只读取一次并用同一不可变字节绑定身份与 SHA' {
+        $safeXml = '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo><Actions><Exec><Command>safe.exe</Command></Exec></Actions></Task>'
+        $evilXml = '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo><Actions><Exec><Command>evil.exe</Command></Exec></Actions></Task>'
+        $script:TaskBackupPath = $null
+        Mock Get-ScheduledTask { [pscustomobject]@{State='Ready'} }
+        Mock Export-ScheduledTask { $safeXml }
+        Mock Get-FileSha256Hex {
+            param($Path)
+            $original = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+            [System.IO.File]::WriteAllText($Path, $evilXml)
+            return $original
+        }
+        Mock Add-BackupManifestEntryAtomic { $script:CapturedEntry = $Entry }
+        Mock Update-BackupManifestEntryAtomic {}
+        Mock Disable-ScheduledTask {}
+
+        $result = Invoke-TaskDisableAction -Pending ([pscustomobject]@{task_path='\Vendor\Task'}) -BackupDir $TestDrive -Tag 'task-snapshot'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Get-FileSha256Hex -Times 0 -Exactly
+        Should -Invoke Disable-ScheduledTask -Times 1 -Exactly
+    }
+
+    It 'clean 拒绝自启动备份中的重复 JSON 字段且 mutation 为 0' {
+        $key = [pscustomobject]@{}
+        $key | Add-Member ScriptMethod GetValueNames { @('Updater') }
+        $key | Add-Member ScriptMethod GetValue { param($name,$default,$options) 'C:\Apps\old.exe' }
+        $key | Add-Member ScriptMethod GetValueKind { param($name) [Microsoft.Win32.RegistryValueKind]::String }
+        Mock Write-AutostartValueBackup {
+            $out = Join-Path $TestDrive 'duplicate.autostart.json'
+            [System.IO.File]::WriteAllText($out, '{"key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run","name":"Updater","name":"Other","value_type":"String","value":"C:\\Apps\\old.exe"}')
+            return $out
+        }
+        Mock Add-BackupManifestEntryAtomic {}
+        Mock Remove-LiteralRegistryValueFromKey {}
+
+        $result = Invoke-LiteralAutostartRemovalFromKey -RegistryKey $key -Source 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Updater' -ExpectedValue 'C:\Apps\old.exe' -BackupDir $TestDrive -Tag 'auto-duplicate' -RequireArtifactIdentity $true
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Add-BackupManifestEntryAtomic -Times 0 -Exactly
+        Should -Invoke Remove-LiteralRegistryValueFromKey -Times 0 -Exactly
+    }
+
+    It 'manifest 原子替换后最终验证失败时恢复旧 manifest 且不留随机 previous' {
+        $old = [pscustomobject]@{ entry_id='old'; type='service'; name='OldSvc'; execution_status='prepared' }
+        Write-BackupManifestAtomic -BackupDir $TestDrive -Entries @($old) | Out-Null
+        $script:ConfirmCount = 0
+        Mock Confirm-BackupManifestFile {
+            $script:ConfirmCount++
+            if ($script:ConfirmCount -ge 2) { throw 'fault injected after replace' }
+            return $true
+        }
+        $new = [pscustomobject]@{ entry_id='new'; type='service'; name='NewSvc'; execution_status='prepared' }
+
+        { Write-BackupManifestAtomic -BackupDir $TestDrive -Entries @($new) } | Should -Throw '*fault injected*'
+        $saved = @(Get-Content (Join-Path $TestDrive 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json)
+        $saved[0].entry_id | Should -BeExactly 'old'
+        @(Get-ChildItem -LiteralPath $TestDrive -Filter '*.previous').Count | Should -Be 0
     }
 }

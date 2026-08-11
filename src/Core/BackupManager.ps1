@@ -18,11 +18,52 @@ function Get-FileSha256Hex($Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
 }
 
+function Get-BytesSha256Hex([byte[]]$Bytes) {
+    if ($null -eq $Bytes -or $Bytes.Length -le 0) { throw '备份字节为空' }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '') }
+    finally { $sha.Dispose() }
+}
+
+function Open-LockedBackupArtifact($Path) {
+    if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path)) { throw '备份文件路径无效' }
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        if ($stream.Length -le 0 -or $stream.Length -gt 10MB) { throw '备份文件为空或过大' }
+        $bytes = New-Object byte[] ([int]$stream.Length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -le 0) { throw '备份文件读取不完整' }
+            $offset += $read
+        }
+        if ($stream.Length -ne $bytes.Length) { throw '备份文件读取期间长度变化' }
+        $encoding = New-Object System.Text.UTF8Encoding($false, $true)
+        $start = 0
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
+        elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+            $encoding = New-Object System.Text.UnicodeEncoding($false, $true, $true)
+            $start = 2
+        }
+        $text = $encoding.GetString($bytes, $start, $bytes.Length - $start)
+        return [pscustomobject]@{ Path=$Path; Stream=$stream; Bytes=$bytes; Text=$text; Sha256=(Get-BytesSha256Hex $bytes) }
+    } catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        throw
+    }
+}
+
+function Close-BackupArtifact($Artifact) {
+    if ($null -ne $Artifact -and $null -ne $Artifact.Stream) { $Artifact.Stream.Dispose() }
+}
+
 function Read-BackupManifestEntries($ManifestFile) {
     if (-not [System.IO.File]::Exists($ManifestFile)) { return @() }
     $raw = Get-Content -LiteralPath $ManifestFile -Raw -Encoding UTF8 -ErrorAction Stop
     if ([string]::IsNullOrWhiteSpace($raw)) { throw 'manifest 文件为空' }
     try {
+        Assert-JsonPropertyNamesUnique $raw
         $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
         $entries = @($parsed | ForEach-Object { $_ })
     } catch { throw ('manifest JSON 损坏: ' + $_.Exception.Message) }
@@ -35,15 +76,27 @@ function Read-BackupManifestEntries($ManifestFile) {
     return $entries
 }
 
+function Confirm-BackupManifestFile($Path, $ExpectedCount, $ExpectedHash) {
+    if ($ExpectedHash -isnot [string] -or $ExpectedHash -cnotmatch '^[0-9A-F]{64}$') { throw 'manifest 预期哈希无效' }
+    if ((Get-FileSha256Hex $Path) -cne $ExpectedHash) { throw 'manifest 哈希验证失败' }
+    $verified = @(Read-BackupManifestEntries $Path)
+    if ($verified.Count -ne $ExpectedCount) { throw 'manifest 条目计数验证失败' }
+    return $true
+}
+
 function Write-BackupManifestAtomic($BackupDir, $Entries) {
     if ($BackupDir -isnot [string] -or [string]::IsNullOrWhiteSpace($BackupDir)) { throw '备份目录无效' }
     if (-not [System.IO.Directory]::Exists($BackupDir)) { [System.IO.Directory]::CreateDirectory($BackupDir) | Out-Null }
     $manifestFile = Join-Path $BackupDir 'manifest.json'
     $tempFile = Join-Path $BackupDir ('.manifest.' + [guid]::NewGuid().ToString('N') + '.tmp')
-    $previousFile = Join-Path $BackupDir ('.manifest.' + [guid]::NewGuid().ToString('N') + '.previous')
+    $previousFile = Join-Path $BackupDir 'manifest.previous'
+    $failedFile = Join-Path $BackupDir 'manifest.failed'
     $stream = $null
     $writer = $null
+    $hadExisting = [System.IO.File]::Exists($manifestFile)
+    $committed = $false
     try {
+        if ([System.IO.File]::Exists($previousFile)) { throw '发现未处理的 manifest.previous，拒绝覆盖' }
         $json = ConvertTo-Json -InputObject @($Entries) -Depth 100
         $stream = [System.IO.File]::Open($tempFile, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
         $writer = New-Object System.IO.StreamWriter($stream, (New-Object System.Text.UTF8Encoding($true)))
@@ -53,19 +106,34 @@ function Write-BackupManifestAtomic($BackupDir, $Entries) {
         $writer.Dispose(); $writer = $null
         $stream.Dispose(); $stream = $null
 
-        $verified = @(Read-BackupManifestEntries $tempFile)
-        if ($verified.Count -ne @($Entries).Count) { throw 'manifest 临时文件验证计数不一致' }
         $tempHash = Get-FileSha256Hex $tempFile
-        if ([System.IO.File]::Exists($manifestFile)) {
+        $null = Confirm-BackupManifestFile $tempFile @($Entries).Count $tempHash
+        if ($hadExisting) {
             [System.IO.File]::Replace($tempFile, $manifestFile, $previousFile)
         } else {
             [System.IO.File]::Move($tempFile, $manifestFile)
         }
-        if ((Get-FileSha256Hex $manifestFile) -cne $tempHash) { throw 'manifest 原子提交后校验失败' }
-        $final = @(Read-BackupManifestEntries $manifestFile)
-        if ($final.Count -ne @($Entries).Count) { throw 'manifest 原子提交后条目数不一致' }
+        $committed = $true
+        $null = Confirm-BackupManifestFile $manifestFile @($Entries).Count $tempHash
         if ([System.IO.File]::Exists($previousFile)) { [System.IO.File]::Delete($previousFile) }
         return $manifestFile
+    } catch {
+        $failure = $_
+        if ($committed) {
+            try {
+                if ($hadExisting -and [System.IO.File]::Exists($previousFile)) {
+                    if ([System.IO.File]::Exists($failedFile)) { [System.IO.File]::Delete($failedFile) }
+                    [System.IO.File]::Replace($previousFile, $manifestFile, $failedFile)
+                    if ([System.IO.File]::Exists($failedFile)) { [System.IO.File]::Delete($failedFile) }
+                } elseif (-not $hadExisting -and [System.IO.File]::Exists($manifestFile)) {
+                    if ([System.IO.File]::Exists($failedFile)) { [System.IO.File]::Delete($failedFile) }
+                    [System.IO.File]::Move($manifestFile, $failedFile)
+                }
+            } catch {
+                throw ('manifest 提交失败且回滚失败；请检查 manifest.previous/manifest.failed: ' + $failure.Exception.Message + '; ' + $_.Exception.Message)
+            }
+        }
+        throw $failure
     } finally {
         if ($null -ne $writer) { $writer.Dispose() }
         if ($null -ne $stream) { $stream.Dispose() }
@@ -161,7 +229,8 @@ function Restore-AutostartValue($info) {
         'QWord'        { 'QWord' }
         'Binary'       { 'Binary' }
         'MultiString'  { 'MultiString' }
-        default        { 'String' }
+        'String'       { 'String' }
+        default        { throw '自启动备份 value_type 不受支持' }
     }
     # v1.5.6: JSON 往返后类型还原 — ConvertTo-Json/ConvertFrom-Json 会把 byte[]/string[] 变成 object[],
     # 直接写注册表会类型错乱 (Binary 尤其明显), 必须强转回原类型
