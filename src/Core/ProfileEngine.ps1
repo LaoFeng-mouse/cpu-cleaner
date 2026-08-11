@@ -74,8 +74,11 @@ function Test-DetectMatch($target, $pattern, $Context = $null) {
             $sig = $null
             if ($Context -and $Context.Signature) { $sig = $Context.Signature }
             elseif ($Context -and $Context.Path) { try { $sig = Get-AuthenticodeSignature $Context.Path -ErrorAction SilentlyContinue } catch {} }
-            try { return $sig -and $sig.SignerCertificate -and ($sig.SignerCertificate.Subject -match $n.match) }
-            catch { return $false }
+            $certificate = if ($sig) { $sig.SignerCertificate } else { $null }
+            if (-not $certificate) { return $false }
+            $subject = $certificate.Subject
+            try { return [string]$subject -match $n.match }
+            catch [System.ArgumentException] { return $false }
         }
         'sha256'   {
             $hash = ''
