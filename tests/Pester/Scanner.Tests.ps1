@@ -203,11 +203,14 @@ Describe '扫描器与评分' {
         { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\MissingFields' }) } | Should -Throw '*缺少字段*'
         { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\MissingTriggers'; State=3 }) } | Should -Throw '*缺少字段*'
     }
-    It 'COM 任务触发器枚举接受官方值 12 并拒绝保留值 10' {
-        $custom = Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\CustomTrigger'; State=3; TriggerTypes=@(12) })
-
-        $custom.LoginTrigger | Should -BeFalse
-        { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\ReservedTrigger'; State=3; TriggerTypes=@(10) }) } | Should -Throw '*无效触发器类型*'
+    It 'COM 任务触发器枚举只接受 Windows 官方完整取值集合' {
+        foreach ($value in @(0,1,2,3,4,5,6,7,8,9,11,12)) {
+            { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path="\Vendor\Valid$value"; State=3; TriggerTypes=@($value) }) } | Should -Not -Throw -Because "trigger type $value is defined by TASK_TRIGGER_TYPE2"
+        }
+        foreach ($value in @(-1,10,13,99)) {
+            { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path="\Vendor\Invalid$value"; State=3; TriggerTypes=@($value) }) } | Should -Throw '*无效触发器类型*' -Because "trigger type $value is not defined by TASK_TRIGGER_TYPE2"
+        }
+        { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\InvalidText'; State=3; TriggerTypes=@('x') }) } | Should -Throw '*无效触发器类型*'
     }
     It '主任务采集返回空列表时必须转入兼容采集' {
         Mock Get-ScheduledTask { @() }
