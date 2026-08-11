@@ -337,9 +337,10 @@ function Convert-TaskSchedulerComRecord {
     if ($stateValue -lt 0 -or $stateValue -gt 4) { throw ('Task Scheduler COM 返回无效状态: {0}' -f $stateValue) }
     $stateNames = @('Unknown','Disabled','Queued','Ready','Running')
     $triggerTypes = @()
+    $validTriggerTypes = @(0,1,2,3,4,5,6,7,8,9,11,12)
     foreach ($rawTriggerType in @($Record.PSObject.Properties['TriggerTypes'].Value)) {
         $triggerType = 0
-        if (-not [int]::TryParse([string]$rawTriggerType, [ref]$triggerType) -or $triggerType -lt 0 -or $triggerType -gt 11) {
+        if (-not [int]::TryParse([string]$rawTriggerType, [ref]$triggerType) -or $triggerType -notin $validTriggerTypes) {
             throw ('Task Scheduler COM 返回无效触发器类型: {0}' -f $rawTriggerType)
         }
         $triggerTypes += $triggerType

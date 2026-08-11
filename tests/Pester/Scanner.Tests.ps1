@@ -203,6 +203,12 @@ Describe '扫描器与评分' {
         { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\MissingFields' }) } | Should -Throw '*缺少字段*'
         { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\MissingTriggers'; State=3 }) } | Should -Throw '*缺少字段*'
     }
+    It 'COM 任务触发器枚举接受官方值 12 并拒绝保留值 10' {
+        $custom = Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\CustomTrigger'; State=3; TriggerTypes=@(12) })
+
+        $custom.LoginTrigger | Should -BeFalse
+        { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\ReservedTrigger'; State=3; TriggerTypes=@(10) }) } | Should -Throw '*无效触发器类型*'
+    }
     It '主任务采集返回空列表时必须转入兼容采集' {
         Mock Get-ScheduledTask { @() }
         function Invoke-TaskSchedulerComQuery {
