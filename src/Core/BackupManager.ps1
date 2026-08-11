@@ -196,7 +196,6 @@ function Close-BackupArtifact($Artifact) {
 }
 
 function Read-BackupManifestEntries($ManifestFile) {
-    if (-not [System.IO.File]::Exists($ManifestFile)) { return @() }
     $raw = Get-Content -LiteralPath $ManifestFile -Raw -Encoding UTF8 -ErrorAction Stop
     if ([string]::IsNullOrWhiteSpace($raw)) { throw (New-RestoreCandidateRejectedException 'manifest 文件为空') }
     try { $parsed = $raw | ConvertFrom-Json -ErrorAction Stop }

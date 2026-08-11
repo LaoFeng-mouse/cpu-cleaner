@@ -39,7 +39,7 @@ $script:I18N = @{
         ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2} / manual {3}'; ExecCloseBlocked='管理员处理仍在启动、运行或状态未知，暂不能关闭窗口。'; ExecStatusUnknown='管理员进程状态未知'
         ExecUnauthorized='未授权、未开始处理。'; ExecNotStarted='管理员授权未完成，未开始处理，系统设置没有变化。'; ExecPartialPossible='执行进程异常结束，可能已有部分动作执行。'; ExecResultReadFailed='无法完整读取逐项结果。'
         BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
-        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复最近的可信备份。'; RestoreNone='没有通过安全验证的可信备份。'; RestoreErr='恢复失败: {0}'; RestorePartial='恢复已执行，但部分条目验证失败。'; RestoreNotStarted='管理员授权未完成，恢复没有开始。'; RestoreMayHaveChanged='恢复进程异常结束，部分设置可能已经改变。'; LegacyBackupUnsupported='旧版项目目录备份不可自动恢复，请重新执行一次安全处理生成可信备份。'
+        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复最近的可信备份。'; RestoreNone='没有通过安全验证的可信备份。'; RestoreErr='恢复失败: {0}'; RestorePartial='恢复已执行，但部分条目验证失败。'; RestoreNotStarted='管理员授权未完成，恢复没有开始。'; RestoreStatusUnknown='恢复进程已启动，状态未知，可能已发生部分修改。'; RestoreMayHaveChanged='恢复进程异常结束，部分设置可能已经改变。'; LegacyBackupUnsupported='旧版项目目录备份不可自动恢复，请重新执行一次安全处理生成可信备份。'
         AutoStage1='轻盈幻想阶段插图'; AutoStage2='看清现实阶段插图'; AutoStage3='谨慎整理阶段插图'; AutoStage4='幻想落地阶段插图'; AutoResult='扫描结果摘要'; AutoCompleted='处理或恢复结果摘要'; AutoError='错误摘要'
         State_idle_Title='鼠鼠开始幻想'; State_idle_Sub='先做只读扫描，不会修改系统。'
         State_scanning_Title='正在看清现实'; State_scanning_Sub='只展示真实阶段，不伪造完成百分比。'
@@ -68,7 +68,7 @@ $script:I18N = @{
         ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2} / manual {3}'; ExecCloseBlocked='The elevated operation is starting, running, or has unknown status. Keep this window open.'; ExecStatusUnknown='Elevated process status is unknown'
         ExecUnauthorized='Not authorized; processing did not start.'; ExecNotStarted='Administrator authorization was not completed. Processing did not start and no system settings changed.'; ExecPartialPossible='The execution process ended abnormally; some actions may already have run.'; ExecResultReadFailed='The per-item result could not be read completely.'
         BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
-        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored the latest trusted backup.'; RestoreNone='No backup passed the trust validation.'; RestoreErr='Restore failed: {0}'; RestorePartial='Restore ran, but some items failed verification.'; RestoreNotStarted='Administrator authorization was not completed; restore did not start.'; RestoreMayHaveChanged='The restore process ended abnormally; some settings may already have changed.'; LegacyBackupUnsupported='Legacy project-folder backups cannot be restored automatically. Run one safe cleanup to create a trusted backup.'
+        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored the latest trusted backup.'; RestoreNone='No backup passed the trust validation.'; RestoreErr='Restore failed: {0}'; RestorePartial='Restore ran, but some items failed verification.'; RestoreNotStarted='Administrator authorization was not completed; restore did not start.'; RestoreStatusUnknown='The restore process started, but its status is unknown; partial changes may already have occurred.'; RestoreMayHaveChanged='The restore process ended abnormally; some settings may already have changed.'; LegacyBackupUnsupported='Legacy project-folder backups cannot be restored automatically. Run one safe cleanup to create a trusted backup.'
         AutoStage1='Light fantasy stage illustration'; AutoStage2='Face reality stage illustration'; AutoStage3='Careful cleanup stage illustration'; AutoStage4='Fantasy delivered stage illustration'; AutoResult='Scan result summary'; AutoCompleted='Cleanup or restore result summary'; AutoError='Error summary'
         State_idle_Title='The fantasy begins'; State_idle_Sub='Start with a read-only scan. No system settings will change.'
         State_scanning_Title='Looking at reality'; State_scanning_Sub='Showing real scan phases without a fabricated percentage.'
@@ -232,6 +232,7 @@ $script:ExecutionTimer = $null
 $script:ExecutionTempPath = $null
 $script:ExecutionActions = @()
 $script:ExecutionInProgress = $false
+$script:RestoreInProgress = $false
 $script:ExecutionLifecycle = 'idle'
 $script:ExecutionUnknownProbeCount = 0
 $script:ExecutionUnknownProbeLimit = 3
@@ -1447,11 +1448,17 @@ function Show-GuiMessage {
 }
 
 function Invoke-GuiRestoreLatest {
+    if ($script:RestoreInProgress) { return $false }
+    $script:RestoreInProgress = $true
+    $processStarted = $false
+    $restoreButton = $window.FindName('BtnRestore')
+    $restoreButton.IsEnabled = $false
     $window.FindName('CompletedSummaryText').Text = ''
     $window.FindName('CompletedList').ItemsSource = $null
     try {
         $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','restore','-BackupDir','latest'
         if ($null -eq $proc) { throw '管理员恢复进程未启动。' }
+        $processStarted = $true
         $proc.WaitForExit()
         $exitCode = [int]$proc.ExitCode
         if ($exitCode -eq 0) {
@@ -1466,7 +1473,7 @@ function Invoke-GuiRestoreLatest {
         }
         if ($exitCode -eq 3) {
             $summary = Get-Text 'RestoreNone'
-            Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreNotStarted') -Detail $summary
+            Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreNone') -Detail $summary
             return $false
         }
         $summary = (Get-Text 'RestoreErr') -f "ExitCode=$exitCode"
@@ -1475,9 +1482,13 @@ function Invoke-GuiRestoreLatest {
         return $false
     } catch {
         $summary = (Get-Text 'RestoreErr') -f $_.Exception.Message
-        Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreNotStarted') -Detail $_.Exception.ToString()
+        $mutation = if ($processStarted) { Get-Text 'RestoreStatusUnknown' } else { Get-Text 'RestoreNotStarted' }
+        Set-GuiError -Summary $summary -Mutation $mutation -Detail $_.Exception.ToString()
         Show-GuiMessage -Message $summary -Icon Warning
         return $false
+    } finally {
+        $script:RestoreInProgress = $false
+        $restoreButton.IsEnabled = $true
     }
 }
 

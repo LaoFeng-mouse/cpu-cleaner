@@ -2407,4 +2407,59 @@ Describe '勾选视图 (v1.5.5)' {
         $script:Win.FindName('CompletedSummaryText').Text | Should -Not -Match '已恢复|Restored'
         Assert-MockCalled Show-GuiMessage -Times 1 -Exactly
     }
+
+    It '恢复进程启动后 WaitForExit 异常显示状态未知并恢复按钮' {
+        $process = [pscustomobject]@{}
+        $process | Add-Member ScriptMethod WaitForExit { throw 'simulated wait failure' }
+        Mock Start-Process {
+            $script:Win.FindName('BtnRestore').IsEnabled | Should -BeFalse
+            $process
+        }
+        Mock Show-GuiMessage {}
+
+        Invoke-GuiRestoreLatest | Should -BeFalse
+
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '已启动|started'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '状态未知|unknown'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分修改|partial'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Not -Match '没有开始|did not start'
+        $script:Win.FindName('BtnRestore').IsEnabled | Should -BeTrue
+        Assert-MockCalled Start-Process -Times 1 -Exactly
+        Assert-MockCalled Show-GuiMessage -Times 1 -Exactly
+    }
+
+    It '恢复进程启动后 ExitCode 读取异常显示状态未知且不重复启动' {
+        $process = [pscustomobject]@{}
+        $process | Add-Member ScriptMethod WaitForExit {}
+        $process | Add-Member ScriptProperty ExitCode { throw 'simulated exit code read failure' }
+        Mock Start-Process {
+            $script:Win.FindName('BtnRestore').IsEnabled | Should -BeFalse
+            $process
+        }
+        Mock Show-GuiMessage {}
+
+        Invoke-GuiRestoreLatest | Should -BeFalse
+
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '已启动|started'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '状态未知|unknown'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分修改|partial'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Not -Match '没有开始|did not start'
+        $script:Win.FindName('BtnRestore').IsEnabled | Should -BeTrue
+        Assert-MockCalled Start-Process -Times 1 -Exactly
+        Assert-MockCalled Show-GuiMessage -Times 1 -Exactly
+    }
+
+    It '恢复门闩已占用时拒绝再次启动管理员恢复进程' {
+        $oldRestoreInProgress = $script:RestoreInProgress
+        $script:RestoreInProgress = $true
+        Mock Start-Process { throw 'must not start a second restore process' }
+        try {
+            Invoke-GuiRestoreLatest | Should -BeFalse
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+        } finally {
+            $script:RestoreInProgress = $oldRestoreInProgress
+        }
+    }
 }

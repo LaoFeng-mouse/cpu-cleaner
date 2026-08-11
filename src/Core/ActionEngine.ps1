@@ -1620,6 +1620,9 @@ function Test-RestoreResolutionExceptionKind($Exception, [string]$Kind) {
 function Get-TrustedRestorePackage($BackupDir) {
     $resolvedBackupDir = Assert-TrustedBackupPackagePath $BackupDir
     $manifestFile = Join-Path $resolvedBackupDir 'manifest.json'
+    $manifestExists = Test-Path -LiteralPath $manifestFile -PathType Leaf -ErrorAction Stop
+    if ($manifestExists -isnot [bool]) { throw 'manifest 存在性检查未返回 Boolean 结果' }
+    if (-not $manifestExists) { throw (New-RestoreCandidateRejectedException '可信备份缺少 manifest.json') }
     Assert-TrustedBackupPathAcl -Path $manifestFile -RequireProtected $true
     $manifest = @(Read-BackupManifestEntries $manifestFile)
     if ($manifest.Count -eq 0) { throw (New-RestoreCandidateRejectedException '可信备份清单为空') }
