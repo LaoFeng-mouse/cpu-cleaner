@@ -22,20 +22,24 @@ if ($existing -and -not $script:TestMode) {
 # ---------- 中英文文案 ----------
 $script:I18N = @{
     'zh' = @{
-        AppName='鼠鼠cleaner'; SubTitle='扫描 · 清理 · 恢复 —— 全程自动备份，后悔可还原'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
+        AppName='鼠鼠cleaner'; SubTitle='识别可以宽，执行必须窄'; Privilege='普通权限'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
+        Stage1='1 轻盈幻想'; Stage2='2 看清现实'; Stage3='3 谨慎整理'; Stage4='4 幻想落地'
+        IdleBody='扫描只读，不会修改系统。'; ResultsNoMutation='目前尚未修改任何内容。'; ExecutingBody='正在逐项处理；每项均会备份并复核。'
+        BtnStartScan='开始安全扫描'; BtnOpenReview='查看处理建议'; BtnExecute='处理已选择项目'; BtnRescan='重新扫描'; BtnRetry='重试'
+        SelectAll='选择全部安全项'; ClearAll='清空选择'; ReviewBoundary='观察项不会自动执行；执行前将再次验证。'; TechnicalDetails='技术详情'; ErrorDetails='查看技术详情'
         TabScan='🐹 1. 扫描（只读）'; TabPending='📋 2. 处理建议'; TabExec='⚙️ 3. 执行（管理员）'; TabResult='✅ 4. 结果与恢复'
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
         ScanPhaseInitial='正在检查服务、启动项、计划任务和进程'; ScanPhaseSystemInfo='读取系统信息'; ScanPhaseProcesses='检查高占用进程'; ScanPhaseServices='检查系统服务'; ScanPhaseAutoStart='检查启动项'; ScanPhaseTasks='检查计划任务'; ScanPhaseRules='匹配安全规则'; ScanPhaseReport='生成扫描报告'
         ScanResultSummary='{0} 项可以安全处理，{1} 项建议观察'; ScanErrorSummary='扫描失败：{0}'; ScanNoMutation='扫描阶段未修改任何系统设置。'; ScanStatusStart='启动'; ScanStatusOutput='输出读取'; ScanStatusResults='结果处理'
         ReviewErrorSummary='待处理清单已过期，必须重新扫描。'; ReviewNoMutation='没有执行任何系统修改。'
         BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
-        SelectAll='全选'; ClearAll='清空'
         ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
         BtnExec='处理已勾选项目（需要管理员）'; ExecEmpty='请先勾选要处理的项目（【2. 处理建议】页勾选）。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
         ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2} / manual {3}'; ExecCloseBlocked='管理员处理仍在启动、运行或状态未知，暂不能关闭窗口。'; ExecStatusUnknown='管理员进程状态未知'
         ExecUnauthorized='未授权、未开始处理。'; ExecNotStarted='管理员授权未完成，未开始处理，系统设置没有变化。'; ExecPartialPossible='执行进程异常结束，可能已有部分动作执行。'; ExecResultReadFailed='无法完整读取逐项结果。'
         BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
-        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。详见管理员窗口。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复出错或被取消: {0}'; RestorePartial='恢复完成，但部分条目验证失败（详见管理员窗口）。'
+        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复失败: {0}'; RestorePartial='恢复已执行，但部分条目验证失败。'; RestoreNotStarted='管理员授权未完成，恢复没有开始。'; RestoreMayHaveChanged='恢复进程异常结束，部分设置可能已经改变。'
+        AutoStage1='轻盈幻想阶段插图'; AutoStage2='看清现实阶段插图'; AutoStage3='谨慎整理阶段插图'; AutoStage4='幻想落地阶段插图'; AutoResult='扫描结果摘要'; AutoCompleted='处理或恢复结果摘要'; AutoError='错误摘要'
         State_idle_Title='鼠鼠开始幻想'; State_idle_Sub='先做只读扫描，不会修改系统。'
         State_scanning_Title='正在看清现实'; State_scanning_Sub='只展示真实阶段，不伪造完成百分比。'
         State_results_Title='扫描结论'; State_results_Sub='可处理项与观察项分开显示，目前尚未修改系统。'
@@ -46,20 +50,24 @@ $script:I18N = @{
         LangLabel='EN'
     }
     'en' = @{
-        AppName='Shushu Cleaner'; SubTitle='Scan · Clean · Restore — auto backup, undo anytime'; Hint0='GUI is a shell; core logic is identical to CLI'
+        AppName='Shushu Cleaner'; SubTitle='Detection may be broad; execution must be narrow'; Privilege='Standard privileges'; Hint0='GUI is a shell; core logic is identical to CLI'
+        Stage1='1 Light fantasy'; Stage2='2 Face reality'; Stage3='3 Tidy carefully'; Stage4='4 Fantasy delivered'
+        IdleBody='Scanning is read-only and changes no system settings.'; ResultsNoMutation='Nothing has been changed yet.'; ExecutingBody='Processing item by item; each action is backed up and verified.'
+        BtnStartScan='Start safe scan'; BtnOpenReview='Review recommendations'; BtnExecute='Process selected items'; BtnRescan='Scan again'; BtnRetry='Retry'
+        SelectAll='Select all safe items'; ClearAll='Clear selection'; ReviewBoundary='Observation items never run automatically; every action is revalidated.'; TechnicalDetails='Technical details'; ErrorDetails='View technical details'
         TabScan='🐹 1. Scan (read-only)'; TabPending='📋 2. Recommendations'; TabExec='⚙️ 3. Execute (admin)'; TabResult='✅ 4. Result & Restore'
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
         ScanPhaseInitial='Checking services, startup items, scheduled tasks, and processes'; ScanPhaseSystemInfo='Reading system information'; ScanPhaseProcesses='Checking high-usage processes'; ScanPhaseServices='Checking system services'; ScanPhaseAutoStart='Checking startup items'; ScanPhaseTasks='Checking scheduled tasks'; ScanPhaseRules='Matching safety rules'; ScanPhaseReport='Generating scan report'
         ScanResultSummary='{0} safe item(s), {1} observation(s)'; ScanErrorSummary='Scan failed: {0}'; ScanNoMutation='The scan did not change any system settings.'; ScanStatusStart='startup'; ScanStatusOutput='output read'; ScanStatusResults='result processing'
         ReviewErrorSummary='The pending review is stale and must be rescanned.'; ReviewNoMutation='No system settings were changed.'
         BtnLoad='Load Pending Items'; PendingHint='Risk & evidence shown; check items to process (unverified = observe only, unchecked)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Check items, then go to tab 3.'
-        SelectAll='Select All'; ClearAll='Clear'
         ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
         BtnExec='Process Checked Items (admin)'; ExecEmpty='Check items first (tab 2).'; ExecStart='Processing {0} item(s). UAC requested, click YES…'; ExecDone='Processing done. See tab 4 (restart PC recommended).'
         ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2} / manual {3}'; ExecCloseBlocked='The elevated operation is starting, running, or has unknown status. Keep this window open.'; ExecStatusUnknown='Elevated process status is unknown'
         ExecUnauthorized='Not authorized; processing did not start.'; ExecNotStarted='Administrator authorization was not completed. Processing did not start and no system settings changed.'; ExecPartialPossible='The execution process ended abnormally; some actions may already have run.'; ExecResultReadFailed='The per-item result could not be read completely.'
         BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
-        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}. See admin window.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed/cancelled: {0}'; RestorePartial='Restore finished, but some items failed verification (see admin window).'
+        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed: {0}'; RestorePartial='Restore ran, but some items failed verification.'; RestoreNotStarted='Administrator authorization was not completed; restore did not start.'; RestoreMayHaveChanged='The restore process ended abnormally; some settings may already have changed.'
+        AutoStage1='Light fantasy stage illustration'; AutoStage2='Face reality stage illustration'; AutoStage3='Careful cleanup stage illustration'; AutoStage4='Fantasy delivered stage illustration'; AutoResult='Scan result summary'; AutoCompleted='Cleanup or restore result summary'; AutoError='Error summary'
         State_idle_Title='The fantasy begins'; State_idle_Sub='Start with a read-only scan. No system settings will change.'
         State_scanning_Title='Looking at reality'; State_scanning_Sub='Showing real scan phases without a fabricated percentage.'
         State_results_Title='Scan result'; State_results_Sub='Safe actions and observations are separated. Nothing has changed yet.'
@@ -91,8 +99,8 @@ function Update-GuiStateText {
     if ($null -eq $SubtitleControl) { $SubtitleControl = $window.FindName('StateSubtitle') }
     if ($null -eq $TitleControl) { throw 'GUI control missing: StateTitle' }
     if ($null -eq $SubtitleControl) { throw 'GUI control missing: StateSubtitle' }
-    if ($null -eq $TitleText) { $TitleText = Get-Text ('State_{0}_Title' -f $StateName) }
-    if ($null -eq $SubtitleText) { $SubtitleText = Get-Text ('State_{0}_Sub' -f $StateName) }
+    if ([string]::IsNullOrEmpty($TitleText)) { $TitleText = Get-Text ('State_{0}_Title' -f $StateName) }
+    if ([string]::IsNullOrEmpty($SubtitleText)) { $SubtitleText = Get-Text ('State_{0}_Sub' -f $StateName) }
     $TitleControl.Text = $TitleText
     $SubtitleControl.Text = $SubtitleText
 }
@@ -102,8 +110,35 @@ function Apply-Language {
     $w = $window
     $w.Title = $t['AppName']
     $w.FindName('TitleMain').Text = $t['AppName']
+    $w.FindName('TitleSub').Text = $t['SubTitle']
+    $w.FindName('PrivilegeText').Text = $t['Privilege']
     $w.FindName('BtnLang').Content = $t['LangLabel']
-    Update-GuiStateText
+    foreach ($entry in @(
+        @('StageLabel1','Stage1'), @('StageLabel2','Stage2'), @('StageLabel3','Stage3'), @('StageLabel4','Stage4'),
+        @('IdleBodyText','IdleBody'), @('ResultsNoMutationText','ResultsNoMutation'), @('ExecutingBodyText','ExecutingBody'),
+        @('BtnStartScan','BtnStartScan'), @('BtnOpenReview','BtnOpenReview'), @('BtnExecute','BtnExecute'), @('BtnRescan','BtnRescan'), @('BtnRetry','BtnRetry'), @('BtnRestore','BtnRestore'),
+        @('BtnSelectAll','SelectAll'), @('BtnClearAll','ClearAll'), @('ReviewBoundaryText','ReviewBoundary')
+    )) {
+        $control = $w.FindName($entry[0])
+        if ($null -eq $control) { throw "GUI control missing: $($entry[0])" }
+        if ($control -is [System.Windows.Controls.TextBlock]) { $control.Text = $t[$entry[1]] }
+        elseif ($control -is [System.Windows.Controls.Expander]) { $control.Header = $t[$entry[1]] }
+        else { $control.Content = $t[$entry[1]] }
+    }
+    $w.Resources['TechnicalDetailsText'] = $t['TechnicalDetails']
+    $w.Resources['ErrorDetailsText'] = $t['ErrorDetails']
+    $automationKeys = @{
+        ImgStage1='AutoStage1'; ImgStage2='AutoStage2'; ImgStage3='AutoStage3'; ImgStage4='AutoStage4'
+        BtnStartScan='BtnStartScan'; BtnOpenReview='BtnOpenReview'; BtnExecute='BtnExecute'; BtnRescan='BtnRescan'; BtnRetry='BtnRetry'; BtnRestore='BtnRestore'; BtnLang='LangLabel'
+        ResultSummaryText='AutoResult'; CompletedSummaryText='AutoCompleted'; ErrorSummaryText='AutoError'
+    }
+    foreach ($name in $automationKeys.Keys) {
+        [System.Windows.Automation.AutomationProperties]::SetName($w.FindName($name), $t[$automationKeys[$name]])
+    }
+    Update-GuiStateText -StateName $script:GuiState -TitleControl ($w.FindName('StateTitle')) -SubtitleControl ($w.FindName('StateSubtitle'))
+    if ($script:GuiState -eq 'scanning' -and -not [string]::IsNullOrWhiteSpace($script:CurrentScanPhaseTextKey)) {
+        $w.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
+    }
 }
 
 # ---------- 鼠鼠风格 XAML ----------
@@ -665,6 +700,7 @@ $script:ScanPhaseTextKeys = @{
 }
 $script:ScanTranscriptLimit = 65536
 $script:ScanTranscript = ''
+$script:CurrentScanPhaseTextKey = 'ScanPhaseInitial'
 
 function Add-GuiScanOutput {
     param([object[]]$Lines)
@@ -683,7 +719,8 @@ function Add-GuiScanOutput {
         }
         foreach ($marker in $script:ScanPhaseMarkers) {
             if ($text.IndexOf($marker, [System.StringComparison]::Ordinal) -ge 0) {
-                $window.FindName('ScanPhaseText').Text = Get-Text $script:ScanPhaseTextKeys[$marker]
+                $script:CurrentScanPhaseTextKey = $script:ScanPhaseTextKeys[$marker]
+                $window.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
                 break
             }
         }
@@ -777,7 +814,14 @@ function Complete-ScanPoll {
             $window.FindName('ResultSummaryText').Text = ((Get-Text 'ScanResultSummary') -f $summary.executable, $summary.observation)
             Set-GuiState results
         } else {
-            Show-GuiScanError -Status ([string]$job.State) -Detail ([string]$result)
+            $detail = [string]$result
+            $reason = $null
+            try { $reason = $job.JobStateInfo.Reason } catch { $reason = $null }
+            if ($null -ne $reason -and -not [string]::IsNullOrWhiteSpace([string]$reason)) {
+                if (-not [string]::IsNullOrEmpty($detail)) { $detail += "`r`n" }
+                $detail += $reason.ToString()
+            }
+            Show-GuiScanError -Status ([string]$job.State) -Detail $detail
         }
     } catch {
         $detail = if ([string]::IsNullOrEmpty($result)) { $_.Exception.ToString() } else { "$result`r`n$($_.Exception)" }
@@ -845,6 +889,7 @@ function Start-GuiScan {
         $window.FindName('ScanOutput').Text = (Get-Text 'Scanning')
         $window.FindName('BtnStartScan').IsEnabled = $false
         $script:ScanTranscript = ''
+        $script:CurrentScanPhaseTextKey = 'ScanPhaseInitial'
 
         $script:ScanJob = Start-Job -ScriptBlock $script:ScanJobScript -ArgumentList (Join-Path $script:Root 'cpu-cleaner.ps1')
 
@@ -1308,29 +1353,66 @@ if ($legacyBtnResult) { $legacyBtnResult.Add_Click({
     $out.Text = ($lines -join "`r`n")
 }) }
 
-# ---------- 恢复最近一次处理 ----------
-$window.FindName('BtnRestore').Add_Click({
+function Show-GuiMessage {
+    param(
+        [Parameter(Mandatory=$true)][string]$Message,
+        [ValidateSet('Information','Warning')][string]$Icon = 'Information'
+    )
+    [System.Windows.MessageBox]::Show($Message, (Get-Text 'AppName'), 'OK', $Icon) | Out-Null
+}
+
+function Get-GuiRestoreRows {
+    param([Parameter(Mandatory=$true)][string]$BackupPath)
+    $manifestPath = Join-Path $BackupPath 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath)) { return @() }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $rows = foreach ($item in @($manifest)) {
+        $state = if ($item.verified -eq $true) { 'success' } else { 'failed' }
+        [pscustomobject]@{
+            State = $state
+            StateLabel = ('[{0}] {1} {2}' -f $state, [string]$item.type, [string]$item.name)
+            Name = [string]$item.name
+            Type = [string]$item.type
+            Reason = [string]$item.note
+        }
+    }
+    return @($rows)
+}
+
+function Invoke-GuiRestoreLatest {
     $backupRoot = Join-Path $script:Root 'backups'
     $latest = Get-ChildItem $backupRoot -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $latest) {
-        [System.Windows.MessageBox]::Show((Get-Text 'RestoreNone'), (Get-Text 'AppName'), 'OK', 'Information') | Out-Null
-        return
+        Show-GuiMessage -Message (Get-Text 'RestoreNone') -Icon Information
+        return $false
     }
+    $window.FindName('CompletedSummaryText').Text = ''
+    $window.FindName('CompletedList').ItemsSource = $null
     try {
         $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','restore','-BackupDir',"`"$script:Root\backups\$($latest.Name)`""
+        if ($null -eq $proc) { throw '管理员恢复进程未启动。' }
         $proc.WaitForExit()
-        if ($proc.ExitCode -eq 0) {
-            [System.Windows.MessageBox]::Show(((Get-Text 'RestoreOk') -f $latest.Name), (Get-Text 'AppName'), 'OK', 'Information') | Out-Null
-        } elseif ($proc.ExitCode -eq 2) {
-            # v1.5.3: CLI restore 执行后验证有失败
-            [System.Windows.MessageBox]::Show((Get-Text 'RestorePartial'), (Get-Text 'AppName'), 'OK', 'Warning') | Out-Null
-        } else {
-            [System.Windows.MessageBox]::Show(((Get-Text 'RestoreErr') -f "ExitCode=$($proc.ExitCode)"), (Get-Text 'AppName'), 'OK', 'Warning') | Out-Null
+        $exitCode = [int]$proc.ExitCode
+        if ($exitCode -in @(0,2)) {
+            $window.FindName('CompletedList').ItemsSource = @(Get-GuiRestoreRows -BackupPath $latest.FullName)
+            $window.FindName('CompletedSummaryText').Text = if ($exitCode -eq 0) { (Get-Text 'RestoreOk') -f $latest.Name } else { Get-Text 'RestorePartial' }
+            Set-GuiState completed -Force
+            return $true
         }
+        $summary = (Get-Text 'RestoreErr') -f "ExitCode=$exitCode"
+        Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreMayHaveChanged') -Detail $summary
+        Show-GuiMessage -Message $summary -Icon Warning
+        return $false
     } catch {
-        [System.Windows.MessageBox]::Show(((Get-Text 'RestoreErr') -f $_.Exception.Message), (Get-Text 'AppName'), 'OK', 'Warning') | Out-Null
+        $summary = (Get-Text 'RestoreErr') -f $_.Exception.Message
+        Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreNotStarted') -Detail $_.Exception.ToString()
+        Show-GuiMessage -Message $summary -Icon Warning
+        return $false
     }
-})
+}
+
+# ---------- 恢复最近一次处理 ----------
+$window.FindName('BtnRestore').Add_Click({ $null = Invoke-GuiRestoreLatest })
 
 Set-GuiState -Name idle -Force
 Apply-Language

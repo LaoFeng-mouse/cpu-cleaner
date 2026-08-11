@@ -113,6 +113,40 @@ Describe 'GUI 壳 (无窗口)' {
         $script:Lang = 'zh'; Apply-Language
     }
 
+    It '语言切换会重绘当前可见状态和主要控件但不改变状态' {
+        Set-GuiState -Name review -Force
+        $script:Lang = 'en'; Apply-Language
+        $script:GuiState | Should -Be 'review'
+        $script:Win.FindName('StateTitle').Text | Should -Match 'Review'
+        $script:Win.FindName('BtnExecute').Content | Should -Be 'Process selected items'
+        $script:Win.FindName('ReviewBoundaryText').Text | Should -Match 'observation'
+        $script:Lang = 'zh'; Apply-Language
+        $script:GuiState | Should -Be 'review'
+        $script:Win.FindName('StateTitle').Text | Should -Match '确认'
+        $script:Win.FindName('BtnExecute').Content | Should -Match '处理'
+    }
+
+    It '主要操作支持 Enter 且审核列表保持连续键盘导航' {
+        foreach ($name in @('BtnStartScan','BtnOpenReview','BtnExecute','BtnRescan','BtnRetry')) {
+            $script:Win.FindName($name).IsDefault | Should -BeTrue
+        }
+        [System.Windows.Input.KeyboardNavigation]::GetTabNavigation($script:Win.FindName('PendingList')).ToString() | Should -Be 'Continue'
+    }
+
+    It '关键图片操作结果和错误控件都有读屏名称' {
+        foreach ($name in @('ImgStage1','ImgStage2','ImgStage3','ImgStage4','BtnStartScan','BtnOpenReview','BtnExecute','BtnRescan','BtnRetry','BtnRestore','BtnLang','ResultSummaryText','CompletedSummaryText','ErrorSummaryText')) {
+            [System.Windows.Automation.AutomationProperties]::GetName($script:Win.FindName($name)) | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    It '状态主体支持纵向滚动且结果列表没有固定高度' {
+        $scroll = $script:Win.FindName('StateBodyScroll')
+        $scroll | Should -Not -BeNullOrEmpty
+        $scroll.VerticalScrollBarVisibility.ToString() | Should -Be 'Auto'
+        $scroll.HorizontalScrollBarVisibility.ToString() | Should -Be 'Disabled'
+        [double]::IsNaN($script:Win.FindName('CompletedList').Height) | Should -BeTrue
+    }
+
     It 'shows exactly one state panel and emphasizes completed/current stages' {
         Set-GuiState -Name 'review' -Force
         $script:Win.FindName('ReviewPanel').Visibility.ToString() | Should -Be 'Visible'
@@ -414,6 +448,16 @@ Describe 'GUI 壳 (无窗口)' {
         }
     }
 
+    It '语言切换会重绘已经显示的扫描阶段文案' {
+        $script:Lang = 'zh'
+        Set-GuiState scanning -Force
+        Add-GuiScanOutput -Lines @('==> 检查系统服务...')
+        $script:Win.FindName('ScanPhaseText').Text | Should -Be '检查系统服务'
+        $script:Lang = 'en'; Apply-Language
+        $script:Win.FindName('ScanPhaseText').Text | Should -Be 'Checking system services'
+        $script:Lang = 'zh'; Apply-Language
+    }
+
     It 'localizes completed result counts in English' {
         $oldLang = $script:Lang
         try {
@@ -489,6 +533,16 @@ Describe 'GUI 壳 (无窗口)' {
         Complete-ScanPoll -job ([pscustomobject]@{State='Failed'}) -checkTimer (New-FakeTimer) -scanTimer (New-FakeTimer) | Should -BeTrue
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '未修改'
+    }
+
+    It '失败扫描把 JobStateInfo.Reason 原样附加到技术详情' {
+        $reason = [System.InvalidOperationException]::new('injected scan job reason')
+        $job = [pscustomobject]@{ State='Failed'; JobStateInfo=[pscustomobject]@{ Reason=$reason } }
+        Mock Read-GuiBackgroundJob { @('partial transcript') }
+        Mock Invoke-GuiBackgroundJobRemoval {}
+        Complete-ScanPoll -job $job -checkTimer (New-FakeTimer) -scanTimer (New-FakeTimer) | Should -BeTrue
+        $script:Win.FindName('ErrorDetailText').Text | Should -Match 'partial transcript'
+        $script:Win.FindName('ErrorDetailText').Text | Should -Match 'injected scan job reason'
     }
 
     It 'stopped scan enters error and stops both timers' {
@@ -2104,5 +2158,72 @@ Describe '勾选视图 (v1.5.5)' {
         } finally { $script:Root = $oldRoot }
 
         [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $mainBytes
+    }
+
+    It '恢复 exit 0 在单页 completed 状态展示成功且不弹成功模态框' {
+        $tmpRoot = Join-Path $TestDrive ('restore-ok-' + [guid]::NewGuid().ToString('N'))
+        $backup = Join-Path $tmpRoot 'backups\20260811_010101'
+        [void][System.IO.Directory]::CreateDirectory($backup)
+        [System.IO.File]::WriteAllText((Join-Path $backup 'manifest.json'), '[{"type":"service","name":"DemoService","verified":true}]', [System.Text.UTF8Encoding]::new($false))
+        $process = [pscustomobject]@{ ExitCode=0; Waited=$false }
+        $process | Add-Member ScriptMethod WaitForExit { $this.Waited=$true }
+        Mock Start-Process { $process }
+        Mock Show-GuiMessage {}
+        $oldRoot=$script:Root; $script:Root=$tmpRoot
+        try { Invoke-GuiRestoreLatest | Should -BeTrue } finally { $script:Root=$oldRoot }
+
+        $process.Waited | Should -BeTrue
+        $script:GuiState | Should -Be 'completed'
+        $script:Win.FindName('CompletedSummaryText').Text | Should -Match '已恢复'
+        Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
+    }
+
+    It '恢复 exit 2 在单页 completed 状态如实展示部分失败与 manifest 明细' {
+        $tmpRoot = Join-Path $TestDrive ('restore-partial-' + [guid]::NewGuid().ToString('N'))
+        $backup = Join-Path $tmpRoot 'backups\20260811_020202'
+        [void][System.IO.Directory]::CreateDirectory($backup)
+        [System.IO.File]::WriteAllText((Join-Path $backup 'manifest.json'), '[{"type":"service","name":"GoodService","verified":true},{"type":"task","name":"FailedTask","verified":false}]', [System.Text.UTF8Encoding]::new($false))
+        $process = [pscustomobject]@{ ExitCode=2 }
+        $process | Add-Member ScriptMethod WaitForExit {}
+        Mock Start-Process { $process }
+        Mock Show-GuiMessage {}
+        $oldRoot=$script:Root; $script:Root=$tmpRoot
+        try { Invoke-GuiRestoreLatest | Should -BeTrue } finally { $script:Root=$oldRoot }
+
+        $script:GuiState | Should -Be 'completed'
+        $script:Win.FindName('CompletedSummaryText').Text | Should -Match '部分'
+        @($script:Win.FindName('CompletedList').ItemsSource | Where-Object { $_.State -eq 'failed' -and $_.Name -eq 'FailedTask' }).Count | Should -Be 1
+        Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
+    }
+
+    It '恢复非零错误进入 error 且只显示警告模态框' {
+        $tmpRoot = Join-Path $TestDrive ('restore-error-' + [guid]::NewGuid().ToString('N'))
+        $backup = Join-Path $tmpRoot 'backups\20260811_030303'
+        [void][System.IO.Directory]::CreateDirectory($backup)
+        $process = [pscustomobject]@{ ExitCode=7 }
+        $process | Add-Member ScriptMethod WaitForExit {}
+        Mock Start-Process { $process }
+        Mock Show-GuiMessage {}
+        $oldRoot=$script:Root; $script:Root=$tmpRoot
+        try { Invoke-GuiRestoreLatest | Should -BeFalse } finally { $script:Root=$oldRoot }
+
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorSummaryText').Text | Should -Match '7'
+        Assert-MockCalled Show-GuiMessage -Times 1 -Exactly
+    }
+
+    It '恢复 UAC 取消进入 error 且不宣称恢复成功' {
+        $tmpRoot = Join-Path $TestDrive ('restore-uac-' + [guid]::NewGuid().ToString('N'))
+        $backup = Join-Path $tmpRoot 'backups\20260811_040404'
+        [void][System.IO.Directory]::CreateDirectory($backup)
+        Mock Start-Process { throw 'simulated UAC cancellation' }
+        Mock Show-GuiMessage {}
+        $oldRoot=$script:Root; $script:Root=$tmpRoot
+        try { Invoke-GuiRestoreLatest | Should -BeFalse } finally { $script:Root=$oldRoot }
+
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorSummaryText').Text | Should -Match '恢复|Restore'
+        $script:Win.FindName('CompletedSummaryText').Text | Should -Not -Match '已恢复|Restored'
+        Assert-MockCalled Show-GuiMessage -Times 1 -Exactly
     }
 }
