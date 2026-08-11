@@ -26,7 +26,7 @@ $script:I18N = @{
         Stage1='1 轻盈幻想'; Stage2='2 看清现实'; Stage3='3 谨慎整理'; Stage4='4 幻想落地'
         IdleBody='扫描只读，不会修改系统。'; ResultsNoMutation='目前尚未修改任何内容。'; ExecutingBody='正在逐项处理；每项均会备份并复核。'
         BtnStartScan='开始安全扫描'; BtnOpenReview='查看处理建议'; BtnSkipReview='这次先不处理'; BtnExecute='处理已选择项目'; BtnRescan='重新扫描'; BtnRetry='重试'
-        ResultStatus='扫描完成，发现问题'; ResultHeadlinePrefix='抓到 '; ResultHeadlineSuffix=' 个偷偷常驻的后台'; ResultsEvidence='专业证据与服务名称（点击展开）'; ResultsEvidenceEmpty='没有可展示的匹配证据。'
+        ResultStatus='扫描完成，发现需要关注的项目'; ResultStatusEmpty='扫描完成，未发现匹配项'; ResultHeadlinePrefix='抓到 '; ResultHeadlineSuffix=' 个偷偷常驻的后台'; ResultHeadlineEmpty='这次没有抓到偷偷常驻的后台'; ResultsEvidence='专业证据与服务名称（点击展开）'; ResultsEvidenceEmpty='没有可展示的匹配证据。'
         SelectAll='选择全部安全项'; ClearAll='清空选择'; ReviewBoundary='观察项不会自动执行；执行前将再次验证。'; TechnicalDetails='技术详情'; ErrorDetails='查看技术详情'
         TabScan='🐹 1. 扫描（只读）'; TabPending='📋 2. 处理建议'; TabExec='⚙️ 3. 执行（管理员）'; TabResult='✅ 4. 结果与恢复'
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
@@ -55,7 +55,7 @@ $script:I18N = @{
         Stage1='1 Light fantasy'; Stage2='2 Face reality'; Stage3='3 Tidy carefully'; Stage4='4 Fantasy delivered'
         IdleBody='Scanning is read-only and changes no system settings.'; ResultsNoMutation='Nothing has been changed yet.'; ExecutingBody='Processing item by item; each action is backed up and verified.'
         BtnStartScan='Start safe scan'; BtnOpenReview='Review recommendations'; BtnSkipReview='Not this time'; BtnExecute='Process selected items'; BtnRescan='Scan again'; BtnRetry='Retry'
-        ResultStatus='Scan complete — items found'; ResultHeadlinePrefix='Found '; ResultHeadlineSuffix=' resident background items'; ResultsEvidence='Evidence and service names (expand)'; ResultsEvidenceEmpty='No matcher evidence to display.'
+        ResultStatus='Scan complete — items need attention'; ResultStatusEmpty='Scan complete — no matching items found'; ResultHeadlinePrefix='Found '; ResultHeadlineSuffix=' resident background items'; ResultHeadlineEmpty='No resident background items found this time'; ResultsEvidence='Evidence and service names (expand)'; ResultsEvidenceEmpty='No matcher evidence to display.'
         SelectAll='Select all safe items'; ClearAll='Clear selection'; ReviewBoundary='Observation items never run automatically; every action is revalidated.'; TechnicalDetails='Technical details'; ErrorDetails='View technical details'
         TabScan='🐹 1. Scan (read-only)'; TabPending='📋 2. Recommendations'; TabExec='⚙️ 3. Execute (admin)'; TabResult='✅ 4. Result & Restore'
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
@@ -115,7 +115,11 @@ function Set-GuiResultSummary {
     $script:LastResultExecutable = $Executable
     $script:LastResultObservation = $Observation
     $script:LastResultEvidence = @($Evidence)
-    $window.FindName('ResultHeadlineCount').Text = [string]($Executable + $Observation)
+    $total = $Executable + $Observation
+    $window.FindName('ResultStatusText').Text = Get-Text $(if ($total -eq 0) { 'ResultStatusEmpty' } else { 'ResultStatus' })
+    $window.FindName('ResultHeadlinePrefix').Text = Get-Text $(if ($total -eq 0) { 'ResultHeadlineEmpty' } else { 'ResultHeadlinePrefix' })
+    $window.FindName('ResultHeadlineCount').Text = if ($total -eq 0) { '' } else { [string]$total }
+    $window.FindName('ResultHeadlineSuffix').Text = if ($total -eq 0) { '' } else { Get-Text 'ResultHeadlineSuffix' }
     $window.FindName('ResultSummaryText').Text = (Get-Text 'ScanResultSummary') -f $Executable, $Observation
     $window.FindName('ResultEvidenceText').Text = if (@($Evidence).Count -gt 0) { @($Evidence) -join [Environment]::NewLine } else { Get-Text 'ResultsEvidenceEmpty' }
 }

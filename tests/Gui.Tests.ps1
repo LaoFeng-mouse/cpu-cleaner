@@ -127,6 +127,20 @@ Describe 'GUI 壳 (无窗口)' {
         $script:Win.FindName('ResultEvidenceText').Text | Should -Match 'ExactService'
     }
 
+    It '零命中结果明确显示未发现而不是发现问题或抓到 0 个' {
+        Set-GuiResultSummary -Executable 0 -Observation 0 -Evidence @()
+
+        $script:Win.FindName('ResultStatusText').Text | Should -Match '未发现'
+        $script:Win.FindName('ResultHeadlinePrefix').Text | Should -Match '没有抓到'
+        $script:Win.FindName('ResultHeadlineCount').Text | Should -Be ''
+        $script:Win.FindName('ResultHeadlineSuffix').Text | Should -Be ''
+
+        Set-GuiResultSummary -Executable 1 -Observation 0 -Evidence @('ExactService')
+        $script:Win.FindName('ResultStatusText').Text | Should -Match '发现'
+        $script:Win.FindName('ResultHeadlineCount').Text | Should -Be '1'
+        $script:Win.FindName('ResultHeadlineSuffix').Text | Should -Not -BeNullOrEmpty
+    }
+
     It '这次先不处理会安全返回起点且不保留 reviewed 授权快照' {
         Set-GuiState -Name results -Force
         $script:ReviewedPendingSnapshot = [pscustomobject]@{ marker='stale' }

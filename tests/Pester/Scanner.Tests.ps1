@@ -58,6 +58,76 @@ Describe '扫描器与评分' {
         $susp = Get-SuspiciousProcesses @()
         @($susp).Count | Should -Be 0
     }
+    It 'CIM 服务采集被拒时降级到 Get-Service 并保留匹配身份' {
+        Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
+        Mock Get-Service {
+            [pscustomobject]@{
+                Name        = 'LenovoExactService'
+                DisplayName = 'Lenovo Exact Service'
+                Status      = 'Running'
+                StartType   = 'Manual'
+            }
+        }
+
+        $services = @(Get-ServicesInfo)
+
+        $services.Count | Should -Be 1
+        $services[0].Name | Should -Be 'LenovoExactService'
+        $services[0].DisplayName | Should -Be 'Lenovo Exact Service'
+        $services[0].State | Should -Be 'Running'
+        $services[0].StartMode | Should -Be 'Manual'
+        $services[0].TriggerHint | Should -BeFalse
+        @($script:ScanWarnings).Count | Should -BeGreaterThan 0
+        ($script:ScanWarnings -join "`n") | Should -Match 'CIM'
+    }
+    It 'CIM 与 Get-Service 都失败时拒绝生成假干净服务列表' {
+        Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
+        Mock Get-Service { throw [System.InvalidOperationException]::new('service fallback denied') }
+
+        { Get-ServicesInfo } | Should -Throw '*无法读取系统服务*'
+    }
+    It 'CIM 系统概况被拒时返回明确的兼容数据而不是空字段' {
+        Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
+        Mock Get-ItemProperty {
+            param($Path)
+            if ($Path -like '*CentralProcessor*') {
+                return [pscustomobject]@{ ProcessorNameString = 'Fallback CPU' }
+            }
+            return [pscustomobject]@{ SystemManufacturer = 'Fallback Vendor'; SystemProductName = 'Fallback Model' }
+        }
+
+        $info = Get-SystemInfo
+
+        [string]::IsNullOrWhiteSpace([string]$info.Computer) | Should -BeFalse
+        $info.Model | Should -Be 'Fallback Vendor Fallback Model'
+        $info.CPU | Should -Be 'Fallback CPU'
+        [int]$info.Threads | Should -BeGreaterThan 0
+        @($script:ScanWarnings).Count | Should -BeGreaterThan 0
+    }
+    It 'Get-ScheduledTask 被拒时从 schtasks 兼容数据恢复任务身份' {
+        Mock Get-ScheduledTask { throw [System.UnauthorizedAccessException]::new('scheduled task denied') }
+        function Invoke-SchtasksQueryCsv {
+            @(
+                [pscustomobject]@{ FullTaskName='\Vendor\BootTask'; Status='Ready'; ScheduledState='Enabled'; ScheduleType='At system start up' },
+                [pscustomobject]@{ FullTaskName='\Vendor\DailyTask'; Status='Ready'; ScheduledState='Enabled'; ScheduleType='Daily' }
+            )
+        }
+
+        $tasks = @(Get-TasksInfo)
+
+        $tasks.Count | Should -Be 2
+        $tasks[0].TaskPath | Should -Be '\Vendor\'
+        $tasks[0].TaskName | Should -Be 'BootTask'
+        $tasks[0].LoginTrigger | Should -BeTrue
+        $tasks[1].LoginTrigger | Should -BeFalse
+        @($script:ScanWarnings).Count | Should -BeGreaterThan 0
+    }
+    It '计划任务主采集与兼容采集都失败时拒绝假报无任务' {
+        Mock Get-ScheduledTask { throw [System.UnauthorizedAccessException]::new('scheduled task denied') }
+        function Invoke-SchtasksQueryCsv { throw [System.InvalidOperationException]::new('schtasks denied') }
+
+        { Get-TasksInfo } | Should -Throw '*无法读取计划任务*'
+    }
     It '持续占用加分 (v1.5.7): 5 次采样中 3 次 ≥5%' {
         $top = @([pscustomobject]@{ PID=9; Name='updater'; 'CPU%'=4.2; CPUPeak=38.2; SamplesHigh=3; Samples=5; ChildCount=17; MemMB=428; Path='C:\Program Files\X\updater.exe' })
         $r = Get-ProcessRiskScore -proc $top[0] -ProfileHits @() -AutoStartNames @() -TopProcs $top

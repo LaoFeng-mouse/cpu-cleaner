@@ -54,6 +54,15 @@
 - Automated evidence: 146 GUI tests passed after the revision.
 - No actionable P0, P1, or P2 visual finding remains in the revised results state.
 
+### Pass 5 - runtime scan integrity passed
+
+- A real read-only GUI scan reproduced `Get-CimInstance` access denial that previously produced a false-clean `0 / 0` result with exit code 0.
+- Fix: system information now falls back to explicit compatibility values; service collection falls back to `Get-Service`; scheduled-task collection falls back to read-only `schtasks /Query /FO CSV /V`. If both the primary and fallback collector fail, scanning stops instead of reporting an empty category.
+- Runtime evidence on the current Lenovo machine: `0` executable actions, `8` observations, and `0` suspicious processes. The observations comprise six Lenovo services and two Lenovo scheduled tasks; no clean or restore path was invoked.
+- Empty-state copy now says no matching items were found instead of displaying “发现问题” or “抓到 0 个”. Non-empty results retain the selected target hierarchy.
+- Post-fix visual evidence: `artifacts/audit-current/05-reference-vs-runtime-fix.png` and `artifacts/gui-states/{100,125,150}/results.png`; no clipping or overlap is visible at any tested density.
+- Automated evidence: 147 GUI tests and 221 core Pester tests pass after the runtime repair.
+
 ## Follow-up polish
 
 - P3: production screenshot fixtures could use fully localized sample item names in a future pass; current mixed-language sample rows are useful for deterministic width testing and do not affect the shipped runtime copy.
