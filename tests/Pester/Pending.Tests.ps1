@@ -541,6 +541,44 @@ Invoke-Clean
         @($p.actions).Count | Should -Be 1
         @($p.observations).Count | Should -Be 0
     }
+    It '动作与命中类型不匹配时不能绕过类别健康闸门进入 actions' {
+        $hit = [pscustomobject]@{
+            id='mismatched-process-service'; vendor='T'; name_cn='Mismatch'; action='disable_service'; hit_type='process'; detail='P1 PID=101'; reason_cn='r'
+            service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name='P1'; process_id=101; process_path='C:\Apps\P1.exe'
+            safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='P1'; matched_type='exact'; matched_field='process_name'
+        }
+        $health = [pscustomobject]@{ system_info='complete'; services='degraded'; tasks='complete' }
+
+        Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth $health -ScanWarnings @('service incomplete')
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].obs_reason | Should -Match '动作.*命中类型.*不匹配'
+    }
+    It '所有已知危险动作使用错误 hit_type 时一律只进入观察' {
+        $cases = @(
+            [pscustomobject]@{ action='disable_service'; hit_type='task'; pattern='\X\T1'; field='task_path'; service=''; task='\X\T1'; autoSource=''; autoName=''; process=''; pid=0; path='' },
+            [pscustomobject]@{ action='disable_task'; hit_type='service'; pattern='S1'; field='service_name'; service='S1'; task=''; autoSource=''; autoName=''; process=''; pid=0; path='' },
+            [pscustomobject]@{ action='remove_autostart'; hit_type='process'; pattern='P1'; field='process_name'; service=''; task=''; autoSource=''; autoName=''; process='P1'; pid=101; path='C:\Apps\P1.exe' },
+            [pscustomobject]@{ action='uninstall'; hit_type='autostart'; pattern='X'; field='autostart_name'; service=''; task=''; autoSource='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autoName='X'; process=''; pid=0; path='' }
+        )
+        foreach ($case in $cases) {
+            $hit = [pscustomobject]@{
+                id=('mismatch-' + $case.action); vendor='T'; name_cn='Mismatch'; action=$case.action; hit_type=$case.hit_type; detail='target'; reason_cn='r'
+                service_name=$case.service; autostart_source=$case.autoSource; autostart_name=$case.autoName; task_path=$case.task
+                process_name=$case.process; process_id=$case.pid; process_path=$case.path
+                safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern=$case.pattern; matched_type='exact'; matched_field=$case.field
+            }
+
+            Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth ([pscustomobject]@{ system_info='complete'; services='complete'; tasks='complete' }) -ScanWarnings @()
+            $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+            @($p.actions).Count | Should -Be 0 -Because "$($case.action) cannot target $($case.hit_type)"
+            @($p.observations).Count | Should -Be 1 -Because "$($case.action) cannot target $($case.hit_type)"
+            $p.observations[0].obs_reason | Should -Match '动作.*命中类型.*不匹配'
+        }
+    }
     It '服务已禁用且停止时不写入 action 或 observation' {
         Mock Get-Service { [pscustomobject]@{ Name='S1'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'S1' }
         $hit = [pscustomobject]@{ id='already'; vendor='T'; name_cn='Already'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }

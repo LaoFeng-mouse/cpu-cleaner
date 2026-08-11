@@ -37,6 +37,17 @@ function Test-HitMatcherEvidenceShape {
     return $true
 }
 
+function Test-ActionMatchesHitType($Action, $HitType) {
+    if ($Action -isnot [string] -or $HitType -isnot [string]) { return $false }
+    switch -CaseSensitive ($HitType) {
+        'service'   { return $Action -ceq 'disable_service' }
+        'autostart' { return $Action -ceq 'remove_autostart' }
+        'task'      { return $Action -ceq 'disable_task' }
+        'process'   { return $Action -ceq 'uninstall' }
+        default     { return $false }
+    }
+}
+
 function Get-StrictNonBlankStringProperty($Object, [string]$PropertyName) {
     if ($null -eq $Object -or $Object.PSObject.Properties.Name -notcontains $PropertyName) { return $null }
     $value = $Object.$PropertyName
@@ -789,6 +800,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             ($h.action -in $script:DangerousActions)
         $hasNarrowEvidence = Test-HitMatcherEvidenceShape $h
         $hasBroadEvidence = Test-HitMatcherEvidenceShape $h -AllowedMatchTypes @('contains','regex')
+        $actionHitTypeAllowed = Test-ActionMatchesHitType $h.action $h.hit_type
         $healthKey = if ($h.hit_type -is [string]) {
             switch -CaseSensitive ($h.hit_type) {
                 'service' { 'services' }
@@ -802,6 +814,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             $safeAllowed -and
             $testedAllowed -and
             $hasNarrowEvidence -and
+            $actionHitTypeAllowed -and
             $categoryComplete
 
         # action / observation 分开去重, 防止宽匹配观察压制同目标的窄匹配动作
@@ -815,6 +828,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             $obsReason = if ($h.action -eq 'none' -or $h.action -eq 'investigate') { '动作仅观察/不处理' }
                 elseif (-not $safeAllowed) { 'safe=false 或类型无效, 不允许自动处理' }
                 elseif (-not $testedAllowed) { '未实测 (tested=false 或类型无效), 仅观察' }
+                elseif ($actionAllowed -and $hasNarrowEvidence -and -not $actionHitTypeAllowed) { '动作与命中类型不匹配，禁止自动处理' }
                 elseif (-not $categoryComplete) { '扫描信息不完整，禁止自动处理' }
                 elseif ($actionAllowed -and $hasBroadEvidence) { '实际命中为宽匹配 (contains/regex)，禁止自动处理' }
                 elseif ($actionAllowed -and -not $hasNarrowEvidence) { '匹配来源缺失或无效，禁止自动处理' }

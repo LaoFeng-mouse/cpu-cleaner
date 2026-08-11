@@ -127,6 +127,31 @@ Describe '扫描器与评分' {
         { Get-ServicesInfo } | Should -Throw '*不完整*'
         $script:ScanHealth.services | Should -Not -BeExactly 'complete'
     }
+    It 'Get-Service 兼容采集拒绝不可恢复的未知 StartMode' {
+        foreach ($invalidStartMode in @('Unknown','DelayedAuto','arbitrary')) {
+            Reset-ScanDiagnostics
+            Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
+            Mock Get-Service {
+                [pscustomobject]@{ Name='ExactSvc'; DisplayName='Exact'; Status='Running'; StartType=$invalidStartMode }
+            }
+
+            { Get-ServicesInfo } | Should -Throw '*不完整*' -Because "StartMode $invalidStartMode cannot be restored safely"
+            $script:ScanHealth.services | Should -Not -BeExactly 'complete'
+        }
+    }
+    It 'Get-Service 兼容采集接受可恢复 StartMode 且大小写不敏感' {
+        foreach ($validStartMode in @('Automatic','manual','DISABLED','Boot','system')) {
+            Reset-ScanDiagnostics
+            Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
+            Mock Get-Service {
+                [pscustomobject]@{ Name='ExactSvc'; DisplayName='Exact'; Status='Running'; StartType=$validStartMode }
+            }
+
+            $services = @(Get-ServicesInfo)
+            $services.Count | Should -Be 1
+            $script:ScanHealth.services | Should -BeExactly 'complete'
+        }
+    }
     It 'CIM 系统概况被拒时返回明确的兼容数据而不是空字段' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
         Mock Get-ItemProperty {

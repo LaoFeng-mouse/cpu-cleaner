@@ -231,7 +231,8 @@ function Get-ServicesInfo {
                 [string]::IsNullOrWhiteSpace([string]$_.Name) -or
                 [string]::IsNullOrWhiteSpace([string]$_.DisplayName) -or
                 [string]::IsNullOrWhiteSpace([string]$_.State) -or
-                [string]::IsNullOrWhiteSpace([string]$_.StartMode)
+                [string]::IsNullOrWhiteSpace([string]$_.StartMode) -or
+                [string]$_.StartMode -notin @('Automatic','Manual','Disabled','Boot','System')
             })
             if ($invalidFallbackServices.Count -gt 0) {
                 throw 'Get-Service 返回不完整的服务身份或状态。'
