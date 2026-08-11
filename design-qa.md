@@ -39,6 +39,21 @@
 - Automated evidence: 141 GUI tests passed after the fix.
 - No actionable P0, P1, or P2 visual finding remains.
 
+### Pass 3 - reopened from user review
+
+- P1, comic expressions: all four square mouse assets used `UniformToFill` inside wide slots, visibly cropping the top and bottom of each expression.
+- P1, results hierarchy: the selected target's oversized result headline, yellow count, dual actions, and evidence footer had been reduced to a generic small state card.
+- P2, journey emphasis: the results state still highlighted stage 2 and faded stage 3, while the selected target fully reveals the decision/cleanup panel and only subdues the final panel.
+- P2, duplicate heading: the generic `扫描结论` header repeated the new `扫描完成，发现问题` result status.
+
+### Pass 4 - passed
+
+- Fixes: all stage images now use `Uniform`; the comic rail is taller; results use a 38/50 px hero headline, yellow dynamic total, dual 56 px actions, and collapsed evidence footer; results highlight stage 3; the duplicate generic state header is hidden only for results.
+- Interaction: `这次先不处理` returns safely to idle and clears the in-memory reviewed authorization snapshot without deleting the read-only scan result.
+- Post-fix evidence: `artifacts/audit-current/04-reference-vs-final-results.png` and `artifacts/gui-states/{100,125,150}/results.png`.
+- Automated evidence: 146 GUI tests passed after the revision.
+- No actionable P0, P1, or P2 visual finding remains in the revised results state.
+
 ## Follow-up polish
 
 - P3: production screenshot fixtures could use fully localized sample item names in a future pass; current mixed-language sample rows are useful for deterministic width testing and do not affect the shipped runtime copy.

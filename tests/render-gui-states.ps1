@@ -61,7 +61,7 @@ foreach ($state in Get-GuiStateNames) {
     $window.FindName('ScanProgress').IsIndeterminate = $true
     $window.FindName('ScanPhaseText').Text = Get-Text 'ScanPhaseServices'
     $window.FindName('ScanOutput').Text = "system information`r`nprocess scan`r`nservice scan"
-    $window.FindName('ResultSummaryText').Text = (Get-Text 'ScanResultSummary') -f 2,4
+    Set-GuiResultSummary -Executable 2 -Observation 4 -Evidence @('Exact safe service | exact | ExactService', 'Broad-match observation | contains | Lenovo')
     $window.FindName('PendingList').ItemsSource = $reviewRows
     $window.FindName('ExecutionList').ItemsSource = $executionRows
     $window.FindName('CompletedList').ItemsSource = $executionRows

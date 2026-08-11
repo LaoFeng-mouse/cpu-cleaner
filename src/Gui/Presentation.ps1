@@ -23,7 +23,7 @@ function Get-GuiStateDefinition {
     $definitions = @{
         idle      = [pscustomobject]@{ Panel='IdlePanel';      ActiveStage=1; Busy=$false; PrimaryKey='BtnStartScan' }
         scanning  = [pscustomobject]@{ Panel='ScanningPanel';  ActiveStage=2; Busy=$true;  PrimaryKey='' }
-        results   = [pscustomobject]@{ Panel='ResultsPanel';   ActiveStage=2; Busy=$false; PrimaryKey='BtnOpenReview' }
+        results   = [pscustomobject]@{ Panel='ResultsPanel';   ActiveStage=3; Busy=$false; PrimaryKey='BtnOpenReview' }
         review    = [pscustomobject]@{ Panel='ReviewPanel';    ActiveStage=3; Busy=$false; PrimaryKey='BtnExecute' }
         executing = [pscustomobject]@{ Panel='ExecutingPanel'; ActiveStage=3; Busy=$true;  PrimaryKey='' }
         completed = [pscustomobject]@{ Panel='CompletedPanel'; ActiveStage=4; Busy=$false; PrimaryKey='BtnRescan' }

@@ -32,7 +32,7 @@
     </Style>
   </Window.Resources>
   <Grid Margin="18">
-    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="188"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="228"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <Grid Grid.Row="0" Margin="4,0,4,10">
       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <StackPanel><TextBlock x:Name="TitleMain" Text="鼠鼠cleaner" FontSize="26" FontWeight="Bold" Foreground="{StaticResource Ink}"/>
@@ -42,21 +42,38 @@
         <Button x:Name="BtnLang" Content="EN" Style="{StaticResource SecondaryButton}" MinWidth="52" AutomationProperties.Name="切换语言"/>
       </StackPanel>
     </Grid>
-    <UniformGrid Grid.Row="1" Columns="4">
-      <Border x:Name="StageCard1" Style="{StaticResource StageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Image x:Name="ImgStage1" Stretch="UniformToFill" AutomationProperties.Name="轻盈幻想阶段插图"/><TextBlock x:Name="StageLabel1" Grid.Row="1" Text="1 轻盈幻想" FontWeight="Bold" Margin="2,6,2,0"/></Grid></Border>
-      <Border x:Name="StageCard2" Style="{StaticResource StageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Image x:Name="ImgStage2" Stretch="UniformToFill" AutomationProperties.Name="看清现实阶段插图"/><TextBlock x:Name="StageLabel2" Grid.Row="1" Text="2 看清现实" FontWeight="Bold" Margin="2,6,2,0"/></Grid></Border>
-      <Border x:Name="StageCard3" Style="{StaticResource StageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Image x:Name="ImgStage3" Stretch="UniformToFill" AutomationProperties.Name="谨慎整理阶段插图"/><TextBlock x:Name="StageLabel3" Grid.Row="1" Text="3 谨慎整理" FontWeight="Bold" Margin="2,6,2,0"/></Grid></Border>
-      <Border x:Name="StageCard4" Style="{StaticResource StageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Image x:Name="ImgStage4" Stretch="UniformToFill" AutomationProperties.Name="幻想落地阶段插图"/><TextBlock x:Name="StageLabel4" Grid.Row="1" Text="4 幻想落地" FontWeight="Bold" Margin="2,6,2,0"/></Grid></Border>
+    <UniformGrid x:Name="ComicRail" Grid.Row="1" Columns="4" MinHeight="220">
+      <Border x:Name="StageCard1" Style="{StaticResource StageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Image x:Name="ImgStage1" Stretch="Uniform" AutomationProperties.Name="轻盈幻想阶段插图"/><TextBlock x:Name="StageLabel1" Grid.Row="1" Text="1 轻盈幻想" FontWeight="Bold" Margin="2,6,2,0"/></Grid></Border>
+      <Border x:Name="StageCard2" Style="{StaticResource StageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Image x:Name="ImgStage2" Stretch="Uniform" AutomationProperties.Name="看清现实阶段插图"/><TextBlock x:Name="StageLabel2" Grid.Row="1" Text="2 看清现实" FontWeight="Bold" Margin="2,6,2,0"/></Grid></Border>
+      <Border x:Name="StageCard3" Style="{StaticResource StageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Image x:Name="ImgStage3" Stretch="Uniform" AutomationProperties.Name="谨慎整理阶段插图"/><TextBlock x:Name="StageLabel3" Grid.Row="1" Text="3 谨慎整理" FontWeight="Bold" Margin="2,6,2,0"/></Grid></Border>
+      <Border x:Name="StageCard4" Style="{StaticResource StageCard}"><Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions><Image x:Name="ImgStage4" Stretch="Uniform" AutomationProperties.Name="幻想落地阶段插图"/><TextBlock x:Name="StageLabel4" Grid.Row="1" Text="4 幻想落地" FontWeight="Bold" Margin="2,6,2,0"/></Grid></Border>
     </UniformGrid>
     <Border Grid.Row="2" Margin="4,10,4,4" Padding="20" Background="{StaticResource Paper}" CornerRadius="14" BorderBrush="#D8CBAA" BorderThickness="1">
       <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-        <StackPanel><TextBlock x:Name="StateTitle" FontSize="24" FontWeight="Bold" Foreground="{StaticResource Ink}"/>
+        <StackPanel x:Name="StateHeader"><TextBlock x:Name="StateTitle" FontSize="24" FontWeight="Bold" Foreground="{StaticResource Ink}"/>
           <TextBlock x:Name="StateSubtitle" Margin="0,4,0,12" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/></StackPanel>
         <ScrollViewer x:Name="StateBodyScroll" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <Grid>
           <StackPanel x:Name="IdlePanel"><TextBlock x:Name="IdleBodyText" Text="扫描只读，不会修改系统。" Margin="0,0,0,16"/><DockPanel LastChildFill="False"><Button x:Name="BtnStartScan" Content="开始安全扫描" HorizontalAlignment="Left" Style="{StaticResource PrimaryButton}" IsDefault="True" AutomationProperties.Name="开始安全扫描"/></DockPanel></StackPanel>
           <StackPanel x:Name="ScanningPanel" Visibility="Collapsed"><ProgressBar x:Name="ScanProgress" Height="8" IsIndeterminate="True"/><TextBlock x:Name="ScanPhaseText" Text="正在检查系统项目" Margin="0,12,0,8"/><TextBox x:Name="ScanOutput" IsReadOnly="True" Height="160" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/></StackPanel>
-          <StackPanel x:Name="ResultsPanel" Visibility="Collapsed"><TextBlock x:Name="ResultSummaryText" FontSize="18" FontWeight="Bold" AutomationProperties.Name="扫描结果摘要"/><TextBlock x:Name="ResultsNoMutationText" Text="目前尚未修改任何内容。" Margin="0,6,0,18"/><DockPanel LastChildFill="False"><Button x:Name="BtnOpenReview" Content="查看处理建议" HorizontalAlignment="Left" Style="{StaticResource PrimaryButton}" IsDefault="True" AutomationProperties.Name="查看处理建议"/></DockPanel></StackPanel>
+          <StackPanel x:Name="ResultsPanel" Visibility="Collapsed">
+            <TextBlock x:Name="ResultStatusText" Text="扫描完成，发现问题" FontSize="18" FontWeight="Bold"/>
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,2">
+              <TextBlock x:Name="ResultHeadlinePrefix" Text="抓到 " FontSize="38" FontWeight="Black" Foreground="{StaticResource Ink}" VerticalAlignment="Center"/>
+              <TextBlock x:Name="ResultHeadlineCount" Text="0" FontSize="50" FontWeight="Black" Foreground="{StaticResource FantasyYellow}" VerticalAlignment="Center"/>
+              <TextBlock x:Name="ResultHeadlineSuffix" Text=" 个偷偷常驻的后台" FontSize="38" FontWeight="Black" Foreground="{StaticResource Ink}" VerticalAlignment="Center"/>
+            </StackPanel>
+            <TextBlock x:Name="ResultSummaryText" FontSize="21" FontWeight="SemiBold" AutomationProperties.Name="扫描结果摘要"/>
+            <Border Height="1" Background="#B8AD92" Margin="0,12,0,10"/>
+            <TextBlock x:Name="ResultsNoMutationText" Text="目前尚未修改任何内容。" Foreground="{StaticResource Muted}" TextWrapping="Wrap"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,18,0,10">
+              <Button x:Name="BtnOpenReview" Content="查看处理建议" Style="{StaticResource PrimaryButton}" MinWidth="260" Height="56" FontSize="18" IsDefault="True" AutomationProperties.Name="查看处理建议"/>
+              <Button x:Name="BtnSkipReview" Content="这次先不处理" Style="{StaticResource SecondaryButton}" MinWidth="220" Height="56" FontSize="17" Margin="14,0,0,0" AutomationProperties.Name="这次先不处理"/>
+            </StackPanel>
+            <Expander x:Name="ResultsEvidenceExpander" Header="专业证据与服务名称（点击展开）" IsExpanded="False" Margin="0,8,0,0">
+              <TextBlock x:Name="ResultEvidenceText" FontFamily="Consolas" TextWrapping="Wrap" Margin="16,8,0,0"/>
+            </Expander>
+          </StackPanel>
           <Grid x:Name="ReviewPanel" Visibility="Collapsed"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
             <StackPanel Orientation="Horizontal"><Button x:Name="BtnSelectAll" Content="选择全部安全项" Style="{StaticResource SecondaryButton}"/><Button x:Name="BtnClearAll" Content="清空选择" Margin="8,0,0,0" Style="{StaticResource SecondaryButton}"/></StackPanel>
             <ListBox x:Name="PendingList" Grid.Row="1" Margin="0,10" Background="Transparent" BorderThickness="0" KeyboardNavigation.TabNavigation="Continue"><ListBox.ItemTemplate><DataTemplate><Border BorderBrush="#E2D7BC" BorderThickness="0,0,0,1" Padding="6"><StackPanel><DockPanel><CheckBox IsChecked="{Binding IsChecked}" IsEnabled="{Binding CanExecute}" VerticalAlignment="Center"/><TextBlock Text="{Binding name_cn}" FontWeight="Bold" Margin="8,0"/><TextBlock Text="{Binding action_label}" Foreground="#6E675D"/></DockPanel><TextBlock Text="{Binding reason_cn}" TextWrapping="Wrap" Margin="24,4,0,0"/><Expander Header="{DynamicResource TechnicalDetailsText}" Margin="24,4,0,0"><TextBlock Text="{Binding matcher_detail}" FontFamily="Consolas" TextWrapping="Wrap"/></Expander></StackPanel></Border></DataTemplate></ListBox.ItemTemplate></ListBox>

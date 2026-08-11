@@ -47,7 +47,7 @@ Describe 'GUI presentation model' {
         $expected = @{
             idle      = @{ Panel='IdlePanel';      ActiveStage=1; Busy=$false; PrimaryKey='BtnStartScan' }
             scanning  = @{ Panel='ScanningPanel';  ActiveStage=2; Busy=$true;  PrimaryKey='' }
-            results   = @{ Panel='ResultsPanel';   ActiveStage=2; Busy=$false; PrimaryKey='BtnOpenReview' }
+            results   = @{ Panel='ResultsPanel';   ActiveStage=3; Busy=$false; PrimaryKey='BtnOpenReview' }
             review    = @{ Panel='ReviewPanel';    ActiveStage=3; Busy=$false; PrimaryKey='BtnExecute' }
             executing = @{ Panel='ExecutingPanel'; ActiveStage=3; Busy=$true;  PrimaryKey='' }
             completed = @{ Panel='CompletedPanel'; ActiveStage=4; Busy=$false; PrimaryKey='BtnRescan' }

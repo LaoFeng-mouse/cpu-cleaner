@@ -25,7 +25,8 @@ $script:I18N = @{
         AppName='鼠鼠cleaner'; SubTitle='识别可以宽，执行必须窄'; Privilege='普通权限'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
         Stage1='1 轻盈幻想'; Stage2='2 看清现实'; Stage3='3 谨慎整理'; Stage4='4 幻想落地'
         IdleBody='扫描只读，不会修改系统。'; ResultsNoMutation='目前尚未修改任何内容。'; ExecutingBody='正在逐项处理；每项均会备份并复核。'
-        BtnStartScan='开始安全扫描'; BtnOpenReview='查看处理建议'; BtnExecute='处理已选择项目'; BtnRescan='重新扫描'; BtnRetry='重试'
+        BtnStartScan='开始安全扫描'; BtnOpenReview='查看处理建议'; BtnSkipReview='这次先不处理'; BtnExecute='处理已选择项目'; BtnRescan='重新扫描'; BtnRetry='重试'
+        ResultStatus='扫描完成，发现问题'; ResultHeadlinePrefix='抓到 '; ResultHeadlineSuffix=' 个偷偷常驻的后台'; ResultsEvidence='专业证据与服务名称（点击展开）'; ResultsEvidenceEmpty='没有可展示的匹配证据。'
         SelectAll='选择全部安全项'; ClearAll='清空选择'; ReviewBoundary='观察项不会自动执行；执行前将再次验证。'; TechnicalDetails='技术详情'; ErrorDetails='查看技术详情'
         TabScan='🐹 1. 扫描（只读）'; TabPending='📋 2. 处理建议'; TabExec='⚙️ 3. 执行（管理员）'; TabResult='✅ 4. 结果与恢复'
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
@@ -53,7 +54,8 @@ $script:I18N = @{
         AppName='Shushu Cleaner'; SubTitle='Detection may be broad; execution must be narrow'; Privilege='Standard privileges'; Hint0='GUI is a shell; core logic is identical to CLI'
         Stage1='1 Light fantasy'; Stage2='2 Face reality'; Stage3='3 Tidy carefully'; Stage4='4 Fantasy delivered'
         IdleBody='Scanning is read-only and changes no system settings.'; ResultsNoMutation='Nothing has been changed yet.'; ExecutingBody='Processing item by item; each action is backed up and verified.'
-        BtnStartScan='Start safe scan'; BtnOpenReview='Review recommendations'; BtnExecute='Process selected items'; BtnRescan='Scan again'; BtnRetry='Retry'
+        BtnStartScan='Start safe scan'; BtnOpenReview='Review recommendations'; BtnSkipReview='Not this time'; BtnExecute='Process selected items'; BtnRescan='Scan again'; BtnRetry='Retry'
+        ResultStatus='Scan complete — items found'; ResultHeadlinePrefix='Found '; ResultHeadlineSuffix=' resident background items'; ResultsEvidence='Evidence and service names (expand)'; ResultsEvidenceEmpty='No matcher evidence to display.'
         SelectAll='Select all safe items'; ClearAll='Clear selection'; ReviewBoundary='Observation items never run automatically; every action is revalidated.'; TechnicalDetails='Technical details'; ErrorDetails='View technical details'
         TabScan='🐹 1. Scan (read-only)'; TabPending='📋 2. Recommendations'; TabExec='⚙️ 3. Execute (admin)'; TabResult='✅ 4. Result & Restore'
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
@@ -104,6 +106,20 @@ function Set-GuiCompletedSummary {
     $control.Foreground = if ($Failed -gt 0) { $window.Resources['Danger'] } else { $window.Resources['Ink'] }
 }
 
+function Set-GuiResultSummary {
+    param(
+        [int]$Executable,
+        [int]$Observation,
+        [string[]]$Evidence = @()
+    )
+    $script:LastResultExecutable = $Executable
+    $script:LastResultObservation = $Observation
+    $script:LastResultEvidence = @($Evidence)
+    $window.FindName('ResultHeadlineCount').Text = [string]($Executable + $Observation)
+    $window.FindName('ResultSummaryText').Text = (Get-Text 'ScanResultSummary') -f $Executable, $Observation
+    $window.FindName('ResultEvidenceText').Text = if (@($Evidence).Count -gt 0) { @($Evidence) -join [Environment]::NewLine } else { Get-Text 'ResultsEvidenceEmpty' }
+}
+
 function Update-GuiStateText {
     param(
         [string]$StateName = $script:GuiState,
@@ -133,7 +149,8 @@ function Apply-Language {
     foreach ($entry in @(
         @('StageLabel1','Stage1'), @('StageLabel2','Stage2'), @('StageLabel3','Stage3'), @('StageLabel4','Stage4'),
         @('IdleBodyText','IdleBody'), @('ResultsNoMutationText','ResultsNoMutation'), @('ExecutingBodyText','ExecutingBody'),
-        @('BtnStartScan','BtnStartScan'), @('BtnOpenReview','BtnOpenReview'), @('BtnExecute','BtnExecute'), @('BtnRescan','BtnRescan'), @('BtnRetry','BtnRetry'), @('BtnRestore','BtnRestore'),
+        @('ResultStatusText','ResultStatus'), @('ResultHeadlinePrefix','ResultHeadlinePrefix'), @('ResultHeadlineSuffix','ResultHeadlineSuffix'), @('ResultsEvidenceExpander','ResultsEvidence'),
+        @('BtnStartScan','BtnStartScan'), @('BtnOpenReview','BtnOpenReview'), @('BtnSkipReview','BtnSkipReview'), @('BtnExecute','BtnExecute'), @('BtnRescan','BtnRescan'), @('BtnRetry','BtnRetry'), @('BtnRestore','BtnRestore'),
         @('BtnSelectAll','SelectAll'), @('BtnClearAll','ClearAll'), @('ReviewBoundaryText','ReviewBoundary')
     )) {
         $control = $w.FindName($entry[0])
@@ -146,7 +163,7 @@ function Apply-Language {
     $w.Resources['ErrorDetailsText'] = $t['ErrorDetails']
     $automationKeys = @{
         ImgStage1='AutoStage1'; ImgStage2='AutoStage2'; ImgStage3='AutoStage3'; ImgStage4='AutoStage4'
-        BtnStartScan='BtnStartScan'; BtnOpenReview='BtnOpenReview'; BtnExecute='BtnExecute'; BtnRescan='BtnRescan'; BtnRetry='BtnRetry'; BtnRestore='BtnRestore'; BtnLang='LangLabel'
+        BtnStartScan='BtnStartScan'; BtnOpenReview='BtnOpenReview'; BtnSkipReview='BtnSkipReview'; BtnExecute='BtnExecute'; BtnRescan='BtnRescan'; BtnRetry='BtnRetry'; BtnRestore='BtnRestore'; BtnLang='LangLabel'
         ResultSummaryText='AutoResult'; CompletedSummaryText='AutoCompleted'; ErrorSummaryText='AutoError'
     }
     foreach ($name in $automationKeys.Keys) {
@@ -155,6 +172,9 @@ function Apply-Language {
     Update-GuiStateText -StateName $script:GuiState -TitleControl ($w.FindName('StateTitle')) -SubtitleControl ($w.FindName('StateSubtitle'))
     if ($script:GuiState -eq 'scanning' -and -not [string]::IsNullOrWhiteSpace($script:CurrentScanPhaseTextKey)) {
         $w.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
+    }
+    if ($script:GuiState -eq 'results') {
+        Set-GuiResultSummary -Executable $script:LastResultExecutable -Observation $script:LastResultObservation -Evidence $script:LastResultEvidence
     }
 }
 
@@ -187,6 +207,9 @@ foreach ($imgName in $script:ImgMap.Keys) {
 
 $script:GuiState = 'idle'
 $script:GuiActiveStage = 1
+$script:LastResultExecutable = 0
+$script:LastResultObservation = 0
+$script:LastResultEvidence = @()
 $script:ReviewedPendingSnapshot = $null
 $script:ReviewedPendingGenerationSha256 = $null
 $emptyReviewedActionKeys = [System.Collections.Generic.List[string]]::new()
@@ -230,10 +253,13 @@ function Set-GuiState {
         $cards[$cardName] = $card
     }
 
+    $stateHeader = $window.FindName('StateHeader')
     $titleControl = $window.FindName('StateTitle')
     $subtitleControl = $window.FindName('StateSubtitle')
+    if ($null -eq $stateHeader) { throw 'GUI control missing: StateHeader' }
     if ($null -eq $titleControl) { throw 'GUI control missing: StateTitle' }
     if ($null -eq $subtitleControl) { throw 'GUI control missing: StateSubtitle' }
+    if (-not $stateHeader.PSObject.Properties['Visibility']) { throw 'GUI control invalid: StateHeader.Visibility' }
     if (-not $titleControl.PSObject.Properties['Text']) { throw 'GUI control invalid: StateTitle.Text' }
     if (-not $subtitleControl.PSObject.Properties['Text']) { throw 'GUI control invalid: StateSubtitle.Text' }
 
@@ -256,6 +282,7 @@ function Set-GuiState {
     }
     $previousTitle = $titleControl.Text
     $previousSubtitle = $subtitleControl.Text
+    $previousHeaderVisibility = $stateHeader.Visibility
 
     try {
         foreach ($panelName in $script:StatePanels) {
@@ -267,6 +294,7 @@ function Set-GuiState {
             $card.BorderBrush = if ($stage -eq $activeStage) { '#FFD21F' } else { '#D8CBAA' }
             $card.BorderThickness = if ($stage -eq $activeStage) { 3 } else { 1 }
         }
+        $stateHeader.Visibility = if ($Name -eq 'results') { 'Collapsed' } else { 'Visible' }
         Update-GuiStateText -StateName $Name -TitleControl $titleControl -SubtitleControl $subtitleControl -TitleText $titleText -SubtitleText $subtitleText
         $script:GuiState = $Name
         $script:GuiActiveStage = $activeStage
@@ -283,6 +311,7 @@ function Set-GuiState {
         }
         try { $titleControl.Text = $previousTitle } catch {}
         try { $subtitleControl.Text = $previousSubtitle } catch {}
+        try { $stateHeader.Visibility = $previousHeaderVisibility } catch {}
         $script:GuiState = $previousState
         $script:GuiActiveStage = $previousActiveStage
         throw $originalError
@@ -828,7 +857,8 @@ function Complete-ScanPoll {
             $pending = Read-GuiPendingFile
             $items = @(Get-PendingViewItems -Pending $pending)
             $summary = Get-GuiItemSummary $items
-            $window.FindName('ResultSummaryText').Text = ((Get-Text 'ScanResultSummary') -f $summary.executable, $summary.observation)
+            $evidence = @($items | ForEach-Object { '{0} — {1}' -f $_.name_cn, ($_.matcher_detail -replace "`r?`n", ' | ') })
+            Set-GuiResultSummary -Executable $summary.executable -Observation $summary.observation -Evidence $evidence
             Set-GuiState results
         } else {
             $detail = [string]$result
@@ -933,6 +963,14 @@ function Start-GuiScan {
 
 $window.FindName('BtnStartScan').Add_Click({ Start-GuiScan })
 $window.FindName('BtnRetry').Add_Click({ Start-GuiScan })
+function Dismiss-GuiResults {
+    $script:ReviewedPendingSnapshot = $null
+    $script:ReviewedPendingGenerationSha256 = $null
+    $emptyActionKeys = [System.Collections.Generic.List[string]]::new()
+    $script:ReviewedActionIdentityKeys = $emptyActionKeys.AsReadOnly()
+    Set-GuiState idle -Force
+}
+$window.FindName('BtnSkipReview').Add_Click({ Dismiss-GuiResults })
 $window.FindName('BtnOpenReview').Add_Click({
     $list = $window.FindName('PendingList')
     try {

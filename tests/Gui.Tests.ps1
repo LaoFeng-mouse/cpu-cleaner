@@ -105,6 +105,49 @@ Describe 'GUI 壳 (无窗口)' {
         }
     }
 
+    It '四格漫画使用完整叙事素材且不裁切鼠鼠表情' {
+        for ($stage = 1; $stage -le 4; $stage++) {
+            $name = "ImgStage$stage"
+            $script:Win.FindName($name).Stretch.ToString() | Should -Be 'Uniform'
+            Test-Path (Join-Path $script:GuiRoot $script:ImgMap[$name]) | Should -BeTrue
+        }
+    }
+
+    It 'results 状态恢复原设计的大标题动态计数和双操作层级' {
+        foreach ($name in @('ComicRail','ResultStatusText','ResultHeadlinePrefix','ResultHeadlineCount','ResultHeadlineSuffix','BtnSkipReview','ResultsEvidenceExpander','ResultEvidenceText')) {
+            $script:Win.FindName($name) | Should -Not -BeNullOrEmpty
+        }
+        Set-GuiResultSummary -Executable 2 -Observation 4 -Evidence @('ExactService', 'Lenovo observation')
+        $script:Win.FindName('ResultHeadlineCount').Text | Should -Be '6'
+        $script:Win.FindName('ResultHeadlineCount').FontSize | Should -BeGreaterOrEqual 44
+        $script:Win.FindName('ResultHeadlinePrefix').FontSize | Should -BeGreaterOrEqual 34
+        $script:Win.FindName('BtnOpenReview').MinWidth | Should -BeGreaterOrEqual 240
+        $script:Win.FindName('BtnSkipReview').MinWidth | Should -BeGreaterOrEqual 200
+        $script:Win.FindName('ResultsEvidenceExpander').IsExpanded | Should -BeFalse
+        $script:Win.FindName('ResultEvidenceText').Text | Should -Match 'ExactService'
+    }
+
+    It '这次先不处理会安全返回起点且不保留 reviewed 授权快照' {
+        Set-GuiState -Name results -Force
+        $script:ReviewedPendingSnapshot = [pscustomobject]@{ marker='stale' }
+        $script:ReviewedPendingGenerationSha256 = 'stale'
+
+        Dismiss-GuiResults
+
+        $script:GuiState | Should -Be 'idle'
+        $script:ReviewedPendingSnapshot | Should -BeNullOrEmpty
+        $script:ReviewedPendingGenerationSha256 | Should -BeNullOrEmpty
+    }
+
+    It 'results 只显示原设计的完成提示而不重复通用状态标题' {
+        Set-GuiState -Name results -Force
+        $script:Win.FindName('StateHeader').Visibility.ToString() | Should -Be 'Collapsed'
+        $script:Win.FindName('ResultStatusText').Visibility.ToString() | Should -Be 'Visible'
+
+        Set-GuiState -Name review -Force
+        $script:Win.FindName('StateHeader').Visibility.ToString() | Should -Be 'Visible'
+    }
+
     It '语言切换 zh/en 更新标题' {
         $script:Lang = 'zh'; Apply-Language
         $script:Win.FindName('TitleMain').Text | Should -Be '鼠鼠cleaner'
@@ -166,7 +209,7 @@ Describe 'GUI 壳 (无窗口)' {
     It 'preflights missing <ControlName> without mutating UI or model' -TestCases @(
         @{ ControlName='IdlePanel' }, @{ ControlName='ScanningPanel' }, @{ ControlName='ResultsPanel' },
         @{ ControlName='ReviewPanel' }, @{ ControlName='ExecutingPanel' }, @{ ControlName='CompletedPanel' },
-        @{ ControlName='ErrorPanel' }, @{ ControlName='StageCard1' }, @{ ControlName='StageCard2' },
+        @{ ControlName='ErrorPanel' }, @{ ControlName='StateHeader' }, @{ ControlName='StageCard1' }, @{ ControlName='StageCard2' },
         @{ ControlName='StageCard3' }, @{ ControlName='StageCard4' }, @{ ControlName='StateTitle' },
         @{ ControlName='StateSubtitle' }
     ) {
@@ -239,14 +282,14 @@ Describe 'GUI 壳 (无窗口)' {
     It 'renders <Name> truthfully in <Lang>' -TestCases @(
         @{ Name='idle'; Lang='zh'; Panel='IdlePanel'; Stage=1; Title='鼠鼠开始幻想'; Subtitle='先做只读扫描，不会修改系统。' }
         @{ Name='scanning'; Lang='zh'; Panel='ScanningPanel'; Stage=2; Title='正在看清现实'; Subtitle='只展示真实阶段，不伪造完成百分比。' }
-        @{ Name='results'; Lang='zh'; Panel='ResultsPanel'; Stage=2; Title='扫描结论'; Subtitle='可处理项与观察项分开显示，目前尚未修改系统。' }
+        @{ Name='results'; Lang='zh'; Panel='ResultsPanel'; Stage=3; Title='扫描结论'; Subtitle='可处理项与观察项分开显示，目前尚未修改系统。' }
         @{ Name='review'; Lang='zh'; Panel='ReviewPanel'; Stage=3; Title='确认处理边界'; Subtitle='只有安全、已测试且窄匹配命中的项目可以选择。' }
         @{ Name='executing'; Lang='zh'; Panel='ExecutingPanel'; Stage=3; Title='鼠鼠正在谨慎整理'; Subtitle='每项都会重新验证、备份并记录结果。' }
         @{ Name='completed'; Lang='zh'; Panel='CompletedPanel'; Stage=4; Title='幻想落地'; Subtitle='结果按成功、失败和跳过逐项展示。' }
         @{ Name='error'; Lang='zh'; Panel='ErrorPanel'; Stage=1; Title='鼠鼠的幻想被打断了'; Subtitle='查看真实原因后可以安全重试。' }
         @{ Name='idle'; Lang='en'; Panel='IdlePanel'; Stage=1; Title='The fantasy begins'; Subtitle='Start with a read-only scan. No system settings will change.' }
         @{ Name='scanning'; Lang='en'; Panel='ScanningPanel'; Stage=2; Title='Looking at reality'; Subtitle='Showing real scan phases without a fabricated percentage.' }
-        @{ Name='results'; Lang='en'; Panel='ResultsPanel'; Stage=2; Title='Scan result'; Subtitle='Safe actions and observations are separated. Nothing has changed yet.' }
+        @{ Name='results'; Lang='en'; Panel='ResultsPanel'; Stage=3; Title='Scan result'; Subtitle='Safe actions and observations are separated. Nothing has changed yet.' }
         @{ Name='review'; Lang='en'; Panel='ReviewPanel'; Stage=3; Title='Review the safety boundary'; Subtitle='Only tested items produced by narrow matches can be selected.' }
         @{ Name='executing'; Lang='en'; Panel='ExecutingPanel'; Stage=3; Title='Cleaning carefully'; Subtitle='Every item is revalidated, backed up, and recorded.' }
         @{ Name='completed'; Lang='en'; Panel='CompletedPanel'; Stage=4; Title='Fantasy delivered'; Subtitle='Success, failure, and skipped results are shown item by item.' }
