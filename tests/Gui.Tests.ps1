@@ -2178,6 +2178,14 @@ Describe '勾选视图 (v1.5.5)' {
         Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
     }
 
+    It 'completed 摘要在存在失败项时使用危险色强调' {
+        Set-GuiCompletedSummary -Success 1 -Failed 1 -Skipped 1 -Manual 0
+
+        $summary = $script:Win.FindName('CompletedSummaryText')
+        $summary.Text | Should -Match 'failed 1|失败 1'
+        $summary.Foreground.ToString() | Should -Be $script:Win.Resources['Danger'].ToString()
+    }
+
     It '恢复 exit 2 在单页 completed 状态如实展示部分失败与 manifest 明细' {
         $tmpRoot = Join-Path $TestDrive ('restore-partial-' + [guid]::NewGuid().ToString('N'))
         $backup = Join-Path $tmpRoot 'backups\20260811_020202'

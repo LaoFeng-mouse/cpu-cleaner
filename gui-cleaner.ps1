@@ -87,6 +87,23 @@ function Get-Text($key) {
     return $languageMap[$key]
 }
 
+function Set-GuiCompletedSummary {
+    param(
+        [int]$Success = 0,
+        [int]$Failed = 0,
+        [int]$Skipped = 0,
+        [int]$Manual = 0,
+        [string]$Text = ''
+    )
+    $control = $window.FindName('CompletedSummaryText')
+    $control.Text = if ([string]::IsNullOrEmpty($Text)) {
+        (Get-Text 'ExecDoneSum') -f $Success, $Failed, $Skipped, $Manual
+    } else {
+        $Text
+    }
+    $control.Foreground = if ($Failed -gt 0) { $window.Resources['Danger'] } else { $window.Resources['Ink'] }
+}
+
 function Update-GuiStateText {
     param(
         [string]$StateName = $script:GuiState,
@@ -1236,7 +1253,7 @@ function Complete-ExecutionPoll {
             $result = Read-GuiStrictExecutionResult -Path $script:ExecutionTempPath -ExpectedActions $script:ExecutionActions
             Merge-PendingStatus $result
             $window.FindName('CompletedList').ItemsSource = @($result.Rows)
-            $window.FindName('CompletedSummaryText').Text = (Get-Text 'ExecDoneSum') -f $result.Summary['success'], $result.Summary['failed'], $result.Summary['skipped'], $result.Summary['manual_required']
+            Set-GuiCompletedSummary -Success $result.Summary['success'] -Failed $result.Summary['failed'] -Skipped $result.Summary['skipped'] -Manual $result.Summary['manual_required']
             Set-GuiState completed
             $null = Clear-GuiExecutionResources -RemoveTemp -ProcessExitConfirmed
         } catch {
@@ -1395,7 +1412,8 @@ function Invoke-GuiRestoreLatest {
         $exitCode = [int]$proc.ExitCode
         if ($exitCode -in @(0,2)) {
             $window.FindName('CompletedList').ItemsSource = @(Get-GuiRestoreRows -BackupPath $latest.FullName)
-            $window.FindName('CompletedSummaryText').Text = if ($exitCode -eq 0) { (Get-Text 'RestoreOk') -f $latest.Name } else { Get-Text 'RestorePartial' }
+            $restoreSummary = if ($exitCode -eq 0) { (Get-Text 'RestoreOk') -f $latest.Name } else { Get-Text 'RestorePartial' }
+            Set-GuiCompletedSummary -Failed $(if ($exitCode -eq 2) { 1 } else { 0 }) -Text $restoreSummary
             Set-GuiState completed -Force
             return $true
         }
