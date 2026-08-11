@@ -1,5 +1,26 @@
 ﻿# 系统采集 (v1.7.0 拆分): 概况/CPU 采样/服务/自启/任务/可疑进程
-$script:ScanWarnings = [System.Collections.Generic.List[string]]::new()
+function Reset-ScanDiagnostics {
+    $script:ScanWarnings = [System.Collections.Generic.List[string]]::new()
+    $script:ScanHealth = [ordered]@{
+        system_info = 'complete'
+        services    = 'complete'
+        tasks       = 'complete'
+    }
+}
+
+function Set-ScanHealthDegraded {
+    param([Parameter(Mandatory=$true)][ValidateSet('system_info','services','tasks')][string]$Category)
+    if ($null -eq $script:ScanHealth) { Reset-ScanDiagnostics }
+    $script:ScanHealth[$Category] = 'degraded'
+}
+
+function Test-ScanHealthDegraded {
+    param($ScanHealth = $script:ScanHealth)
+    if ($null -eq $ScanHealth) { return $false }
+    return (@('system_info','services','tasks') | Where-Object { [string]$ScanHealth.$_ -ne 'complete' }).Count -gt 0
+}
+
+Reset-ScanDiagnostics
 
 function Add-ScanWarning {
     param([Parameter(Mandatory=$true)][string]$Message)
@@ -20,17 +41,31 @@ function Get-SystemInfo {
         $boot = $os.LastBootUpTime
         $up = if ($boot) { (Get-Date) - $boot } else { $null }
 
+        $model = (($cs.Manufacturer, $cs.Model) -join ' ').Trim()
+        if ([string]::IsNullOrWhiteSpace([string]$cs.Name) -or
+            [string]::IsNullOrWhiteSpace($model) -or
+            [string]::IsNullOrWhiteSpace([string]$cpu.Name) -or
+            [int64]$cpu.NumberOfCores -le 0 -or
+            [int64]$cpu.NumberOfLogicalProcessors -le 0 -or
+            [double]$cs.TotalPhysicalMemory -le 0) {
+            throw 'CIM 系统概况缺少关键字段。'
+        }
+
         $load = '未知'
         try {
-            $average = (Get-CimInstance Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average
-            if ($null -ne $average) { $load = [math]::Round($average, 1) }
+            $loadSamples = @(Get-CimInstance Win32_Processor -ErrorAction Stop | Where-Object { $null -ne $_.LoadPercentage })
+            if ($loadSamples.Count -eq 0) { throw 'CIM CPU 负载返回空值。' }
+            $average = ($loadSamples | Measure-Object -Property LoadPercentage -Average).Average
+            if ($null -eq $average) { throw 'CIM CPU 负载无法计算。' }
+            $load = [math]::Round($average, 1)
         } catch {
             Add-ScanWarning 'CIM CPU 负载不可用，系统概况中的即时负载标记为未知。'
+            Set-ScanHealthDegraded system_info
         }
 
         return [pscustomobject]@{
             Computer   = $cs.Name
-            Model      = (($cs.Manufacturer, $cs.Model) -join ' ').Trim()
+            Model      = $model
             CPU        = $cpu.Name
             Cores      = $cpu.NumberOfCores
             Threads    = $cpu.NumberOfLogicalProcessors
@@ -40,6 +75,7 @@ function Get-SystemInfo {
             Uptime     = if ($up) { '{0}天 {1}小时 {2}分' -f $up.Days, $up.Hours, $up.Minutes } else { 'N/A' }
         }
     } catch {
+        Set-ScanHealthDegraded system_info
         Add-ScanWarning ('CIM 系统概况不可用，已使用兼容信息: ' + $_.Exception.Message)
         $bios = Get-ItemProperty -Path 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS' -ErrorAction SilentlyContinue
         $processor = Get-ItemProperty -Path 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' -ErrorAction SilentlyContinue
@@ -166,8 +202,12 @@ function Get-ServicesInfo {
     try {
         $svcs = @(Get-CimInstance Win32_Service -ErrorAction Stop | Select-Object Name, DisplayName, State, StartMode, PathName, ProcessId)
         if ($svcs.Count -eq 0) { throw 'CIM 服务列表为空。' }
+        if (@($svcs | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Name) }).Count -gt 0) {
+            throw 'CIM 服务列表包含空服务身份。'
+        }
     } catch {
         $cimMessage = $_.Exception.Message
+        Set-ScanHealthDegraded services
         Add-ScanWarning ('CIM 服务信息不可用，已使用 Get-Service 兼容采集: ' + $cimMessage)
         try {
             $svcs = @(Get-Service -ErrorAction Stop | ForEach-Object {
@@ -181,6 +221,9 @@ function Get-ServicesInfo {
                 }
             })
             if ($svcs.Count -eq 0) { throw 'Get-Service 返回空列表。' }
+            if (@($svcs | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Name) }).Count -gt 0) {
+                throw 'Get-Service 返回空服务身份。'
+            }
         } catch {
             throw ('无法读取系统服务；CIM 失败: {0}; Get-Service 失败: {1}' -f $cimMessage, $_.Exception.Message)
         }
@@ -236,31 +279,61 @@ function Get-AutoStart {
 }
 
 # ---------- 6. 计划任务 ----------
-function Invoke-SchtasksQueryCsv {
-    $schtasksPath = Join-Path $env:SystemRoot 'System32\schtasks.exe'
-    $raw = @(& $schtasksPath /Query /FO CSV /V 2>&1)
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) {
-        $detail = (@($raw) | ForEach-Object { [string]$_ }) -join ' '
-        throw "schtasks /Query 失败 (ExitCode=$exitCode): $detail"
-    }
-    $rows = @($raw | ConvertFrom-Csv)
-    return @($rows | ForEach-Object {
-        $values = @($_.PSObject.Properties | ForEach-Object { $_.Value })
-        if ($values.Count -lt 19) { throw 'schtasks CSV 字段不足，无法安全解析。' }
-        [pscustomobject]@{
-            FullTaskName  = [string]$values[1]
-            Status        = [string]$values[3]
-            ScheduledState = [string]$values[11]
-            ScheduleType  = [string]$values[18]
+function Invoke-TaskSchedulerComQuery {
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    $scheduler.Connect()
+    $rootPath = [string][char]92
+    $stack = [System.Collections.Stack]::new()
+    $stack.Push($scheduler.GetFolder($rootPath))
+    $records = @()
+    while ($stack.Count -gt 0) {
+        $folder = $stack.Pop()
+        foreach ($task in @($folder.GetTasks(1))) {
+            $triggerTypes = @($task.Definition.Triggers | ForEach-Object { [int]$_.Type })
+            $records += [pscustomobject]@{
+                Path         = [string]$task.Path
+                State        = [int]$task.State
+                TriggerTypes = $triggerTypes
+            }
         }
-    })
+        foreach ($child in @($folder.GetFolders(0))) { $stack.Push($child) }
+    }
+    if ($records.Count -eq 0) { throw 'Task Scheduler COM 返回空任务列表。' }
+    return $records
+}
+
+function Convert-TaskSchedulerComRecord {
+    param([Parameter(Mandatory=$true)]$Record)
+    $fullName = [string]$Record.Path
+    if ([string]::IsNullOrWhiteSpace($fullName) -or
+        -not $fullName.StartsWith('\', [System.StringComparison]::Ordinal)) {
+        throw 'Task Scheduler COM 返回无效任务路径。'
+    }
+    $separator = $fullName.LastIndexOf('\')
+    if ($separator -lt 0 -or $separator -eq ($fullName.Length - 1)) {
+        throw ('Task Scheduler COM 返回无效任务身份: {0}' -f $fullName)
+    }
+    $stateValue = [int]$Record.State
+    if ($stateValue -lt 0 -or $stateValue -gt 4) { throw ('Task Scheduler COM 返回无效状态: {0}' -f $stateValue) }
+    $stateNames = @('Unknown','Disabled','Queued','Ready','Running')
+    $triggerTypes = @($Record.TriggerTypes | ForEach-Object { [int]$_ })
+    return [pscustomobject]@{
+        TaskPath     = if ($separator -eq 0) { '\' } else { $fullName.Substring(0, $separator + 1) }
+        TaskName     = $fullName.Substring($separator + 1)
+        State        = $stateNames[$stateValue]
+        LoginTrigger = (@($triggerTypes | Where-Object { $_ -in @(8, 9) }).Count -gt 0)
+    }
 }
 
 function Get-TasksInfo {
     $tasks = @()
     try {
         $tasks = @(Get-ScheduledTask -ErrorAction Stop | ForEach-Object {
+            if ([string]::IsNullOrWhiteSpace([string]$_.TaskName) -or
+                [string]::IsNullOrWhiteSpace([string]$_.TaskPath) -or
+                -not ([string]$_.TaskPath).StartsWith('\', [System.StringComparison]::Ordinal)) {
+                throw 'Get-ScheduledTask 返回无效任务身份。'
+            }
             $login = $false
             foreach ($t in $_.Triggers) {
                 if ($t.CimClass.CimClassName -match 'Logon|Boot') { $login = $true }
@@ -272,28 +345,18 @@ function Get-TasksInfo {
                 LoginTrigger = $login
             }
         })
+        if ($tasks.Count -eq 0) { throw 'Get-ScheduledTask 返回空任务列表。' }
     } catch {
         $primaryMessage = $_.Exception.Message
-        Add-ScanWarning ('Get-ScheduledTask 不可用，已使用 schtasks 兼容采集: ' + $primaryMessage)
+        Set-ScanHealthDegraded tasks
+        Add-ScanWarning ('Get-ScheduledTask 不可用，已使用 Task Scheduler COM 兼容采集: ' + $primaryMessage)
         try {
-            $tasks = @(Invoke-SchtasksQueryCsv | ForEach-Object {
-                $fullName = [string]$_.FullTaskName
-                if ([string]::IsNullOrWhiteSpace($fullName)) { return }
-                if (-not $fullName.StartsWith('\', [System.StringComparison]::Ordinal)) { $fullName = '\' + $fullName }
-                $separator = $fullName.LastIndexOf('\')
-                if ($separator -lt 0 -or $separator -eq ($fullName.Length - 1)) { return }
-                $taskPath = if ($separator -eq 0) { '\' } else { $fullName.Substring(0, $separator + 1) }
-                $taskName = $fullName.Substring($separator + 1)
-                $scheduleType = [string]$_.ScheduleType
-                [pscustomobject]@{
-                    TaskPath     = $taskPath
-                    TaskName     = $taskName
-                    State        = if (-not [string]::IsNullOrWhiteSpace([string]$_.ScheduledState)) { [string]$_.ScheduledState } else { [string]$_.Status }
-                    LoginTrigger = ($scheduleType -match '(?i)logon|system start|登录|系统启动|开机|用户登录')
-                }
-            })
+            $records = @(Invoke-TaskSchedulerComQuery)
+            if ($records.Count -eq 0) { throw 'Task Scheduler COM 返回空任务列表。' }
+            $tasks = @($records | ForEach-Object { Convert-TaskSchedulerComRecord $_ })
+            if ($tasks.Count -ne $records.Count) { throw 'Task Scheduler COM 任务转换数量不一致。' }
         } catch {
-            throw ('无法读取计划任务；Get-ScheduledTask 失败: {0}; schtasks 失败: {1}' -f $primaryMessage, $_.Exception.Message)
+            throw ('无法读取计划任务；Get-ScheduledTask 失败: {0}; Task Scheduler COM 失败: {1}' -f $primaryMessage, $_.Exception.Message)
         }
     }
     return $tasks

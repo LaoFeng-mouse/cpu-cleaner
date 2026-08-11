@@ -770,7 +770,7 @@ function Get-PendingIdentityKey($Item) {
     return ConvertTo-Json -InputObject $identity -Compress -Depth 4
 }
 
-function Save-PendingActions($Hits, $Suspicious) {
+function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealth, $ScanWarnings = $script:ScanWarnings) {
     $actions = @()
     $observations = @()
     $seenActionIds = @{}
@@ -889,6 +889,8 @@ function Save-PendingActions($Hits, $Suspicious) {
         actions       = $actions
         observations  = $observations
         suspicious    = $suspArr
+        scan_health   = $ScanHealth
+        scan_warnings = @($ScanWarnings)
     }
     # 用 -InputObject 强制序列化, 避免管道展开导致空数组写空文件
     $json = ConvertTo-Json -InputObject $payload -Depth 100

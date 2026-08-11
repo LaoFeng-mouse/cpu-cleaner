@@ -1,19 +1,26 @@
 ﻿# 报告输出 (v1.7.0 拆分): 文本报告 + HTML 报告
 # ---------- 8. 报告输出 ----------
 function Write-ScanReport {
-    param($SysInfo, $TopProcs, $Suspicious, $Services, $AutoStarts, $Tasks, $Hits, $AutoStartNames)
+    param($SysInfo, $TopProcs, $Suspicious, $Services, $AutoStarts, $Tasks, $Hits, $AutoStartNames, $ScanHealth = $script:ScanHealth, $ScanWarnings = $script:ScanWarnings)
 
     $lines = @()
+    $degraded = Test-ScanHealthDegraded $ScanHealth
     $lines += '=' * 60
     $lines += ('  CPU 后台整理工具 - 诊断报告 v{0}' -f $script:Version)
     $lines += '  生成时间: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     $lines += '=' * 60
+    if ($degraded) {
+        $lines += '  !! 扫描信息不完整：部分分类使用兼容采集，不能据此判断机器干净。'
+        foreach ($warning in @($ScanWarnings)) { $lines += ('     - {0}' -f $warning) }
+    }
     $lines += ''
     $lines += '【1. 系统概况】'
     $lines += ('  电脑: {0}  {1}' -f $SysInfo.Computer, $SysInfo.Model)
     $lines += ('  CPU : {0}' -f $SysInfo.CPU)
-    $lines += ('  核心: {0} 核 / {1} 线程, 内存 {2} GB' -f $SysInfo.Cores, $SysInfo.Threads, $SysInfo.RAM_GB)
-    $lines += ('  当前 CPU 负载: {0}%' -f $SysInfo.CPU_Load)
+    $ramText = if ($SysInfo.RAM_GB -is [ValueType] -and [double]$SysInfo.RAM_GB -ge 0) { '{0} GB' -f $SysInfo.RAM_GB } else { [string]$SysInfo.RAM_GB }
+    $loadText = if ($SysInfo.CPU_Load -is [ValueType] -and [double]$SysInfo.CPU_Load -ge 0) { '{0}%' -f $SysInfo.CPU_Load } else { [string]$SysInfo.CPU_Load }
+    $lines += ('  核心: {0} 核 / {1} 线程, 内存 {2}' -f $SysInfo.Cores, $SysInfo.Threads, $ramText)
+    $lines += ('  当前 CPU 负载: {0}' -f $loadText)
     $lines += ('  开机时间: {0}  (已运行 {1})' -f $SysInfo.BootTime, $SysInfo.Uptime)
     $lines += ''
 
@@ -71,7 +78,7 @@ function Write-ScanReport {
 
     $lines += '【7. 特征库命中 (预装全家桶/可疑后台)】'
     if ($Hits.Count -eq 0) {
-        $lines += '  (未命中特征库, 这台机器比较干净)'
+        $lines += if ($degraded) { '  (当前未命中特征库，但扫描信息不完整，不能判断机器干净)' } else { '  (未命中特征库, 这台机器比较干净)' }
     } else {
         foreach ($h in $Hits) {
             $riskMark = switch ($h.risk) { 'high' { '!!' } 'medium' { '! ' } default { '  ' } }
@@ -115,11 +122,20 @@ function Write-ScanReport {
 
 # ---------- 8b. HTML 报告 (v1.5.2: 与文本报告对齐 — Top CPU 含风险评分/依据, 新增风险分级汇总/计划任务/evidence) ----------
 function Write-HtmlReport {
-    param($SysInfo, $TopProcs, $Suspicious, $AutoStarts, $Tasks, $Hits, $AutoStartNames)
+    param($SysInfo, $TopProcs, $Suspicious, $AutoStarts, $Tasks, $Hits, $AutoStartNames, $ScanHealth = $script:ScanHealth, $ScanWarnings = $script:ScanWarnings)
 
     $esc = { param($s) ($s -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;') }
+    $degraded = Test-ScanHealthDegraded $ScanHealth
+    $ramText = if ($SysInfo.RAM_GB -is [ValueType] -and [double]$SysInfo.RAM_GB -ge 0) { '{0} GB' -f $SysInfo.RAM_GB } else { [string]$SysInfo.RAM_GB }
+    $loadText = if ($SysInfo.CPU_Load -is [ValueType] -and [double]$SysInfo.CPU_Load -ge 0) { '{0}%' -f $SysInfo.CPU_Load } else { [string]$SysInfo.CPU_Load }
+    $healthBanner = ''
+    if ($degraded) {
+        $healthBanner = '<div class="warning"><strong>扫描信息不完整：</strong>部分分类使用兼容采集，不能据此判断机器干净。<ul>'
+        foreach ($warning in @($ScanWarnings)) { $healthBanner += '<li>' + (& $esc $warning) + '</li>' }
+        $healthBanner += '</ul></div>'
+    }
 
-    $sec1 = "<h2>1. 系统概况</h2><table><tr><th>电脑</th><td>$(& $esc $SysInfo.Model)</td></tr><tr><th>CPU</th><td>$(& $esc $SysInfo.CPU)</td></tr><tr><th>核心</th><td>$($SysInfo.Cores) 核 / $($SysInfo.Threads) 线程 / 内存 $($SysInfo.RAM_GB) GB</td></tr><tr><th>当前负载</th><td><b>$($SysInfo.CPU_Load)%</b></td></tr><tr><th>开机</th><td>$($SysInfo.BootTime) (已运行 $($SysInfo.Uptime))</td></tr></table>"
+    $sec1 = "<h2>1. 系统概况</h2><table><tr><th>电脑</th><td>$(& $esc $SysInfo.Model)</td></tr><tr><th>CPU</th><td>$(& $esc $SysInfo.CPU)</td></tr><tr><th>核心</th><td>$($SysInfo.Cores) 核 / $($SysInfo.Threads) 线程 / 内存 $ramText</td></tr><tr><th>当前负载</th><td><b>$loadText</b></td></tr><tr><th>开机</th><td>$($SysInfo.BootTime) (已运行 $($SysInfo.Uptime))</td></tr></table>"
 
     # v1.4 风险评分 (与文本报告同源)
     $procScores = @{}
@@ -165,7 +181,7 @@ function Write-HtmlReport {
     }
 
     $sec7 = '<h2>7. 特征库命中 (预装全家桶/可疑后台)</h2>'
-    if ($Hits.Count -eq 0) { $sec7 += '<p>未命中特征库</p>' }
+    if ($Hits.Count -eq 0) { $sec7 += $(if ($degraded) { '<p>当前未命中特征库，但扫描信息不完整，不能判断机器干净。</p>' } else { '<p>未命中特征库</p>' }) }
     else {
         $sec7 += '<table><tr><th>风险</th><th>厂商</th><th>名称</th><th>命中</th><th>建议</th><th>实测</th><th>原因</th></tr>'
         foreach ($h in $Hits) {
@@ -193,11 +209,12 @@ td{padding:6px 10px;border-bottom:1px solid #eee;font-size:13px;word-break:break
 tr:hover td{background:#eaf2f8}
 .meta{color:#666;font-size:12px;margin-bottom:16px}
 .note{color:#666;font-size:12px}
+.warning{background:#fff4db;border:1px solid #e0a52b;padding:12px 16px;margin:16px 0;color:#6b4700}
 .high{color:#c0392b;font-weight:bold}.medium{color:#b9770e}
 </style></head><body>
 <h1>CPU 后台诊断报告</h1>
 <div class="meta">生成时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') &nbsp;|&nbsp; CPU 后台整理工具 v$($script:Version)</div>
-$sec1$sec2$sec3$sec4$sec5$sec6$sec7$sec8
+$healthBanner$sec1$sec2$sec3$sec4$sec5$sec6$sec7$sec8
 </body></html>
 "@
     return $html

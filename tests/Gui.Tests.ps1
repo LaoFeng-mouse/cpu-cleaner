@@ -141,6 +141,14 @@ Describe 'GUI 壳 (无窗口)' {
         $script:Win.FindName('ResultHeadlineSuffix').Text | Should -Not -BeNullOrEmpty
     }
 
+    It '降级零命中扫描不会宣称机器干净' {
+        Set-GuiResultSummary -Executable 0 -Observation 0 -Evidence @() -Degraded $true -Warnings @('计划任务使用兼容采集')
+
+        $script:Win.FindName('ResultStatusText').Text | Should -Match '信息不完整'
+        $script:Win.FindName('ResultHeadlinePrefix').Text | Should -Not -Match '没有抓到'
+        $script:Win.FindName('ResultEvidenceText').Text | Should -Match '计划任务使用兼容采集'
+    }
+
     It '这次先不处理会安全返回起点且不保留 reviewed 授权快照' {
         Set-GuiState -Name results -Force
         $script:ReviewedPendingSnapshot = [pscustomobject]@{ marker='stale' }
@@ -581,6 +589,26 @@ Describe 'GUI 壳 (无窗口)' {
         $script:GuiState | Should -Be 'results'
         $script:Win.FindName('ScanProgress').IsIndeterminate | Should -BeFalse
         $script:Win.FindName('ResultSummaryText').Text | Should -Match '1'
+    }
+
+    It 'completed scan propagates pending health warnings into results' {
+        Mock Read-GuiBackgroundJob { 'scan complete' }
+        Mock Invoke-GuiBackgroundJobRemoval {}
+        Mock Read-GuiPendingFile {
+            [pscustomobject]@{
+                actions=@(); observations=@()
+                scan_health=[pscustomobject]@{system_info='complete'; services='degraded'; tasks='complete'}
+                scan_warnings=@('服务使用兼容采集')
+            }
+        }
+        Mock Get-PendingViewItems { @() }
+
+        Set-GuiState scanning -Force
+        Complete-ScanPoll -job ([pscustomobject]@{State='Completed'}) -checkTimer (New-FakeTimer) -scanTimer (New-FakeTimer) | Should -BeTrue
+
+        $script:GuiState | Should -Be 'results'
+        $script:Win.FindName('ResultStatusText').Text | Should -Match '信息不完整'
+        $script:Win.FindName('ResultEvidenceText').Text | Should -Match '服务使用兼容采集'
     }
 
     It 'failed scan enters error and states that no mutation occurred' {

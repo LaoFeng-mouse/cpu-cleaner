@@ -488,6 +488,14 @@ Invoke-Clean
         $raw | Should -Match '"actions"\s*:\s*\[\s*\]'
         $raw | Should -Match '"observations"\s*:\s*\[\s*\{'
     }
+    It 'pending JSON 保存扫描健康状态与警告' {
+        $health = [pscustomobject]@{ system_info='degraded'; services='complete'; tasks='complete' }
+        Save-PendingActions -Hits @() -Suspicious @() -ScanHealth $health -ScanWarnings @('系统概况使用兼容采集')
+
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $p.scan_health.system_info | Should -Be 'degraded'
+        @($p.scan_warnings).Count | Should -Be 1
+    }
     It '服务已禁用且停止时不写入 action 或 observation' {
         Mock Get-Service { [pscustomobject]@{ Name='S1'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'S1' }
         $hit = [pscustomobject]@{ id='already'; vendor='T'; name_cn='Already'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }

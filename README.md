@@ -101,7 +101,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 | restore | 从备份目录一键恢复上次处理 | 是 | 是（恢复原状） |
 | update | 从配置的 URL 更新特征库（自动备份旧版） | 否 | 是（只改特征库文件） |
 
-扫描采集采用失败关闭：CIM 系统概况/服务不可用时分别使用明确的兼容概况和 `Get-Service`，`Get-ScheduledTask` 不可用时使用只读 `schtasks /Query`；主采集与兼容采集都失败时终止扫描，不再把“无法读取”显示成“这台机器比较干净”。
+扫描采集采用失败关闭：CIM 系统概况/服务不可用时分别使用明确的兼容概况和 `Get-Service`，`Get-ScheduledTask` 不可用时使用只读 Task Scheduler COM 对象模型，并按数字触发器类型识别开机/登录任务，避免依赖系统语言或 CSV 列位置。空结果、畸形身份、主采集与兼容采集同时失败都会终止对应扫描；兼容采集会以 `scan_health` / `scan_warnings` 贯穿文本报告、HTML、待处理清单和 GUI，不再把“无法完整读取”显示成“这台机器比较干净”。
 
 **安全设计：**
 - 默认只读：scan 不修改任何设置

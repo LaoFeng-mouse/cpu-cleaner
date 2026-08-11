@@ -61,6 +61,7 @@ foreach ($f in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','
 # ---------- 主流程 ----------
 switch ($Mode) {
     'scan' {
+        Reset-ScanDiagnostics
         Write-Step '读取系统信息...';       $sys = Get-SystemInfo
         Write-Step '检查高占用进程...';     $procs = Get-TopProcesses 12
         $susp = Get-SuspiciousProcesses $procs
@@ -71,14 +72,14 @@ switch ($Mode) {
         $autoStartNames = Get-AutoStartProcessNames $autos
 
         Write-Step '生成扫描报告...'
-        $report = Write-ScanReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -Services $svcs -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames
+        $report = Write-ScanReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -Services $svcs -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames -ScanHealth $script:ScanHealth -ScanWarnings $script:ScanWarnings
         Write-Host $report
 
-        Save-PendingActions $hits $susp
+        Save-PendingActions -Hits $hits -Suspicious $susp -ScanHealth $script:ScanHealth -ScanWarnings $script:ScanWarnings
 
         if ($ReportPath) {
             # HTML 报告 (v1.5.2: 统一到 Write-HtmlReport, 与文本报告同源)
-            $html = Write-HtmlReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames
+            $html = Write-HtmlReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames -ScanHealth $script:ScanHealth -ScanWarnings $script:ScanWarnings
             [System.IO.File]::WriteAllText($ReportPath, $html, [System.Text.Encoding]::UTF8)
             Write-Host "报告已保存: $ReportPath" -ForegroundColor Green
         }

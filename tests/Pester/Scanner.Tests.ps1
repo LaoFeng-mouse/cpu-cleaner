@@ -79,10 +79,27 @@ Describe '扫描器与评分' {
         $services[0].TriggerHint | Should -BeFalse
         @($script:ScanWarnings).Count | Should -BeGreaterThan 0
         ($script:ScanWarnings -join "`n") | Should -Match 'CIM'
+        $script:ScanHealth.services | Should -Be 'degraded'
     }
     It 'CIM 与 Get-Service 都失败时拒绝生成假干净服务列表' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
         Mock Get-Service { throw [System.InvalidOperationException]::new('service fallback denied') }
+
+        { Get-ServicesInfo } | Should -Throw '*无法读取系统服务*'
+    }
+    It 'CIM 服务对象存在但身份为空时转入 Get-Service 兼容采集' {
+        Mock Get-CimInstance { [pscustomobject]@{ Name=''; DisplayName=''; State='Running'; StartMode='Auto'; PathName=''; ProcessId=1 } }
+        Mock Get-Service { [pscustomobject]@{ Name='FallbackService'; DisplayName='Fallback Service'; Status='Running'; StartType='Automatic' } }
+
+        $services = @(Get-ServicesInfo)
+
+        $services.Count | Should -Be 1
+        $services[0].Name | Should -Be 'FallbackService'
+        $script:ScanHealth.services | Should -Be 'degraded'
+    }
+    It 'Get-Service 兼容采集返回空身份时拒绝假报服务列表' {
+        Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
+        Mock Get-Service { [pscustomobject]@{ Name=''; DisplayName=''; Status='Running'; StartType='Automatic' } }
 
         { Get-ServicesInfo } | Should -Throw '*无法读取系统服务*'
     }
@@ -103,13 +120,51 @@ Describe '扫描器与评分' {
         $info.CPU | Should -Be 'Fallback CPU'
         [int]$info.Threads | Should -BeGreaterThan 0
         @($script:ScanWarnings).Count | Should -BeGreaterThan 0
+        $script:ScanHealth.system_info | Should -Be 'degraded'
     }
-    It 'Get-ScheduledTask 被拒时从 schtasks 兼容数据恢复任务身份' {
+    It 'CIM 系统概况对象存在但关键字段为空时使用兼容信息并标记降级' {
+        Mock Get-CimInstance {
+            param($ClassName)
+            switch ($ClassName) {
+                'Win32_OperatingSystem' { [pscustomobject]@{ LastBootUpTime = Get-Date } }
+                'Win32_Processor' { [pscustomobject]@{ Name=''; NumberOfCores=0; NumberOfLogicalProcessors=0; LoadPercentage=$null } }
+                'Win32_ComputerSystem' { [pscustomobject]@{ Name=''; Manufacturer=''; Model=''; TotalPhysicalMemory=0 } }
+            }
+        }
+        Mock Get-ItemProperty {
+            param($Path)
+            if ($Path -like '*CentralProcessor*') { return [pscustomobject]@{ ProcessorNameString = 'Fallback CPU' } }
+            return [pscustomobject]@{ SystemManufacturer = 'Fallback Vendor'; SystemProductName = 'Fallback Model' }
+        }
+
+        $info = Get-SystemInfo
+
+        $info.Model | Should -Be 'Fallback Vendor Fallback Model'
+        $info.CPU | Should -Be 'Fallback CPU'
+        $script:ScanHealth.system_info | Should -Be 'degraded'
+    }
+    It 'CIM 系统概况关键身份完整但 CPU 负载为空时标记降级' {
+        Mock Get-CimInstance {
+            param($ClassName)
+            switch ($ClassName) {
+                'Win32_OperatingSystem' { [pscustomobject]@{ LastBootUpTime = (Get-Date).AddHours(-1) } }
+                'Win32_Processor' { [pscustomobject]@{ Name='CPU'; NumberOfCores=4; NumberOfLogicalProcessors=8; LoadPercentage=$null } }
+                'Win32_ComputerSystem' { [pscustomobject]@{ Name='PC'; Manufacturer='Vendor'; Model='Model'; TotalPhysicalMemory=16GB } }
+            }
+        }
+
+        $info = Get-SystemInfo
+
+        $info.CPU_Load | Should -Be '未知'
+        $script:ScanHealth.system_info | Should -Be 'degraded'
+        ($script:ScanWarnings -join "`n") | Should -Match 'CPU 负载'
+    }
+    It 'Get-ScheduledTask 被拒时从语言无关的任务对象恢复任务身份' {
         Mock Get-ScheduledTask { throw [System.UnauthorizedAccessException]::new('scheduled task denied') }
-        function Invoke-SchtasksQueryCsv {
+        function Invoke-TaskSchedulerComQuery {
             @(
-                [pscustomobject]@{ FullTaskName='\Vendor\BootTask'; Status='Ready'; ScheduledState='Enabled'; ScheduleType='At system start up' },
-                [pscustomobject]@{ FullTaskName='\Vendor\DailyTask'; Status='Ready'; ScheduledState='Enabled'; ScheduleType='Daily' }
+                [pscustomobject]@{ Path='\Vendor\BootTask'; State=3; TriggerTypes=@(8) },
+                [pscustomobject]@{ Path='\Vendor\DailyTask'; State=3; TriggerTypes=@(2) }
             )
         }
 
@@ -121,10 +176,43 @@ Describe '扫描器与评分' {
         $tasks[0].LoginTrigger | Should -BeTrue
         $tasks[1].LoginTrigger | Should -BeFalse
         @($script:ScanWarnings).Count | Should -BeGreaterThan 0
+        $script:ScanHealth.tasks | Should -Be 'degraded'
+    }
+    It '数字触发器类型不受本地化文本影响' {
+        $task = Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Hersteller\Beim Systemstart'; State=3; TriggerTypes=@(8) })
+
+        $task.LoginTrigger | Should -BeTrue
+        $task.TaskName | Should -Be 'Beim Systemstart'
+    }
+    It '主任务采集返回空列表时必须转入兼容采集' {
+        Mock Get-ScheduledTask { @() }
+        function Invoke-TaskSchedulerComQuery {
+            @([pscustomobject]@{ Path='\Vendor\FallbackTask'; State=3; TriggerTypes=@(9) })
+        }
+
+        $tasks = @(Get-TasksInfo)
+
+        $tasks.Count | Should -Be 1
+        $tasks[0].TaskName | Should -Be 'FallbackTask'
+        $script:ScanHealth.tasks | Should -Be 'degraded'
+    }
+    It '任务兼容采集返回空列表时拒绝假报无任务' {
+        Mock Get-ScheduledTask { throw [System.UnauthorizedAccessException]::new('scheduled task denied') }
+        function Invoke-TaskSchedulerComQuery { @() }
+
+        { Get-TasksInfo } | Should -Throw '*无法读取计划任务*'
+    }
+    It '任务兼容采集包含畸形身份时拒绝静默丢弃' {
+        Mock Get-ScheduledTask { throw [System.UnauthorizedAccessException]::new('scheduled task denied') }
+        function Invoke-TaskSchedulerComQuery {
+            @([pscustomobject]@{ Path='\'; State=3; TriggerTypes=@(8) })
+        }
+
+        { Get-TasksInfo } | Should -Throw '*无法读取计划任务*'
     }
     It '计划任务主采集与兼容采集都失败时拒绝假报无任务' {
         Mock Get-ScheduledTask { throw [System.UnauthorizedAccessException]::new('scheduled task denied') }
-        function Invoke-SchtasksQueryCsv { throw [System.InvalidOperationException]::new('schtasks denied') }
+        function Invoke-TaskSchedulerComQuery { throw [System.InvalidOperationException]::new('task scheduler denied') }
 
         { Get-TasksInfo } | Should -Throw '*无法读取计划任务*'
     }

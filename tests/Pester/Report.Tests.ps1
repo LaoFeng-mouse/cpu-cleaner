@@ -19,6 +19,16 @@ Describe '报告输出' {
         ($report -match '风险分级汇总') | Should -Be $true
         ($report -match '正常') | Should -Be $true
     }
+    It '降级扫描即使零命中也不得宣称机器干净' {
+        $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores=4; Threads=8; RAM_GB='未知'; CPU_Load='未知'; BootTime='N/A'; Uptime='N/A' }
+        $health = [pscustomobject]@{ system_info='degraded'; services='complete'; tasks='complete' }
+        $report = Write-ScanReport -SysInfo $sys -TopProcs @() -Suspicious @() -Services @() -AutoStarts @() -Tasks @() -Hits @() -AutoStartNames @() -ScanHealth $health -ScanWarnings @('系统概况使用兼容采集')
+
+        $report | Should -Match '扫描信息不完整'
+        $report | Should -Not -Match '这台机器比较干净'
+        $report | Should -Not -Match '未知%'
+        $report | Should -Not -Match '未知 GB'
+    }
     It 'HTML 报告系统概况字段可用(v1.2 修复回归)' {
         $sys = [pscustomobject]@{ Model='TestModel'; CPU='CPU'; Cores=4; Threads=8; RAM_GB=16; CPU_Load=5; BootTime='x'; Uptime='y' }
         $sys.Model | Should -Be 'TestModel'
@@ -41,6 +51,15 @@ Describe '报告输出' {
         ($html -match '峰值%') | Should -Be $true
         ($html -match '持续') | Should -Be $true
         ($html -match '子进程') | Should -Be $true
+    }
+    It 'HTML 报告明确展示降级状态且未知值不拼接单位' {
+        $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores='未知'; Threads=8; RAM_GB='未知'; CPU_Load='未知'; BootTime='N/A'; Uptime='N/A' }
+        $health = [pscustomobject]@{ system_info='degraded'; services='complete'; tasks='complete' }
+        $html = Write-HtmlReport -SysInfo $sys -TopProcs @() -Suspicious @() -AutoStarts @() -Tasks @() -Hits @() -AutoStartNames @() -ScanHealth $health -ScanWarnings @('系统概况使用兼容采集')
+
+        $html | Should -Match '扫描信息不完整'
+        $html | Should -Not -Match '未知%'
+        $html | Should -Not -Match '未知 GB'
     }
     It '文本报告 Top CPU 表含多采样列 (v1.5.7)' {
         $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores=4; Threads=8; RAM_GB=16; CPU_Load=5; BootTime='2026-01-01 00:00:00'; Uptime='1天 0小时' }

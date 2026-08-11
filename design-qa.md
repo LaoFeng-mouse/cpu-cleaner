@@ -54,14 +54,17 @@
 - Automated evidence: 146 GUI tests passed after the revision.
 - No actionable P0, P1, or P2 visual finding remains in the revised results state.
 
-### Pass 5 - runtime scan integrity passed
+### Pass 5 - runtime scan integrity passed after rework
 
 - A real read-only GUI scan reproduced `Get-CimInstance` access denial that previously produced a false-clean `0 / 0` result with exit code 0.
-- Fix: system information now falls back to explicit compatibility values; service collection falls back to `Get-Service`; scheduled-task collection falls back to read-only `schtasks /Query /FO CSV /V`. If both the primary and fallback collector fail, scanning stops instead of reporting an empty category.
+- Independent review found that compatibility warnings were not propagated to the report, pending file, or GUI; an empty or malformed task result could still appear clean; and textual `schtasks` trigger detection depended on system language.
+- Reworked fix: explicit `complete` / `degraded` health is propagated through text, HTML, pending, and GUI; Task Scheduler COM numeric trigger types replace localized CSV parsing; empty or malformed task identities fail closed. A degraded zero-result scan explicitly says that it cannot judge the machine clean.
 - Runtime evidence on the current Lenovo machine: `0` executable actions, `8` observations, and `0` suspicious processes. The observations comprise six Lenovo services and two Lenovo scheduled tasks; no clean or restore path was invoked.
 - Empty-state copy now says no matching items were found instead of displaying “发现问题” or “抓到 0 个”. Non-empty results retain the selected target hierarchy.
 - Post-fix visual evidence: `artifacts/audit-current/05-reference-vs-runtime-fix.png` and `artifacts/gui-states/{100,125,150}/results.png`; no clipping or overlap is visible at any tested density.
 - Automated evidence: 147 GUI tests and 221 core Pester tests pass after the runtime repair.
+- Revalidation evidence after the independent-review fixes: 149 GUI tests, 229 core Pester tests, 38 legacy logic tests, 12 legacy Schema tests, 26 PowerShell AST parses, 2 JSON parses, and PSScriptAnalyzer error-level checks all pass.
+- Fresh real GUI scan evidence: `artifacts/audit-current/06-live-gui-results.png`; the GUI reached `results` with `0` executable actions, `8` observations, and `scan_health` complete for system information, services, and scheduled tasks. No clean or restore path was invoked.
 
 ## Follow-up polish
 
@@ -69,4 +72,4 @@
 
 ## Final result
 
-final result: passed
+final result: runtime and visual revalidation passed; independent review pending
