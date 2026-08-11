@@ -202,8 +202,15 @@ function Get-ServicesInfo {
     try {
         $svcs = @(Get-CimInstance Win32_Service -ErrorAction Stop | Select-Object Name, DisplayName, State, StartMode, PathName, ProcessId)
         if ($svcs.Count -eq 0) { throw 'CIM 服务列表为空。' }
-        if (@($svcs | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Name) }).Count -gt 0) {
-            throw 'CIM 服务列表包含空服务身份。'
+        $invalidCimServices = @($svcs | Where-Object {
+            [string]::IsNullOrWhiteSpace([string]$_.Name) -or
+            [string]::IsNullOrWhiteSpace([string]$_.DisplayName) -or
+            [string]::IsNullOrWhiteSpace([string]$_.State) -or
+            [string]::IsNullOrWhiteSpace([string]$_.StartMode) -or
+            [string]::IsNullOrWhiteSpace([string]$_.PathName)
+        })
+        if ($invalidCimServices.Count -gt 0) {
+            throw 'CIM 服务列表包含不完整的服务身份或状态。'
         }
     } catch {
         $cimMessage = $_.Exception.Message
@@ -221,8 +228,14 @@ function Get-ServicesInfo {
                 }
             })
             if ($svcs.Count -eq 0) { throw 'Get-Service 返回空列表。' }
-            if (@($svcs | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Name) }).Count -gt 0) {
-                throw 'Get-Service 返回空服务身份。'
+            $invalidFallbackServices = @($svcs | Where-Object {
+                [string]::IsNullOrWhiteSpace([string]$_.Name) -or
+                [string]::IsNullOrWhiteSpace([string]$_.DisplayName) -or
+                [string]::IsNullOrWhiteSpace([string]$_.State) -or
+                [string]::IsNullOrWhiteSpace([string]$_.StartMode)
+            })
+            if ($invalidFallbackServices.Count -gt 0) {
+                throw 'Get-Service 返回不完整的服务身份或状态。'
             }
         } catch {
             throw ('无法读取系统服务；CIM 失败: {0}; Get-Service 失败: {1}' -f $cimMessage, $_.Exception.Message)
@@ -304,6 +317,11 @@ function Invoke-TaskSchedulerComQuery {
 
 function Convert-TaskSchedulerComRecord {
     param([Parameter(Mandatory=$true)]$Record)
+    $propertyNames = @($Record.PSObject.Properties.Name)
+    $missingFields = @('Path','State','TriggerTypes' | Where-Object { $_ -notin $propertyNames })
+    if ($missingFields.Count -gt 0) {
+        throw ('Task Scheduler COM 记录缺少字段: {0}' -f ($missingFields -join ', '))
+    }
     $fullName = [string]$Record.Path
     if ([string]::IsNullOrWhiteSpace($fullName) -or
         -not $fullName.StartsWith('\', [System.StringComparison]::Ordinal)) {
@@ -313,10 +331,19 @@ function Convert-TaskSchedulerComRecord {
     if ($separator -lt 0 -or $separator -eq ($fullName.Length - 1)) {
         throw ('Task Scheduler COM 返回无效任务身份: {0}' -f $fullName)
     }
-    $stateValue = [int]$Record.State
+    if (@($Record.State).Count -ne 1) { throw 'Task Scheduler COM 返回无效状态字段。' }
+    $stateValue = 0
+    if (-not [int]::TryParse([string]$Record.State, [ref]$stateValue)) { throw 'Task Scheduler COM 返回非整数状态。' }
     if ($stateValue -lt 0 -or $stateValue -gt 4) { throw ('Task Scheduler COM 返回无效状态: {0}' -f $stateValue) }
     $stateNames = @('Unknown','Disabled','Queued','Ready','Running')
-    $triggerTypes = @($Record.TriggerTypes | ForEach-Object { [int]$_ })
+    $triggerTypes = @()
+    foreach ($rawTriggerType in @($Record.PSObject.Properties['TriggerTypes'].Value)) {
+        $triggerType = 0
+        if (-not [int]::TryParse([string]$rawTriggerType, [ref]$triggerType) -or $triggerType -lt 0 -or $triggerType -gt 11) {
+            throw ('Task Scheduler COM 返回无效触发器类型: {0}' -f $rawTriggerType)
+        }
+        $triggerTypes += $triggerType
+    }
     return [pscustomobject]@{
         TaskPath     = if ($separator -eq 0) { '\' } else { $fullName.Substring(0, $separator + 1) }
         TaskName     = $fullName.Substring($separator + 1)

@@ -63,8 +63,8 @@
 - Empty-state copy now says no matching items were found instead of displaying “发现问题” or “抓到 0 个”. Non-empty results retain the selected target hierarchy.
 - Post-fix visual evidence: `artifacts/audit-current/05-reference-vs-runtime-fix.png` and `artifacts/gui-states/{100,125,150}/results.png`; no clipping or overlap is visible at any tested density.
 - Automated evidence: 147 GUI tests and 221 core Pester tests pass after the runtime repair.
-- Revalidation evidence after the independent-review fixes: 149 GUI tests, 229 core Pester tests, 38 legacy logic tests, 12 legacy Schema tests, 26 PowerShell AST parses, 2 JSON parses, and PSScriptAnalyzer error-level checks all pass.
-- Fresh real GUI scan evidence: `artifacts/audit-current/06-live-gui-results.png`; the GUI reached `results` with `0` executable actions, `8` observations, and `scan_health` complete for system information, services, and scheduled tasks. No clean or restore path was invoked.
+- Revalidation evidence after the independent-review fixes: 149 GUI tests, 234 core Pester tests, 38 legacy logic tests, 12 legacy Schema tests, 26 PowerShell AST parses, 2 JSON parses, and PSScriptAnalyzer error-level checks all pass.
+- Fresh real GUI scan evidence: `artifacts/audit-current/06-live-gui-results.png`; the GUI reached `results` with `0` executable actions and `8` observations. System information and scheduled tasks were complete; services were explicitly marked degraded because at least one CIM record lacked a required field, so the GUI displayed the compatibility warning instead of implying a complete scan. No clean or restore path was invoked.
 
 ## Follow-up polish
 

@@ -97,6 +97,21 @@ Describe '扫描器与评分' {
         $services[0].Name | Should -Be 'FallbackService'
         $script:ScanHealth.services | Should -Be 'degraded'
     }
+    It 'CIM 服务名称有效但显示名或状态字段为空时转入兼容采集' {
+        Mock Get-CimInstance {
+            [pscustomobject]@{ Name='PrimaryService'; DisplayName=''; State=''; StartMode=''; PathName=''; ProcessId=1 }
+        }
+        Mock Get-Service {
+            [pscustomobject]@{ Name='FallbackService'; DisplayName='Fallback Service'; Status='Running'; StartType='Automatic' }
+        }
+
+        $services = @(Get-ServicesInfo)
+
+        $services.Count | Should -Be 1
+        $services[0].Name | Should -Be 'FallbackService'
+        $services[0].DisplayName | Should -Be 'Fallback Service'
+        $script:ScanHealth.services | Should -Be 'degraded'
+    }
     It 'Get-Service 兼容采集返回空身份时拒绝假报服务列表' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
         Mock Get-Service { [pscustomobject]@{ Name=''; DisplayName=''; Status='Running'; StartType='Automatic' } }
@@ -183,6 +198,10 @@ Describe '扫描器与评分' {
 
         $task.LoginTrigger | Should -BeTrue
         $task.TaskName | Should -Be 'Beim Systemstart'
+    }
+    It 'COM 任务记录缺少状态或触发器字段时拒绝默认成 Unknown 和无触发器' {
+        { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\MissingFields' }) } | Should -Throw '*缺少字段*'
+        { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\MissingTriggers'; State=3 }) } | Should -Throw '*缺少字段*'
     }
     It '主任务采集返回空列表时必须转入兼容采集' {
         Mock Get-ScheduledTask { @() }
