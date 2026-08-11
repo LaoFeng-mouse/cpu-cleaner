@@ -177,7 +177,7 @@ Describe '清理动作逻辑' {
         Mock Add-BackupManifestEntryAtomic { throw 'manifest write failed' }
         Mock Remove-LiteralRegistryValueFromKey {}
 
-        $result = Invoke-LiteralAutostartRemovalFromKey -RegistryKey $key -Source 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Updater' -ExpectedValue 'C:\Apps\old.exe' -BackupDir $TestDrive -Tag 'auto-journal'
+        $result = Invoke-LiteralAutostartRemovalFromKey -RegistryKey $key -Source 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Updater' -ExpectedValue 'C:\Apps\old.exe' -BackupDir $TestDrive -Tag 'auto-journal' -RequireArtifactIdentity $true
 
         $result.status | Should -BeExactly 'failed'
         Should -Invoke Remove-LiteralRegistryValueFromKey -Times 0 -Exactly
@@ -211,5 +211,57 @@ Describe '清理动作逻辑' {
         $result.status | Should -BeExactly 'failed'
         $result.manifest.backup_verified | Should -BeTrue
         Should -Invoke Disable-ScheduledTask -Times 1 -Exactly
+    }
+
+    It '服务备份键与目标服务错配时 mutation 为 0' {
+        Mock Get-ServiceBackupInfo {
+            [pscustomobject]@{ start_type_sc='auto'; start_type_display='Automatic'; status='Running'; delayed_autostart=0 }
+        }
+        Mock Backup-RegistryKey {
+            $out = Join-Path $TestDrive 'wrong-service.reg'
+            [System.IO.File]::WriteAllText($out, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\OtherSvc]`r`n")
+            return $out
+        }
+        Mock Add-BackupManifestEntryAtomic {}
+        Mock Invoke-ServiceConfigDisable {}
+
+        $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'svc-wrong-id'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Add-BackupManifestEntryAtomic -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceConfigDisable -Times 0 -Exactly
+    }
+
+    It '任务 XML URI 与规范化目标路径错配时 mutation 为 0' {
+        Mock Get-ScheduledTask { [pscustomobject]@{State='Ready'} }
+        Mock Export-ScheduledTask { '<Task><RegistrationInfo><URI>\Other\Task</URI></RegistrationInfo></Task>' }
+        Mock Add-BackupManifestEntryAtomic {}
+        Mock Disable-ScheduledTask {}
+
+        $result = Invoke-TaskDisableAction -Pending ([pscustomobject]@{task_path='\Vendor\Task'}) -BackupDir $TestDrive -Tag 'task-wrong-id'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Add-BackupManifestEntryAtomic -Times 0 -Exactly
+        Should -Invoke Disable-ScheduledTask -Times 0 -Exactly
+    }
+
+    It '自启动备份 path 或 name 与目标错配时 mutation 为 0' {
+        $key = [pscustomobject]@{}
+        $key | Add-Member ScriptMethod GetValueNames { @('Updater') }
+        $key | Add-Member ScriptMethod GetValue { param($name,$default,$options) 'C:\Apps\old.exe' }
+        $key | Add-Member ScriptMethod GetValueKind { param($name) [Microsoft.Win32.RegistryValueKind]::String }
+        Mock Write-AutostartValueBackup {
+            $out = Join-Path $TestDrive 'wrong-auto.autostart.json'
+            [System.IO.File]::WriteAllText($out, '{"key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run","name":"Other","value_type":"String","value":"C:\\Apps\\old.exe"}')
+            return $out
+        }
+        Mock Add-BackupManifestEntryAtomic {}
+        Mock Remove-LiteralRegistryValueFromKey {}
+
+        $result = Invoke-LiteralAutostartRemovalFromKey -RegistryKey $key -Source 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Updater' -ExpectedValue 'C:\Apps\old.exe' -BackupDir $TestDrive -Tag 'auto-wrong-id' -RequireArtifactIdentity $true
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Add-BackupManifestEntryAtomic -Times 0 -Exactly
+        Should -Invoke Remove-LiteralRegistryValueFromKey -Times 0 -Exactly
     }
 }

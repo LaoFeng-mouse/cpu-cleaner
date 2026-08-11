@@ -17,6 +17,9 @@ Describe '恢复逻辑' {
         if (-not (Get-Command Invoke-RestorePlanAction -ErrorAction SilentlyContinue)) {
             function Invoke-RestorePlanAction { throw 'restore mutation wrapper not implemented' }
         }
+        if (-not (Get-Command Get-BackupPathAttributes -ErrorAction SilentlyContinue)) {
+            function Get-BackupPathAttributes($Path) { [System.IO.FileAttributes]::Normal }
+        }
         # Pester 5 固定版本 (5.9.0): 直接使用原生断言, 不做 3.4/5.x 兼容包装
     }
 
@@ -73,7 +76,7 @@ Describe '恢复逻辑' {
 
     It '统一恢复在任一备份缺失时所有 mutation 为 0' {
         $manifest = @([pscustomobject]@{
-            type='service'; name='ExactSvc'; target_identity='ExactSvc'; backup_verified=$true
+            backup_format_version=1; type='service'; name='ExactSvc'; target_identity='ExactSvc'; backup_verified=$true
             backup=(Join-Path $TestDrive 'missing.reg'); backup_sha256=('0' * 64)
             start_type_sc='auto'; status='Running'; entry_id='svc'; execution_status='success'
         })
@@ -87,7 +90,7 @@ Describe '恢复逻辑' {
         $backup = Join-Path $TestDrive 'service.reg'
         [System.IO.File]::WriteAllText($backup, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\OtherSvc]`r`n")
         $manifest = @([pscustomobject]@{
-            type='service'; name='ExactSvc'; target_identity='ExactSvc'; backup_verified=$true
+            backup_format_version=1; type='service'; name='ExactSvc'; target_identity='ExactSvc'; backup_verified=$true
             backup=$backup; backup_sha256=(Get-FileHash $backup -Algorithm SHA256).Hash
             start_type_sc='auto'; status='Running'; entry_id='svc'; execution_status='success'
         })
@@ -101,7 +104,7 @@ Describe '恢复逻辑' {
         $backup = Join-Path $TestDrive 'auto.autostart.json'
         [System.IO.File]::WriteAllText($backup, '{"key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run","name":"Other","value_type":"String","value":"C:\\Apps\\old.exe"}')
         $manifest = @([pscustomobject]@{
-            type='autostart'; key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; name='Updater'
+            backup_format_version=1; type='autostart'; key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; name='Updater'
             target_identity='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run|Updater'; backup_verified=$true
             backup=$backup; backup_sha256=(Get-FileHash $backup -Algorithm SHA256).Hash
             entry_id='auto'; execution_status='success'
@@ -116,7 +119,7 @@ Describe '恢复逻辑' {
         $backup = Join-Path $TestDrive 'task.xml'
         [System.IO.File]::WriteAllText($backup, '<Task><RegistrationInfo><URI>\Other\Task</URI></RegistrationInfo></Task>')
         $manifest = @([pscustomobject]@{
-            type='task'; name='\Vendor\Task'; target_identity='\Vendor\Task'; backup_verified=$true
+            backup_format_version=1; type='task'; name='\Vendor\Task'; target_identity='\Vendor\Task'; backup_verified=$true
             backup=$backup; backup_sha256=(Get-FileHash $backup -Algorithm SHA256).Hash
             entry_id='task'; execution_status='success'
         })
@@ -131,7 +134,7 @@ Describe '恢复逻辑' {
         [System.IO.File]::WriteAllText($outside, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\ExactSvc]`r`n")
         try {
             $manifest = @([pscustomobject]@{
-                type='service'; name='ExactSvc'; target_identity='ExactSvc'; backup_verified=$true
+                backup_format_version=1; type='service'; name='ExactSvc'; target_identity='ExactSvc'; backup_verified=$true
                 backup=$outside; backup_sha256=(Get-FileHash $outside -Algorithm SHA256).Hash
                 start_type_sc='auto'; status='Running'; entry_id='svc'; execution_status='success'
             })
@@ -142,5 +145,88 @@ Describe '恢复逻辑' {
         } finally {
             Remove-Item -LiteralPath $outside -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    It '删除 service 显式备份字段后拒绝自动恢复且 mutation 为 0' {
+        $backup = Join-Path $TestDrive 'legacy-service.reg'
+        [System.IO.File]::WriteAllText($backup, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\ExactSvc]`r`n")
+        $manifest = @([pscustomobject]@{ type='service'; name='ExactSvc'; backup=$backup; start_type_sc='auto'; status='Running' })
+        Mock Invoke-RestorePlanAction {}
+
+        { Invoke-ValidatedRestoreManifest -Manifest $manifest -BackupDir $TestDrive } | Should -Throw '*格式版本*'
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
+
+    It '删除 task 显式备份字段后拒绝自动恢复且 mutation 为 0' {
+        $backup = Join-Path $TestDrive 'legacy-task.xml'
+        [System.IO.File]::WriteAllText($backup, '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo></Task>')
+        $manifest = @([pscustomobject]@{ type='task'; name='\Vendor\Task'; backup=$backup })
+        Mock Invoke-RestorePlanAction {}
+
+        { Invoke-ValidatedRestoreManifest -Manifest $manifest -BackupDir $TestDrive } | Should -Throw '*格式版本*'
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
+
+    It '删除 autostart 显式备份字段后拒绝自动恢复且 mutation 为 0' {
+        $backup = Join-Path $TestDrive 'legacy-auto.autostart.json'
+        [System.IO.File]::WriteAllText($backup, '{"key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run","name":"Updater","value_type":"String","value":"C:\\Apps\\old.exe"}')
+        $manifest = @([pscustomobject]@{ type='autostart'; key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; name='Updater'; backup=$backup })
+        Mock Invoke-RestorePlanAction {}
+
+        { Invoke-ValidatedRestoreManifest -Manifest $manifest -BackupDir $TestDrive } | Should -Throw '*格式版本*'
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
+
+    It '任务备份内容被篡改但保留 URI 时 SHA 验证阻止 mutation' {
+        $backup = Join-Path $TestDrive 'tampered-task.xml'
+        [System.IO.File]::WriteAllText($backup, '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo></Task>')
+        $originalHash = (Get-FileHash $backup -Algorithm SHA256).Hash
+        [System.IO.File]::WriteAllText($backup, '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo><Actions /></Task>')
+        $manifest = @([pscustomobject]@{
+            backup_format_version=1; type='task'; name='\Vendor\Task'; target_identity='\Vendor\Task'; backup_verified=$true
+            backup=$backup; backup_sha256=$originalHash; entry_id='task'; execution_status='success'
+        })
+        Mock Invoke-RestorePlanAction {}
+
+        { Invoke-ValidatedRestoreManifest -Manifest $manifest -BackupDir $TestDrive } | Should -Throw '*SHA-256*'
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
+
+    It '自启动备份 value 被篡改但保留 path 和 name 时 SHA 验证阻止 mutation' {
+        $backup = Join-Path $TestDrive 'tampered-auto.autostart.json'
+        [System.IO.File]::WriteAllText($backup, '{"key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run","name":"Updater","value_type":"String","value":"C:\\Apps\\old.exe"}')
+        $originalHash = (Get-FileHash $backup -Algorithm SHA256).Hash
+        [System.IO.File]::WriteAllText($backup, '{"key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run","name":"Updater","value_type":"String","value":"C:\\Apps\\evil.exe"}')
+        $manifest = @([pscustomobject]@{
+            backup_format_version=1; type='autostart'; key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; name='Updater'
+            target_identity='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run|Updater'; backup_verified=$true
+            backup=$backup; backup_sha256=$originalHash; entry_id='auto'; execution_status='success'
+        })
+        Mock Invoke-RestorePlanAction {}
+
+        { Invoke-ValidatedRestoreManifest -Manifest $manifest -BackupDir $TestDrive } | Should -Throw '*SHA-256*'
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
+
+    It '中间目录为 reparse point 时拒绝恢复且 mutation 为 0' {
+        $nested = Join-Path $TestDrive 'nested'
+        [System.IO.Directory]::CreateDirectory($nested) | Out-Null
+        $backup = Join-Path $nested 'service.reg'
+        [System.IO.File]::WriteAllText($backup, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\ExactSvc]`r`n")
+        $manifest = @([pscustomobject]@{
+            backup_format_version=1; type='service'; name='ExactSvc'; target_identity='ExactSvc'; backup_verified=$true
+            backup=$backup; backup_sha256=(Get-FileHash $backup -Algorithm SHA256).Hash
+            start_type_sc='auto'; status='Running'; entry_id='svc'; execution_status='success'
+        })
+        Mock Get-BackupPathAttributes {
+            if ([string]::Equals($Path, $nested, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return [System.IO.FileAttributes]::Directory -bor [System.IO.FileAttributes]::ReparsePoint
+            }
+            return [System.IO.FileAttributes]::Normal
+        }
+        Mock Invoke-RestorePlanAction {}
+
+        { Invoke-ValidatedRestoreManifest -Manifest $manifest -BackupDir $TestDrive } | Should -Throw '*重解析点*'
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
     }
 }
