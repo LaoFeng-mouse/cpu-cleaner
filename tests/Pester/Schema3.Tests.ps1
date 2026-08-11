@@ -18,7 +18,7 @@ namespace CpuCleaner.Tests {
     public sealed class ThrowingPublisherValue {
         private readonly string message;
         public ThrowingPublisherValue(string message) { this.message = message; }
-        public override string ToString() { throw new System.InvalidOperationException(message); }
+        public override string ToString() { throw new System.ArgumentException(message); }
     }
 }
 '@
@@ -58,26 +58,13 @@ Describe 'Test-DetectMatch (match_type 分发)' {
         { $result.Value = Test-DetectMatch 'C:\Trusted\ExactSvc.exe' @{ match = '['; type = 'publisher' } -Context $context } | Should -Not -Throw
         $result.Value | Should -BeFalse
     }
-    It 'publisher 不吞掉 SignerCertificate 访问异常' {
-        $throwingSubject = New-Object CpuCleaner.Tests.ThrowingPublisherValue -ArgumentList 'certificate boom'
-        $certificate = [pscustomobject]@{ Subject = $throwingSubject }
-        $certificateGetter = { $certificate }.GetNewClosure()
-        $signature = [pscustomobject]@{}
-        $signature | Add-Member -MemberType ScriptProperty -Name SignerCertificate -Value $certificateGetter
-        $context = [pscustomobject]@{ Signature = $signature }
-
-        { Test-DetectMatch 'C:\Trusted\ExactSvc.exe' @{ match = 'Trusted'; type = 'publisher' } -Context $context } |
-            Should -Throw
-    }
-    It 'publisher 不吞掉 Subject 访问异常' {
-        $throwingSubject = New-Object CpuCleaner.Tests.ThrowingPublisherValue -ArgumentList 'subject boom'
-        $subjectGetter = { $throwingSubject }.GetNewClosure()
-        $certificate = [pscustomobject]@{}
-        $certificate | Add-Member -MemberType ScriptProperty -Name Subject -Value $subjectGetter
-        $certificateGetter = { $certificate }.GetNewClosure()
-        $signature = [pscustomobject]@{}
-        $signature | Add-Member -MemberType ScriptProperty -Name SignerCertificate -Value $certificateGetter
-        $context = [pscustomobject]@{ Signature = $signature }
+    It 'publisher 不吞掉 Subject 字符串转换 ArgumentException' {
+        $throwingSubject = New-Object CpuCleaner.Tests.ThrowingPublisherValue -ArgumentList 'subject conversion boom'
+        $context = [pscustomobject]@{
+            Signature = [pscustomobject]@{
+                SignerCertificate = [pscustomobject]@{ Subject = $throwingSubject }
+            }
+        }
 
         { Test-DetectMatch 'C:\Trusted\ExactSvc.exe' @{ match = 'Trusted'; type = 'publisher' } -Context $context } |
             Should -Throw
