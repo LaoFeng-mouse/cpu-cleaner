@@ -1,4 +1,135 @@
 ﻿# 备份恢复 (v1.7.0 拆分): 单值备份/恢复
+$script:TrustedBackupSystemSid = 'S-1-5-18'
+$script:TrustedBackupAdministratorsSid = 'S-1-5-32-544'
+
+function Get-SecureBackupRoot {
+    $programData = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::CommonApplicationData)
+    if ([string]::IsNullOrWhiteSpace($programData)) { throw '无法确定 ProgramData 安全备份根' }
+    return [System.IO.Path]::Combine($programData, 'MouseCleaner', 'Backups')
+}
+
+function Get-BackupAclDescriptor($Path) {
+    try {
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+        $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {
+            [pscustomobject]@{ Sid=$_.IdentityReference.Value; Type=$_.AccessControlType.ToString(); Rights=[int64]$_.FileSystemRights; Inherited=[bool]$_.IsInherited }
+        })
+        return [pscustomobject]@{ OwnerSid=$owner; Protected=[bool]$acl.AreAccessRulesProtected; Rules=$rules }
+    } catch { throw ('ACL 读取失败: ' + $_.Exception.Message) }
+}
+
+function Test-TrustedBackupAclDescriptor($Descriptor, [bool]$RequireProtected = $true, [bool]$ParentOnly = $false) {
+    if ($null -eq $Descriptor -or $Descriptor.OwnerSid -isnot [string] -or
+        $Descriptor.OwnerSid -cnotin @($script:TrustedBackupSystemSid, $script:TrustedBackupAdministratorsSid)) { return $false }
+    if ($RequireProtected -and ($Descriptor.Protected -isnot [bool] -or -not $Descriptor.Protected)) { return $false }
+    $writeMask = if ($ParentOnly) {
+        # 父目录只需拒绝可删除/改 ACL/夺取所有权的权限；仅 CreateDirectories 不足以替换已受保护的子目录。
+        [int64]([System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [System.Security.AccessControl.FileSystemRights]::Delete -bor [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+    } else {
+        [int64]([System.Security.AccessControl.FileSystemRights]::Write -bor [System.Security.AccessControl.FileSystemRights]::Modify -bor [System.Security.AccessControl.FileSystemRights]::FullControl -bor [System.Security.AccessControl.FileSystemRights]::Delete -bor [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+    }
+    $trustedWriters = @{}
+    foreach ($rule in @($Descriptor.Rules)) {
+        if ($null -eq $rule -or $rule.Sid -isnot [string] -or $rule.Type -isnot [string] -or -not (Test-StrictInteger $rule.Rights)) { return $false }
+        if ($RequireProtected -and $rule.Inherited -ne $false) { return $false }
+        if ($rule.Type -ceq 'Allow' -and ([int64]$rule.Rights -band $writeMask) -ne 0) {
+            if ($rule.Sid -cnotin @($script:TrustedBackupSystemSid, $script:TrustedBackupAdministratorsSid)) { return $false }
+            $trustedWriters[$rule.Sid] = $true
+        }
+    }
+    if (-not $ParentOnly -and (-not $trustedWriters.ContainsKey($script:TrustedBackupSystemSid) -or -not $trustedWriters.ContainsKey($script:TrustedBackupAdministratorsSid))) { return $false }
+    return $true
+}
+
+function Assert-TrustedBackupPathAcl($Path, [bool]$RequireProtected = $true, [bool]$ParentOnly = $false) {
+    $descriptor = Get-BackupAclDescriptor $Path
+    if (-not (Test-TrustedBackupAclDescriptor -Descriptor $descriptor -RequireProtected $RequireProtected -ParentOnly $ParentOnly)) { throw "备份路径 owner/DACL 不可信: $Path" }
+}
+
+function New-ProtectedBackupSecurity([bool]$Directory = $true) {
+    $security = if ($Directory) { New-Object System.Security.AccessControl.DirectorySecurity } else { New-Object System.Security.AccessControl.FileSecurity }
+    $security.SetAccessRuleProtection($true, $false)
+    $adminSid = New-Object System.Security.Principal.SecurityIdentifier($script:TrustedBackupAdministratorsSid)
+    $systemSid = New-Object System.Security.Principal.SecurityIdentifier($script:TrustedBackupSystemSid)
+    $security.SetOwner($adminSid)
+    $inheritance = if ($Directory) { [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [System.Security.AccessControl.InheritanceFlags]::None }
+    foreach ($sid in @($systemSid, $adminSid)) {
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)
+        $null = $security.AddAccessRule($rule)
+    }
+    return $security
+}
+
+function New-ProtectedBackupDirectory($Path) { return [System.IO.Directory]::CreateDirectory($Path, (New-ProtectedBackupSecurity -Directory $true)) }
+function Set-BackupPathAcl($Path, $Acl) { Set-Acl -LiteralPath $Path -AclObject $Acl -ErrorAction Stop }
+
+function Protect-BackupPathAcl($Path, [bool]$Directory = $false) {
+    try {
+        Set-BackupPathAcl -Path $Path -Acl (New-ProtectedBackupSecurity -Directory $Directory)
+        Assert-TrustedBackupPathAcl -Path $Path -RequireProtected $true
+    } catch { throw ('备份 ACL 加固失败: ' + $_.Exception.Message) }
+}
+
+function Protect-BackupPathIfSecure($Path, $BackupDir) {
+    $root = [System.IO.Path]::GetFullPath((Get-SecureBackupRoot)).TrimEnd('\') + '\'
+    $dir = [System.IO.Path]::GetFullPath($BackupDir).TrimEnd('\')
+    if ($dir.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) -and $dir.Substring($root.Length) -notmatch '[\\/]') {
+        Protect-BackupPathAcl -Path $Path
+    }
+}
+
+function Assert-TrustedBackupPackagePath($BackupDir) {
+    if ($BackupDir -isnot [string] -or [string]::IsNullOrWhiteSpace($BackupDir)) { throw '备份包路径无效' }
+    $secureRoot = [System.IO.Path]::GetFullPath((Get-SecureBackupRoot)).TrimEnd('\')
+    $package = [System.IO.Path]::GetFullPath($BackupDir).TrimEnd('\')
+    $prefix = $secureRoot + '\'
+    if (-not $package.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) -or $package.Substring($prefix.Length) -match '[\\/]') { throw '备份包不在受信任的安全备份根直属目录内' }
+    $appRoot = Split-Path $secureRoot -Parent
+    $programData = Split-Path $appRoot -Parent
+    try {
+        Assert-TrustedBackupPathAcl -Path $programData -RequireProtected $false -ParentOnly $true
+        Assert-TrustedBackupPathAcl -Path $appRoot -RequireProtected $true
+        Assert-TrustedBackupPathAcl -Path $secureRoot -RequireProtected $true
+        Assert-TrustedBackupPathAcl -Path $package -RequireProtected $true
+    } catch { throw ('备份包 ACL 信任验证失败: ' + $_.Exception.Message) }
+    return $package
+}
+
+function Initialize-ProtectedBackupDirectory($BackupDir) {
+    $secureRoot = [System.IO.Path]::GetFullPath((Get-SecureBackupRoot)).TrimEnd('\')
+    $package = [System.IO.Path]::GetFullPath($BackupDir).TrimEnd('\')
+    if (-not $package.StartsWith($secureRoot + '\', [System.StringComparison]::OrdinalIgnoreCase) -or $package.Substring($secureRoot.Length + 1) -match '[\\/]') { throw '备份目录不在安全备份根直属目录内' }
+    $appRoot = Split-Path $secureRoot -Parent
+    $programData = Split-Path $appRoot -Parent
+    Assert-TrustedBackupPathAcl -Path $programData -RequireProtected $false -ParentOnly $true
+    foreach ($path in @($appRoot, $secureRoot)) {
+        if ([System.IO.Directory]::Exists($path)) { Assert-TrustedBackupPathAcl -Path $path -RequireProtected $true }
+        else { $null = New-ProtectedBackupDirectory $path; Assert-TrustedBackupPathAcl -Path $path -RequireProtected $true }
+    }
+    if ([System.IO.Directory]::Exists($package)) { throw '备份目录已存在，拒绝复用' }
+    $null = New-ProtectedBackupDirectory $package
+    $null = Assert-TrustedBackupPackagePath $package
+    return $package
+}
+
+function Resolve-TrustedRestoreBackupDirectory($RequestedPath, $LegacyRoot = '') {
+    if ($RequestedPath -isnot [string] -or [string]::IsNullOrWhiteSpace($RequestedPath)) { throw 'restore 备份目录参数无效' }
+    $secureRoot = [System.IO.Path]::GetFullPath((Get-SecureBackupRoot)).TrimEnd('\')
+    $requested = [System.IO.Path]::GetFullPath($RequestedPath).TrimEnd('\')
+    $securePrefix = $secureRoot + '\'
+    if ($requested.StartsWith($securePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and $requested.Substring($securePrefix.Length) -notmatch '[\\/]') {
+        $resolved = $requested
+    } elseif ($LegacyRoot -is [string] -and -not [string]::IsNullOrWhiteSpace($LegacyRoot)) {
+        $legacy = [System.IO.Path]::GetFullPath($LegacyRoot).TrimEnd('\') + '\'
+        if (-not $requested.StartsWith($legacy, [System.StringComparison]::OrdinalIgnoreCase) -or $requested.Substring($legacy.Length) -match '[\\/]') { throw 'restore 路径既不属于安全根也不是受限旧路径' }
+        $leaf = [System.IO.Path]::GetFileName($requested)
+        if ($leaf -notmatch '^\d{8}_\d{6}$') { throw '旧 GUI restore 路径时间戳无效' }
+        $resolved = Join-Path $secureRoot $leaf
+    } else { throw 'restore 路径不属于安全备份根' }
+    return Assert-TrustedBackupPackagePath $resolved
+}
+
 function Test-RegistryBackupFile($Path) {
     if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path) -or
         -not [System.IO.File]::Exists($Path) -or (Get-Item -LiteralPath $Path).Length -le 0) {
@@ -106,6 +237,7 @@ function Write-BackupManifestAtomic($BackupDir, $Entries) {
         $writer.Dispose(); $writer = $null
         $stream.Dispose(); $stream = $null
 
+        Protect-BackupPathIfSecure -Path $tempFile -BackupDir $BackupDir
         $tempHash = Get-FileSha256Hex $tempFile
         $null = Confirm-BackupManifestFile $tempFile @($Entries).Count $tempHash
         if ($hadExisting) {
@@ -114,6 +246,7 @@ function Write-BackupManifestAtomic($BackupDir, $Entries) {
             [System.IO.File]::Move($tempFile, $manifestFile)
         }
         $committed = $true
+        Protect-BackupPathIfSecure -Path $manifestFile -BackupDir $BackupDir
         $null = Confirm-BackupManifestFile $manifestFile @($Entries).Count $tempHash
         if ([System.IO.File]::Exists($previousFile)) { [System.IO.File]::Delete($previousFile) }
         return $manifestFile
@@ -176,6 +309,7 @@ function Backup-RegistryKey($keyPath, $backupDir, $tag) {
     if (-not (Test-RegistryBackupFile $out)) {
         throw "注册表备份文件格式无效: $out"
     }
+    Protect-BackupPathIfSecure -Path $out -BackupDir $backupDir
     return $out
 }
 
@@ -208,6 +342,7 @@ function Backup-AutostartValue($keyPath, $name, $backupDir, $tag) {
     if (-not $info) { return $null }
     $out = Join-Path $backupDir ("$tag.autostart.json")
     [System.IO.File]::WriteAllText($out, (ConvertTo-Json -InputObject $info -Depth 100), (New-Object System.Text.UTF8Encoding($true)))
+    Protect-BackupPathIfSecure -Path $out -BackupDir $backupDir
     return $out
 }
 
@@ -219,6 +354,7 @@ function Write-AutostartValueBackup($Info, $BackupDir, $Tag) {
     if (-not [System.IO.File]::Exists($out) -or (Get-Item -LiteralPath $out).Length -le 0) {
         throw '单值备份文件写入失败'
     }
+    Protect-BackupPathIfSecure -Path $out -BackupDir $BackupDir
     return $out
 }
 

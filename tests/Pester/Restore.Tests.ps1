@@ -20,6 +20,16 @@ Describe '恢复逻辑' {
         if (-not (Get-Command Get-BackupPathAttributes -ErrorAction SilentlyContinue)) {
             function Get-BackupPathAttributes($Path) { [System.IO.FileAttributes]::Normal }
         }
+        if (-not (Get-Command Test-TrustedBackupAclDescriptor -ErrorAction SilentlyContinue)) {
+            function Test-TrustedBackupAclDescriptor { return $true }
+        }
+        Mock Get-SecureBackupRoot { Split-Path $TestDrive -Parent }
+        Mock Get-BackupAclDescriptor {
+            [pscustomobject]@{OwnerSid='S-1-5-32-544';Protected=$true;Rules=@(
+                [pscustomobject]@{Sid='S-1-5-18';Type='Allow';Rights=[int64][System.Security.AccessControl.FileSystemRights]::FullControl;Inherited=$false},
+                [pscustomobject]@{Sid='S-1-5-32-544';Type='Allow';Rights=[int64][System.Security.AccessControl.FileSystemRights]::FullControl;Inherited=$false}
+            )}
+        }
         # Pester 5 固定版本 (5.9.0): 直接使用原生断言, 不做 3.4/5.x 兼容包装
     }
 
@@ -348,7 +358,7 @@ Describe '恢复逻辑' {
     }
 
     It '服务原状态 Running 时 sc start 非零不得报告 success' {
-        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ShouldStart=$true;HasDelayed=$false;DelayedAutoStart=0}
+        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ExpectedStatus='Running';ShouldStart=$true;HasDelayed=$false;DelayedAutoStart=0}
         Mock Invoke-ServiceControlCommand {
             if ($Arguments[0] -eq 'start') { return 5 }
             return 0
@@ -362,7 +372,7 @@ Describe '恢复逻辑' {
     }
 
     It '服务原状态 Running 但最终仍 Stopped 时不得报告 success' {
-        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ShouldStart=$true;HasDelayed=$false;DelayedAutoStart=0}
+        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ExpectedStatus='Running';ShouldStart=$true;HasDelayed=$false;DelayedAutoStart=0}
         Mock Invoke-ServiceControlCommand { return 0 }
         Mock Get-Service { [pscustomobject]@{StartType='Automatic';Status='Stopped'} }
 
@@ -373,7 +383,7 @@ Describe '恢复逻辑' {
     }
 
     It '服务 DelayedAutostart mutation 后回读不一致不得报告 success' {
-        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ShouldStart=$false;HasDelayed=$true;DelayedAutoStart=1}
+        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ExpectedStatus='Stopped';ShouldStart=$false;HasDelayed=$true;DelayedAutoStart=1}
         Mock Invoke-ServiceControlCommand { return 0 }
         Mock New-ItemProperty {}
         Mock Get-Service { [pscustomobject]@{StartType='Automatic';Status='Stopped'} }
@@ -386,13 +396,63 @@ Describe '恢复逻辑' {
     }
 
     It '服务原状态非 Running 但最终 Running 时不得报告 success' {
-        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='demand';ShouldStart=$false;HasDelayed=$false;DelayedAutoStart=0}
+        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='demand';ExpectedStatus='Stopped';ShouldStart=$false;HasDelayed=$false;DelayedAutoStart=0}
         Mock Invoke-ServiceControlCommand { return 0 }
         Mock Get-Service { [pscustomobject]@{StartType='Manual';Status='Running'} }
 
         $result = Invoke-RestorePlanAction -Plan $plan
 
         $result.success | Should -BeFalse
-        $result.reason | Should -Match '运行状态.*Running.*非 Running'
+        $result.reason | Should -Match '运行状态.*Running.*Stopped'
+    }
+
+    It '用户自建路径不能作为 restore 信任包且 mutation 为 0' {
+        Mock Get-SecureBackupRoot { Join-Path $TestDrive 'trusted' }
+        Mock Invoke-RestorePlanAction {}
+        $outside = Join-Path $TestDrive 'user-created'
+
+        { Invoke-ValidatedRestoreManifest -Manifest @([pscustomobject]@{type='process';name='noop';path=''}) -BackupDir $outside } | Should -Throw '*安全备份根*'
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
+
+    It '可写 DACL 和不可信 owner 均被拒绝' {
+        $trustedOwner = 'S-1-5-32-544'
+        $usersSid = 'S-1-5-32-545'
+        $writable = [pscustomobject]@{OwnerSid=$trustedOwner;Protected=$true;Rules=@([pscustomobject]@{Sid=$usersSid;Type='Allow';Rights=[int][System.Security.AccessControl.FileSystemRights]::Modify;Inherited=$false})}
+        $badOwner = [pscustomobject]@{OwnerSid=$usersSid;Protected=$true;Rules=@()}
+        Mock Invoke-RestorePlanAction {}
+        foreach($descriptor in @($writable,$badOwner)) {
+            $script:AclCase = $descriptor
+            Mock Get-BackupAclDescriptor { $script:AclCase }
+            { Invoke-ValidatedRestoreManifest -Manifest @([pscustomobject]@{type='process';name='noop';path=''}) -BackupDir $TestDrive } | Should -Throw '*DACL*'
+        }
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
+
+    It 'ACL 读取失败时 restore 在 mutation 前失败关闭' {
+        Mock Get-SecureBackupRoot { Split-Path $TestDrive -Parent }
+        Mock Get-BackupAclDescriptor { throw 'ACL read denied' }
+        Mock Invoke-RestorePlanAction {}
+
+        { Invoke-ValidatedRestoreManifest -Manifest @([pscustomobject]@{type='process';name='noop';path=''}) -BackupDir $TestDrive } | Should -Throw '*ACL*'
+        Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
+
+    It '仅 SYSTEM 和 Administrators 可写的受保护 ACL 被接受' {
+        $descriptor = [pscustomobject]@{
+            OwnerSid='S-1-5-32-544';Protected=$true;Rules=@(
+                [pscustomobject]@{Sid='S-1-5-18';Type='Allow';Rights=[int][System.Security.AccessControl.FileSystemRights]::FullControl;Inherited=$false},
+                [pscustomobject]@{Sid='S-1-5-32-544';Type='Allow';Rights=[int][System.Security.AccessControl.FileSystemRights]::FullControl;Inherited=$false}
+            )
+        }
+
+        (Test-TrustedBackupAclDescriptor -Descriptor $descriptor -RequireProtected $true) | Should -BeTrue
+    }
+
+    It 'restore 计划拒绝 Paused 和 pending 服务状态' {
+        foreach($status in @('Paused','StartPending','StopPending')) {
+            $manifest = [pscustomobject]@{type='service';name='ExactSvc';start_type_sc='auto';status=$status;backup_verified=$true}
+            { Get-ServiceRestorePlan $manifest } | Should -Throw '*稳定*'
+        }
     }
 }

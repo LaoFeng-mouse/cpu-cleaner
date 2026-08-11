@@ -17,6 +17,20 @@ Describe '清理动作逻辑' {
         if (-not (Get-Command Confirm-BackupManifestFile -ErrorAction SilentlyContinue)) {
             function Confirm-BackupManifestFile { return $true }
         }
+        if (-not (Get-Command Test-TrustedBackupAclDescriptor -ErrorAction SilentlyContinue)) {
+            function Test-TrustedBackupAclDescriptor { return $true }
+        }
+        if (-not (Get-Command Initialize-ProtectedBackupDirectory -ErrorAction SilentlyContinue)) {
+            function Initialize-ProtectedBackupDirectory { return $BackupDir }
+        }
+        Mock Get-SecureBackupRoot { Split-Path $TestDrive -Parent }
+        Mock Get-BackupAclDescriptor {
+            [pscustomobject]@{OwnerSid='S-1-5-32-544';Protected=$true;Rules=@(
+                [pscustomobject]@{Sid='S-1-5-18';Type='Allow';Rights=[int64][System.Security.AccessControl.FileSystemRights]::FullControl;Inherited=$false},
+                [pscustomobject]@{Sid='S-1-5-32-544';Type='Allow';Rights=[int64][System.Security.AccessControl.FileSystemRights]::FullControl;Inherited=$false}
+            )}
+        }
+        Mock Protect-BackupPathAcl {}
         # Pester 5 固定版本 (5.9.0): 直接使用原生断言, 不做 3.4/5.x 兼容包装
     }
 
@@ -326,5 +340,43 @@ Describe '清理动作逻辑' {
         $saved = @(Get-Content (Join-Path $TestDrive 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json)
         $saved[0].entry_id | Should -BeExactly 'old'
         @(Get-ChildItem -LiteralPath $TestDrive -Filter '*.previous').Count | Should -Be 0
+    }
+
+    It '受保护 ACL 创建和验证成功后才返回备份目录' {
+        Mock Get-SecureBackupRoot { $TestDrive }
+        Mock New-ProtectedBackupDirectory {}
+        Mock Assert-TrustedBackupPackagePath {}
+
+        $result = Initialize-ProtectedBackupDirectory -BackupDir (Join-Path $TestDrive '20260811_120000')
+
+        $result | Should -Match '20260811_120000$'
+        Should -Invoke New-ProtectedBackupDirectory -Times 1 -Exactly
+        Should -Invoke Assert-TrustedBackupPackagePath -Times 1 -Exactly
+    }
+
+    It 'ACL 验证失败时服务 mutation 为 0' {
+        Mock Assert-TrustedBackupPackagePath { throw 'ACL 读取失败' }
+        Mock Get-ServiceBackupInfo { [pscustomobject]@{start_type_sc='auto';start_type_display='Automatic';status='Running';delayed_autostart=0} }
+        Mock Backup-RegistryKey { throw '不应创建 artifact' }
+        Mock Invoke-ServiceConfigDisable {}
+
+        $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'acl-fail'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Backup-RegistryKey -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceConfigDisable -Times 0 -Exactly
+    }
+
+    It '服务原始状态为瞬态时拒绝自动备份和 mutation' {
+        Mock Assert-TrustedBackupPackagePath {}
+        Mock Get-ServiceBackupInfo { [pscustomobject]@{start_type_sc='auto';start_type_display='Automatic';status='StartPending';delayed_autostart=0} }
+        Mock Backup-RegistryKey {}
+        Mock Invoke-ServiceConfigDisable {}
+
+        $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'transient'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Backup-RegistryKey -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceConfigDisable -Times 0 -Exactly
     }
 }
