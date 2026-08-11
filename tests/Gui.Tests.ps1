@@ -361,6 +361,29 @@ Describe 'GUI 壳 (无窗口)' {
         $source | Should -Not -Match 'cmd\s+/c'
     }
 
+    It 'preserves UTF-8 Chinese scanner output across the real background job boundary' {
+        $childScript = Join-Path $env:TEMP ('shushu_scan_utf8_' + [guid]::NewGuid().ToString('N') + '.ps1')
+        $childSource = @'
+param([string]$Mode)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+Write-Output '==> 读取系统信息...'
+exit 0
+'@
+        [System.IO.File]::WriteAllText($childScript, $childSource, [System.Text.UTF8Encoding]::new($true))
+        $job = $null
+        try {
+            $job = Start-Job -ScriptBlock $script:ScanJobScript -ArgumentList $childScript
+            Wait-Job $job | Out-Null
+            $job.State | Should -Be 'Completed'
+            $received = @($job | Receive-Job) -join "`r`n"
+            $received | Should -Match ([regex]::Escape('==> 读取系统信息...'))
+            $received | Should -Not -Match ([regex]::Escape('==> 璇诲彇绯荤粺淇℃伅...'))
+        } finally {
+            if ($job -and (Get-Job -Id $job.Id -ErrorAction SilentlyContinue)) { Remove-Job $job -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $childScript -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     It 'native scanner exit 7 fails the job, enters error, and never loads stale pending' {
         if ($null -eq $script:ScanJobScript) {
             $script:ScanJobScript | Should -Not -BeNullOrEmpty

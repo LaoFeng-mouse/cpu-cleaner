@@ -939,6 +939,9 @@ $script:ScanCheckTimer = $null
 $script:ScanJob = $null
 $script:ScanJobScript = {
     param($scriptPath)
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    [Console]::OutputEncoding = $utf8
+    $OutputEncoding = $utf8
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode scan 2>&1
     $nativeExitCode = $LASTEXITCODE
     if ($nativeExitCode -ne 0) { throw "Scanner process exited with code $nativeExitCode." }
