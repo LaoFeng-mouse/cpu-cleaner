@@ -1616,32 +1616,24 @@ function Test-RestoreResolutionExceptionKind($Exception, [string]$Kind) {
 }
 
 function Get-TrustedRestorePackage($BackupDir) {
+    $resolvedBackupDir = Assert-TrustedBackupPackagePath $BackupDir
+    $manifestFile = Join-Path $resolvedBackupDir 'manifest.json'
+    Assert-TrustedBackupPathAcl -Path $manifestFile -RequireProtected $true
+    $manifest = @(Read-BackupManifestEntries $manifestFile)
+    if ($manifest.Count -eq 0) { throw '可信备份清单为空' }
+
+    $plans = @()
     try {
-        $resolvedBackupDir = Assert-TrustedBackupPackagePath $BackupDir
-        $manifestFile = Join-Path $resolvedBackupDir 'manifest.json'
-        Assert-TrustedBackupPathAcl -Path $manifestFile -RequireProtected $true
-        $manifest = @(Read-BackupManifestEntries $manifestFile)
-        if ($manifest.Count -eq 0) { throw '可信备份清单为空' }
+        foreach ($entry in $manifest) {
+            $plans += Get-RestorePlan -Manifest $entry -BackupDir $resolvedBackupDir
+        }
+    } finally {
+        foreach ($plan in $plans) { Close-BackupArtifact $plan.Artifact }
+    }
 
-        $plans = @()
-        try {
-            foreach ($entry in $manifest) {
-                $plans += Get-RestorePlan -Manifest $entry -BackupDir $resolvedBackupDir
-            }
-        } finally {
-            foreach ($plan in $plans) { Close-BackupArtifact $plan.Artifact }
-        }
-
-        return [pscustomobject]@{
-            BackupDir = $resolvedBackupDir
-            Manifest = $manifest
-        }
-    } catch {
-        if (Test-RestoreResolutionExceptionKind -Exception $_.Exception -Kind 'CandidateRejected') { throw }
-        if ($_.Exception -is [System.Management.Automation.RuntimeException]) {
-            throw (New-RestoreCandidateRejectedException -Message $_.Exception.Message -InnerException $_.Exception)
-        }
-        throw
+    return [pscustomobject]@{
+        BackupDir = $resolvedBackupDir
+        Manifest = $manifest
     }
 }
 

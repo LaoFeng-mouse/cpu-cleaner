@@ -595,4 +595,28 @@ Invoke-Restore
 
         $result.ExitCode | Should -Be 1 -Because $result.Output
     }
+
+    It 'latest 入口候选 manifest ACL 的 PowerShell 运行时故障返回普通失败码而不是 3' {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        $root = Join-Path $TestDrive 'candidate-acl-runtime-error-root'
+        [void][System.IO.Directory]::CreateDirectory((Join-Path $root '20260811_120000'))
+        $rootLiteral = $root.Replace("'", "''")
+        $overrides = "function Get-SecureBackupRoot { return '$rootLiteral' }; function Assert-TrustedBackupPackagePath { return `$BackupDir }; function Assert-TrustedBackupPathAcl { param(`$Path) if ([System.IO.Path]::GetFileName(`$Path) -ceq 'manifest.json') { throw 'candidate ACL runtime failure' } }"
+
+        $result = Invoke-LatestRestoreEntryCase -ProjectRoot $projectRoot -CaseRoot $TestDrive -Overrides $overrides
+
+        $result.ExitCode | Should -Be 1 -Because $result.Output
+    }
+
+    It 'latest 入口候选验证器普通 throw 返回普通失败码而不是 3' {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        $root = Join-Path $TestDrive 'candidate-validator-runtime-error-root'
+        [void][System.IO.Directory]::CreateDirectory((Join-Path $root '20260811_120000'))
+        $rootLiteral = $root.Replace("'", "''")
+        $overrides = "function Get-SecureBackupRoot { return '$rootLiteral' }; function Assert-TrustedBackupPackagePath { return `$BackupDir }; function Assert-TrustedBackupPathAcl {}; function Read-BackupManifestEntries { return @([pscustomobject]@{ type='process'; name='noop'; path='' }) }; function Get-RestorePlan { throw 'validator runtime failure' }"
+
+        $result = Invoke-LatestRestoreEntryCase -ProjectRoot $projectRoot -CaseRoot $TestDrive -Overrides $overrides
+
+        $result.ExitCode | Should -Be 1 -Because $result.Output
+    }
 }
