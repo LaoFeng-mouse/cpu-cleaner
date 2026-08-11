@@ -272,6 +272,59 @@ Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
 }
 
 Describe 'Schema 3.0 命中证据与逐命中执行闸门' {
+    It 'assigns deterministic strengths to matcher types' {
+        @(
+            [pscustomobject]@{ Type='exact'; Expected=0 },
+            [pscustomobject]@{ Type='path'; Expected=1 },
+            [pscustomobject]@{ Type='contains'; Expected=2 },
+            [pscustomobject]@{ Type='regex'; Expected=3 },
+            [pscustomobject]@{ Type='publisher'; Expected=4 }
+        ) | ForEach-Object {
+            Get-DetectMatchStrength $_.Type | Should -Be $_.Expected
+        }
+    }
+
+    It 'prefers an actually matched exact rule even when contains is declared first' {
+        $patterns = @(
+            [pscustomobject]@{ match='Lenovo'; type='contains' },
+            [pscustomobject]@{ match='LenovoExactService'; type='exact' }
+        )
+        $evidence = Find-DetectMatch $patterns @(
+            [pscustomobject]@{ field='service_name'; value='LenovoExactService'; context=$null }
+        )
+
+        $evidence.matched_pattern | Should -BeExactly 'LenovoExactService'
+        $evidence.matched_type | Should -BeExactly 'exact'
+        $evidence.matched_field | Should -BeExactly 'service_name'
+    }
+
+    It 'does not borrow an exact matcher that did not match the current object' {
+        $patterns = @(
+            [pscustomobject]@{ match='Lenovo'; type='contains' },
+            [pscustomobject]@{ match='LenovoExactService'; type='exact' }
+        )
+        $evidence = Find-DetectMatch $patterns @(
+            [pscustomobject]@{ field='service_name'; value='LenovoOtherService'; context=$null }
+        )
+
+        $evidence.matched_pattern | Should -BeExactly 'Lenovo'
+        $evidence.matched_type | Should -BeExactly 'contains'
+    }
+
+    It 'keeps declaration and candidate order stable among equally strong matches' {
+        $patterns = @(
+            [pscustomobject]@{ match='Lenovo'; type='contains' },
+            [pscustomobject]@{ match='Service'; type='contains' }
+        )
+        $evidence = Find-DetectMatch $patterns @(
+            [pscustomobject]@{ field='service_display_name'; value='Lenovo Service'; context=$null },
+            [pscustomobject]@{ field='service_name'; value='LenovoService'; context=$null }
+        )
+
+        $evidence.matched_pattern | Should -BeExactly 'Lenovo'
+        $evidence.matched_field | Should -BeExactly 'service_display_name'
+    }
+
     It '混合规则按实际命中证据决定动作并保留规则顺序' {
         $tmp = Join-Path $TestDrive 's3_hit_mixed.json'
         $originalProfileFile = $script:ProfileFile
