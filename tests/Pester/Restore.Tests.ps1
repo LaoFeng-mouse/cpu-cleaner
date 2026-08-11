@@ -33,6 +33,34 @@ Describe '恢复逻辑' {
         # Pester 5 固定版本 (5.9.0): 直接使用原生断言, 不做 3.4/5.x 兼容包装
     }
 
+    BeforeAll {
+        function Invoke-LatestRestoreEntryCase {
+            param(
+                [Parameter(Mandatory=$true)][string]$ProjectRoot,
+                [Parameter(Mandatory=$true)][string]$CaseRoot,
+                [Parameter(Mandatory=$true)][string]$Overrides
+            )
+            $driver = Join-Path $CaseRoot ('latest-entry-' + [guid]::NewGuid().ToString('N') + '.ps1')
+            $projectRootLiteral = $ProjectRoot.Replace("'", "''")
+            $driverSource = @"
+`$projectRoot = '$projectRootLiteral'
+`$src = Get-Content (Join-Path `$projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
+`$idx = `$src.IndexOf("switch (```$Mode)")
+`$defs = `$src.Substring(0, `$idx).Replace('`$script:Root = Split-Path -Parent `$MyInvocation.MyCommand.Path', '`$script:Root = `$projectRoot')
+Invoke-Expression `$defs
+`$BackupDir = 'latest'
+function Is-Admin { return `$true }
+function Write-Step {}
+function Invoke-ValidatedRestoreManifest { return [pscustomobject]@{success=`$true;type='process';name='noop'} }
+$Overrides
+Invoke-Restore
+"@
+            [System.IO.File]::WriteAllText($driver, $driverSource, [System.Text.UTF8Encoding]::new($false))
+            $output = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $driver 2>&1
+            return [pscustomobject]@{ ExitCode=[int]$LASTEXITCODE; Output=($output -join "`n") }
+        }
+    }
+
     It '新格式 manifest 用 start_type_sc' {
         $m = [pscustomobject]@{ type='service'; name='X'; start_type_sc='auto'; before=$null }
         $scVal = if ($m.PSObject.Properties.Name -contains 'start_type_sc' -and $m.start_type_sc) { $m.start_type_sc } else { 'disabled' }
@@ -481,7 +509,7 @@ Describe '恢复逻辑' {
         Mock Get-ChildItem { @($newest, $trusted) }
         Mock Get-TrustedRestorePackage {
             param($BackupDir)
-            if ($BackupDir -eq $newest.FullName) { throw 'invalid package' }
+            if ($BackupDir -eq $newest.FullName) { throw (New-RestoreCandidateRejectedException 'invalid package') }
             [pscustomobject]@{ BackupDir=$BackupDir; Manifest=@([pscustomobject]@{type='process';name='noop';path=''}) }
         }
 
@@ -499,8 +527,72 @@ Describe '恢复逻辑' {
         { Resolve-LatestTrustedRestorePackage } | Should -Throw '*可信备份*'
 
         Mock Get-ChildItem { @([pscustomobject]@{Name='20260811_120000';FullName=(Join-Path $TestDrive '20260811_120000')}) }
-        Mock Get-TrustedRestorePackage { throw 'bad hash or identity' }
+        Mock Get-TrustedRestorePackage { throw (New-RestoreCandidateRejectedException 'bad hash or identity') }
         { Resolve-LatestTrustedRestorePackage } | Should -Throw '*可信备份*'
         Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
+    }
+
+    It 'latest 只把明确 CandidateRejected 异常视为普通不可信候选' {
+        $rejection = New-RestoreCandidateRejectedException 'invalid package'
+
+        (Test-RestoreResolutionExceptionKind -Exception $rejection -Kind 'CandidateRejected') | Should -BeTrue
+        (Test-RestoreResolutionExceptionKind -Exception ([System.InvalidOperationException]::new('validator crashed')) -Kind 'CandidateRejected') | Should -BeFalse
+    }
+
+    It 'latest 入口仅在安全根不存在 无候选 或全部候选明确拒绝时返回 3' {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        $missingRoot = Join-Path $TestDrive 'missing-root'
+        $emptyRoot = Join-Path $TestDrive 'empty-root'
+        $rejectedRoot = Join-Path $TestDrive 'rejected-root'
+        [void][System.IO.Directory]::CreateDirectory($emptyRoot)
+        [void][System.IO.Directory]::CreateDirectory((Join-Path $rejectedRoot '20260811_120000'))
+
+        $cases = @(
+            @{ Root=$missingRoot; Extra='' },
+            @{ Root=$emptyRoot; Extra='function Assert-TrustedBackupPathAcl {}' },
+            @{ Root=$rejectedRoot; Extra="function Assert-TrustedBackupPathAcl {}; function Get-TrustedRestorePackage { throw (New-RestoreCandidateRejectedException 'invalid package') }" }
+        )
+        foreach ($case in $cases) {
+            $rootLiteral = $case.Root.Replace("'", "''")
+            $overrides = "function Get-SecureBackupRoot { return '$rootLiteral' }; " + $case.Extra
+            $result = Invoke-LatestRestoreEntryCase -ProjectRoot $projectRoot -CaseRoot $TestDrive -Overrides $overrides
+            $result.ExitCode | Should -Be 3 -Because $result.Output
+        }
+    }
+
+    It 'latest 入口 ACL 读取故障返回普通失败码而不是 3' {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        $root = Join-Path $TestDrive 'acl-error-root'
+        [void][System.IO.Directory]::CreateDirectory($root)
+        $rootLiteral = $root.Replace("'", "''")
+        $overrides = "function Get-SecureBackupRoot { return '$rootLiteral' }; function Assert-TrustedBackupPathAcl { throw [System.UnauthorizedAccessException]::new('ACL read failed') }"
+
+        $result = Invoke-LatestRestoreEntryCase -ProjectRoot $projectRoot -CaseRoot $TestDrive -Overrides $overrides
+
+        $result.ExitCode | Should -Be 1 -Because $result.Output
+    }
+
+    It 'latest 入口目录枚举异常返回普通失败码而不是 3' {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        $root = Join-Path $TestDrive 'enumeration-error-root'
+        [void][System.IO.Directory]::CreateDirectory($root)
+        $rootLiteral = $root.Replace("'", "''")
+        $overrides = "function Get-SecureBackupRoot { return '$rootLiteral' }; function Assert-TrustedBackupPathAcl {}; function Get-ChildItem { throw [System.IO.IOException]::new('enumeration failed') }"
+
+        $result = Invoke-LatestRestoreEntryCase -ProjectRoot $projectRoot -CaseRoot $TestDrive -Overrides $overrides
+
+        $result.ExitCode | Should -Be 1 -Because $result.Output
+    }
+
+    It 'latest 入口内部验证异常返回普通失败码而不是 3' {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        $root = Join-Path $TestDrive 'validation-error-root'
+        [void][System.IO.Directory]::CreateDirectory((Join-Path $root '20260811_120000'))
+        $rootLiteral = $root.Replace("'", "''")
+        $overrides = "function Get-SecureBackupRoot { return '$rootLiteral' }; function Assert-TrustedBackupPathAcl {}; function Get-TrustedRestorePackage { throw [System.InvalidOperationException]::new('validator crashed') }"
+
+        $result = Invoke-LatestRestoreEntryCase -ProjectRoot $projectRoot -CaseRoot $TestDrive -Overrides $overrides
+
+        $result.ExitCode | Should -Be 1 -Because $result.Output
     }
 }

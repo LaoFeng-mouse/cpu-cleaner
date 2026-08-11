@@ -1581,39 +1581,84 @@ function Invoke-ValidatedRestoreManifest($Manifest, $BackupDir) {
     }
 }
 
-function Get-TrustedRestorePackage($BackupDir) {
-    $resolvedBackupDir = Assert-TrustedBackupPackagePath $BackupDir
-    $manifestFile = Join-Path $resolvedBackupDir 'manifest.json'
-    Assert-TrustedBackupPathAcl -Path $manifestFile -RequireProtected $true
-    $manifest = @(Read-BackupManifestEntries $manifestFile)
-    if ($manifest.Count -eq 0) { throw '可信备份清单为空' }
+$script:RestoreResolutionExceptionKindKey = 'MouseCleaner.RestoreResolutionKind'
 
-    $plans = @()
-    try {
-        foreach ($entry in $manifest) {
-            $plans += Get-RestorePlan -Manifest $entry -BackupDir $resolvedBackupDir
-        }
-    } finally {
-        foreach ($plan in $plans) { Close-BackupArtifact $plan.Artifact }
+function New-RestoreResolutionException {
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('CandidateRejected','NoTrustedBackup')][string]$Kind,
+        [Parameter(Mandatory=$true)][string]$Message,
+        [System.Exception]$InnerException = $null
+    )
+    $exception = if ($Kind -ceq 'CandidateRejected') {
+        New-Object System.IO.InvalidDataException($Message, $InnerException)
+    } else {
+        New-Object System.IO.FileNotFoundException($Message, $InnerException)
     }
+    $exception.Data[$script:RestoreResolutionExceptionKindKey] = $Kind
+    return $exception
+}
 
-    return [pscustomobject]@{
-        BackupDir = $resolvedBackupDir
-        Manifest = $manifest
+function New-RestoreCandidateRejectedException([string]$Message, [System.Exception]$InnerException = $null) {
+    return New-RestoreResolutionException -Kind 'CandidateRejected' -Message $Message -InnerException $InnerException
+}
+
+function New-RestoreNoTrustedBackupException([string]$Message) {
+    return New-RestoreResolutionException -Kind 'NoTrustedBackup' -Message $Message
+}
+
+function Test-RestoreResolutionExceptionKind($Exception, [string]$Kind) {
+    if ($null -eq $Exception -or $Exception.Data -isnot [System.Collections.IDictionary]) { return $false }
+    return [string]::Equals(
+        [string]$Exception.Data[$script:RestoreResolutionExceptionKindKey],
+        $Kind,
+        [System.StringComparison]::Ordinal
+    )
+}
+
+function Get-TrustedRestorePackage($BackupDir) {
+    try {
+        $resolvedBackupDir = Assert-TrustedBackupPackagePath $BackupDir
+        $manifestFile = Join-Path $resolvedBackupDir 'manifest.json'
+        Assert-TrustedBackupPathAcl -Path $manifestFile -RequireProtected $true
+        $manifest = @(Read-BackupManifestEntries $manifestFile)
+        if ($manifest.Count -eq 0) { throw '可信备份清单为空' }
+
+        $plans = @()
+        try {
+            foreach ($entry in $manifest) {
+                $plans += Get-RestorePlan -Manifest $entry -BackupDir $resolvedBackupDir
+            }
+        } finally {
+            foreach ($plan in $plans) { Close-BackupArtifact $plan.Artifact }
+        }
+
+        return [pscustomobject]@{
+            BackupDir = $resolvedBackupDir
+            Manifest = $manifest
+        }
+    } catch {
+        if (Test-RestoreResolutionExceptionKind -Exception $_.Exception -Kind 'CandidateRejected') { throw }
+        if ($_.Exception -is [System.Management.Automation.RuntimeException]) {
+            throw (New-RestoreCandidateRejectedException -Message $_.Exception.Message -InnerException $_.Exception)
+        }
+        throw
     }
 }
 
 function Resolve-LatestTrustedRestorePackage {
     $secureRoot = Get-SecureBackupRoot
-    if (-not [System.IO.Directory]::Exists($secureRoot)) { throw '没有可用的可信备份' }
+    if (-not [System.IO.Directory]::Exists($secureRoot)) { throw (New-RestoreNoTrustedBackupException '没有可用的可信备份') }
     Assert-TrustedBackupPathAcl -Path $secureRoot -RequireProtected $true
     $candidates = @(Get-ChildItem -LiteralPath $secureRoot -Directory -ErrorAction Stop |
         Where-Object { $_.Name -cmatch '^\d{8}_\d{6}$' } |
         Sort-Object Name -Descending)
     foreach ($candidate in $candidates) {
-        try { return Get-TrustedRestorePackage -BackupDir $candidate.FullName } catch { continue }
+        try { return Get-TrustedRestorePackage -BackupDir $candidate.FullName } catch {
+            if (Test-RestoreResolutionExceptionKind -Exception $_.Exception -Kind 'CandidateRejected') { continue }
+            throw
+        }
     }
-    throw '没有通过 owner、DACL、manifest、哈希和身份验证的可信备份'
+    throw (New-RestoreNoTrustedBackupException '没有通过 owner、DACL、manifest、哈希和身份验证的可信备份')
 }
 
 function Invoke-Clean {
@@ -1851,8 +1896,9 @@ function Invoke-Restore {
         Write-Host '错误: restore 模式需要管理员权限。' -ForegroundColor Red
         exit 1
     }
+    $latestRequested = ($BackupDir -ceq 'latest')
     try {
-        if ($BackupDir -ceq 'latest') {
+        if ($latestRequested) {
             $package = Resolve-LatestTrustedRestorePackage
         } else {
             $resolvedBackupDir = Resolve-TrustedRestoreBackupDirectory -RequestedPath $BackupDir -LegacyRoot $script:BackupRoot
@@ -1862,7 +1908,7 @@ function Invoke-Restore {
         $manifest = @($package.Manifest)
     } catch {
         Write-Host ('备份包信任验证失败，未执行任何系统修改: ' + $_.Exception.Message) -ForegroundColor Red
-        if ($BackupDir -ceq 'latest') { exit 3 }
+        if ($latestRequested -and (Test-RestoreResolutionExceptionKind -Exception $_.Exception -Kind 'NoTrustedBackup')) { exit 3 }
         exit 1
     }
     Write-Step "从备份恢复: $BackupDir"
