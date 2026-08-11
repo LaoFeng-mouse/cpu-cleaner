@@ -346,4 +346,53 @@ Describe '恢复逻辑' {
         { Read-BackupManifestEntries $manifestFile } | Should -Throw '*重复*'
         Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
     }
+
+    It '服务原状态 Running 时 sc start 非零不得报告 success' {
+        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ShouldStart=$true;HasDelayed=$false;DelayedAutoStart=0}
+        Mock Invoke-ServiceControlCommand {
+            if ($Arguments[0] -eq 'start') { return 5 }
+            return 0
+        }
+        Mock Get-Service { [pscustomobject]@{StartType='Automatic';Status='Running'} }
+
+        $result = Invoke-RestorePlanAction -Plan $plan
+
+        $result.success | Should -BeFalse
+        $result.reason | Should -Match 'sc start.*exit=5'
+    }
+
+    It '服务原状态 Running 但最终仍 Stopped 时不得报告 success' {
+        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ShouldStart=$true;HasDelayed=$false;DelayedAutoStart=0}
+        Mock Invoke-ServiceControlCommand { return 0 }
+        Mock Get-Service { [pscustomobject]@{StartType='Automatic';Status='Stopped'} }
+
+        $result = Invoke-RestorePlanAction -Plan $plan
+
+        $result.success | Should -BeFalse
+        $result.reason | Should -Match '运行状态.*Stopped.*Running'
+    }
+
+    It '服务 DelayedAutostart mutation 后回读不一致不得报告 success' {
+        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ShouldStart=$false;HasDelayed=$true;DelayedAutoStart=1}
+        Mock Invoke-ServiceControlCommand { return 0 }
+        Mock New-ItemProperty {}
+        Mock Get-Service { [pscustomobject]@{StartType='Automatic';Status='Stopped'} }
+        Mock Get-ItemProperty { [pscustomobject]@{DelayedAutostart=0} }
+
+        $result = Invoke-RestorePlanAction -Plan $plan
+
+        $result.success | Should -BeFalse
+        $result.reason | Should -Match 'DelayedAutostart.*0.*1'
+    }
+
+    It '服务原状态非 Running 但最终 Running 时不得报告 success' {
+        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='demand';ShouldStart=$false;HasDelayed=$false;DelayedAutoStart=0}
+        Mock Invoke-ServiceControlCommand { return 0 }
+        Mock Get-Service { [pscustomobject]@{StartType='Manual';Status='Running'} }
+
+        $result = Invoke-RestorePlanAction -Plan $plan
+
+        $result.success | Should -BeFalse
+        $result.reason | Should -Match '运行状态.*Running.*非 Running'
+    }
 }

@@ -1456,17 +1456,48 @@ function Get-RestorePlan {
     }
 }
 
+function Invoke-ServiceControlCommand([string[]]$Arguments) {
+    if ($null -eq $Arguments -or $Arguments.Count -eq 0) { throw 'sc.exe 参数为空' }
+    & sc.exe @Arguments | Out-Null
+    return [int]$LASTEXITCODE
+}
+
 function Invoke-RestorePlanAction($Plan) {
     switch -CaseSensitive ($Plan.Type) {
         'service' {
-            sc.exe config $Plan.Name start= $Plan.StartType | Out-Null
-            $after = Get-Service -Name $Plan.Name -ErrorAction SilentlyContinue
-            $success = $after -and (Convert-StartTypeToSc $after.StartType.ToString()) -eq $Plan.StartType
-            if ($Plan.HasDelayed) {
-                New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($Plan.Name)" -Name DelayedAutostart -PropertyType DWord -Value $Plan.DelayedAutoStart -Force -ErrorAction Stop | Out-Null
+            $configExit = Invoke-ServiceControlCommand -Arguments @('config', $Plan.Name, 'start=', $Plan.StartType)
+            if ($configExit -ne 0) { return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason="sc config 失败 (exit=$configExit)"} }
+            try {
+                if ($Plan.HasDelayed) {
+                    New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($Plan.Name)" -Name DelayedAutostart -PropertyType DWord -Value $Plan.DelayedAutoStart -Force -ErrorAction Stop | Out-Null
+                }
+            } catch { return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason=('DelayedAutostart 写入失败: ' + $_.Exception.Message)} }
+            if ($Plan.ShouldStart) {
+                $startExit = Invoke-ServiceControlCommand -Arguments @('start', $Plan.Name)
+                if ($startExit -ne 0) { return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason="sc start 失败 (exit=$startExit)"} }
             }
-            if ($Plan.ShouldStart) { sc.exe start $Plan.Name | Out-Null }
-            return [pscustomobject]@{ success=[bool]$success; type='service'; name=$Plan.Name }
+
+            $after = Get-Service -Name $Plan.Name -ErrorAction SilentlyContinue
+            if (-not $after) { return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason='服务最终回读不存在'} }
+            $actualStartType = Convert-StartTypeToSc $after.StartType.ToString()
+            if ($actualStartType -cne $Plan.StartType) {
+                return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason="StartType 回读不一致: actual=$actualStartType expected=$($Plan.StartType)"}
+            }
+            if ($Plan.HasDelayed) {
+                try { $actualDelayed = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$($Plan.Name)" -Name DelayedAutostart -ErrorAction Stop).DelayedAutostart }
+                catch { return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason=('DelayedAutostart 回读失败: ' + $_.Exception.Message)} }
+                if (-not (Test-StrictInteger $actualDelayed) -or [int64]$actualDelayed -ne [int64]$Plan.DelayedAutoStart) {
+                    return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason="DelayedAutostart 回读不一致: actual=$actualDelayed expected=$($Plan.DelayedAutoStart)"}
+                }
+            }
+            $actualStatus = $after.Status.ToString()
+            if ($Plan.ShouldStart -and $actualStatus -cne 'Running') {
+                return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason="运行状态回读不一致: actual=$actualStatus expected=Running"}
+            }
+            if (-not $Plan.ShouldStart -and $actualStatus -ceq 'Running') {
+                return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason='运行状态回读不一致: actual=Running expected=非 Running'}
+            }
+            return [pscustomobject]@{success=$true;type='service';name=$Plan.Name;reason='服务启动类型、延迟启动和运行状态回读一致'}
         }
         'autostart' {
             if ($Plan.Format -eq 'single_value') { Restore-AutostartValue $Plan.Info }
@@ -1507,7 +1538,8 @@ function Invoke-ValidatedRestoreManifest($Manifest, $BackupDir) {
                 $actionResult = Invoke-RestorePlanAction -Plan $plan
                 if ($null -eq $actionResult -or $actionResult.success -isnot [bool]) { throw '恢复动作未返回明确 Boolean 结果' }
                 $status = if ($actionResult.success) { 'success' } else { 'failed' }
-                $results += [pscustomobject]@{ success=$actionResult.success; status=$status; type=$actionResult.type; name=$actionResult.name; reason=$(if ($actionResult.success) { '' } else { '恢复后回读验证失败' }) }
+                $reason = if ($actionResult.PSObject.Properties.Name -contains 'reason') { [string]$actionResult.reason } elseif ($actionResult.success) { '' } else { '恢复后回读验证失败' }
+                $results += [pscustomobject]@{ success=$actionResult.success; status=$status; type=$actionResult.type; name=$actionResult.name; reason=$reason }
             } catch {
                 $results += [pscustomobject]@{ success=$false; status='failed'; type=$plan.Type; name=$plan.Name; reason=$_.Exception.Message }
             }
