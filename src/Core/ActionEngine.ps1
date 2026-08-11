@@ -789,10 +789,20 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             ($h.action -in $script:DangerousActions)
         $hasNarrowEvidence = Test-HitMatcherEvidenceShape $h
         $hasBroadEvidence = Test-HitMatcherEvidenceShape $h -AllowedMatchTypes @('contains','regex')
+        $healthKey = if ($h.hit_type -is [string]) {
+            switch -CaseSensitive ($h.hit_type) {
+                'service' { 'services' }
+                'task' { 'tasks' }
+                default { '' }
+            }
+        } else { '' }
+        $categoryComplete = [string]::IsNullOrEmpty($healthKey) -or
+            ($ScanHealth -and [string]$ScanHealth.$healthKey -ceq 'complete')
         $executable = $actionAllowed -and
             $safeAllowed -and
             $testedAllowed -and
-            $hasNarrowEvidence
+            $hasNarrowEvidence -and
+            $categoryComplete
 
         # action / observation 分开去重, 防止宽匹配观察压制同目标的窄匹配动作
         $dedupeKey = Get-PendingIdentityKey $h
@@ -805,6 +815,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             $obsReason = if ($h.action -eq 'none' -or $h.action -eq 'investigate') { '动作仅观察/不处理' }
                 elseif (-not $safeAllowed) { 'safe=false 或类型无效, 不允许自动处理' }
                 elseif (-not $testedAllowed) { '未实测 (tested=false 或类型无效), 仅观察' }
+                elseif (-not $categoryComplete) { '扫描信息不完整，禁止自动处理' }
                 elseif ($actionAllowed -and $hasBroadEvidence) { '实际命中为宽匹配 (contains/regex)，禁止自动处理' }
                 elseif ($actionAllowed -and -not $hasNarrowEvidence) { '匹配来源缺失或无效，禁止自动处理' }
                 else { '动作不允许自动处理, 仅观察' }

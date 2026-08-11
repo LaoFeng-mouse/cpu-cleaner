@@ -214,7 +214,6 @@ function Get-ServicesInfo {
         }
     } catch {
         $cimMessage = $_.Exception.Message
-        Set-ScanHealthDegraded services
         Add-ScanWarning ('CIM 服务信息不可用，已使用 Get-Service 兼容采集: ' + $cimMessage)
         try {
             $svcs = @(Get-Service -ErrorAction Stop | ForEach-Object {
@@ -237,7 +236,9 @@ function Get-ServicesInfo {
             if ($invalidFallbackServices.Count -gt 0) {
                 throw 'Get-Service 返回不完整的服务身份或状态。'
             }
+            $script:ScanHealth['services'] = 'complete'
         } catch {
+            Set-ScanHealthDegraded services
             throw ('无法读取系统服务；CIM 失败: {0}; Get-Service 失败: {1}' -f $cimMessage, $_.Exception.Message)
         }
     }

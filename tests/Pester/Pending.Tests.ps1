@@ -496,6 +496,51 @@ Invoke-Clean
         $p.scan_health.system_info | Should -Be 'degraded'
         @($p.scan_warnings).Count | Should -Be 1
     }
+    It '服务采集降级时精确危险动作只进入观察' {
+        $hit = [pscustomobject]@{
+            id='health-service'; vendor='T'; name_cn='Service'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'
+            service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
+            safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'
+        }
+        $health = [pscustomobject]@{ system_info='complete'; services='degraded'; tasks='complete' }
+
+        Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth $health -ScanWarnings @('service incomplete')
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].action | Should -BeExactly 'disable_service'
+        $p.observations[0].obs_reason | Should -Match '扫描信息不完整'
+    }
+    It '任务采集不是 complete 时精确危险动作只进入观察' {
+        $hit = [pscustomobject]@{
+            id='health-task'; vendor='T'; name_cn='Task'; action='disable_task'; hit_type='task'; detail='\X\T1'; reason_cn='r'
+            service_name=''; autostart_source=''; autostart_name=''; task_path='\X\T1'; process_name=''; process_id=0; process_path=''
+            safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='\X\T1'; matched_type='exact'; matched_field='task_path'
+        }
+        $health = [pscustomobject]@{ system_info='complete'; services='complete'; tasks='unknown' }
+
+        Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth $health -ScanWarnings @('task incomplete')
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].obs_reason | Should -Match '扫描信息不完整'
+    }
+    It 'system_info 降级不阻止健康 services 类别的精确动作' {
+        $hit = [pscustomobject]@{
+            id='health-independent'; vendor='T'; name_cn='Service'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'
+            service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
+            safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'
+        }
+        $health = [pscustomobject]@{ system_info='degraded'; services='complete'; tasks='complete' }
+
+        Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth $health -ScanWarnings @('system info incomplete')
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 1
+        @($p.observations).Count | Should -Be 0
+    }
     It '服务已禁用且停止时不写入 action 或 observation' {
         Mock Get-Service { [pscustomobject]@{ Name='S1'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'S1' }
         $hit = [pscustomobject]@{ id='already'; vendor='T'; name_cn='Already'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }
