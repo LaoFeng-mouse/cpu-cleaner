@@ -1027,6 +1027,122 @@ function Get-ServiceBackupInfo($srvName) {
     }
 }
 
+function Test-ServiceBackupInfo($Info) {
+    if ($null -eq $Info) { return $false }
+    if ($Info.start_type_sc -isnot [string] -or $Info.start_type_sc -cnotin @('auto','demand','disabled','boot','system')) { return $false }
+    if ($Info.start_type_display -isnot [string] -or [string]::IsNullOrWhiteSpace($Info.start_type_display)) { return $false }
+    if ($Info.status -isnot [string] -or [string]::IsNullOrWhiteSpace($Info.status)) { return $false }
+    return $true
+}
+
+function Invoke-ServiceConfigDisable($ServiceName) {
+    sc.exe config $ServiceName start= disabled | Out-Null
+    sc.exe stop $ServiceName | Out-Null
+}
+
+function Invoke-ServiceDisableAction {
+    param($Pending, $BackupDir, $Tag)
+    $srvName = $Pending.service_name
+    if ($srvName -isnot [string] -or $srvName -cnotmatch '^[A-Za-z0-9_.]+$') {
+        return [pscustomobject]@{ status='skipped'; reason='服务名无效'; backup=''; manifest=$null }
+    }
+    try {
+        $info = Get-ServiceBackupInfo $srvName
+        if (-not (Test-ServiceBackupInfo $info)) { throw '服务原始配置不完整，无法安全备份' }
+        $bak = Backup-RegistryKey "HKLM:\SYSTEM\CurrentControlSet\Services\$srvName" $BackupDir $Tag
+        if (-not (Test-RegistryBackupFile $bak)) { throw '服务注册表备份未通过验证' }
+    } catch {
+        return [pscustomobject]@{ status='failed'; reason=('服务备份失败: ' + $_.Exception.Message); backup=''; manifest=$null }
+    }
+
+    $manifest = [pscustomobject]@{
+        type='service'; name=$srvName; backup=$bak; backup_verified=$true
+        start_type_sc=$info.start_type_sc; start_type_display=$info.start_type_display
+        status=$info.status; delayed_autostart=$info.delayed_autostart
+        verified=$false; note='restore: sc config <name> start= <start_type_sc>'
+    }
+    try {
+        Invoke-ServiceConfigDisable -ServiceName $srvName
+        $after = Get-Service -Name $srvName -ErrorAction SilentlyContinue
+        if ($after -and $after.StartType -eq 'Disabled') {
+            $manifest.verified = $true
+            $note = if ($after.Status -eq 'Running') { '已禁用但进程仍在运行(重启后消失)' } else { '已禁用并停止' }
+            return [pscustomobject]@{ status='success'; reason=$note; backup=$bak; manifest=$manifest }
+        }
+        $actual = if ($after) { $after.StartType.ToString() } else { '服务不存在' }
+        return [pscustomobject]@{ status='failed'; reason="当前 StartType=$actual"; backup=$bak; manifest=$manifest }
+    } catch {
+        return [pscustomobject]@{ status='failed'; reason=('服务修改或验证失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+    }
+}
+
+function Write-TaskXmlBackup($Xml, $BackupDir, $Tag) {
+    if ($Xml -isnot [string] -or [string]::IsNullOrWhiteSpace($Xml)) { throw '计划任务 XML 为空' }
+    try { [xml]$parsed = $Xml } catch { throw ('计划任务 XML 无效: ' + $_.Exception.Message) }
+    if ($null -eq $parsed.DocumentElement -or $parsed.DocumentElement.LocalName -cne 'Task') { throw '计划任务 XML 根节点无效' }
+    $out = Join-Path $BackupDir ("$Tag.xml")
+    [System.IO.File]::WriteAllText($out, $Xml, (New-Object System.Text.UTF8Encoding($true)))
+    if (-not [System.IO.File]::Exists($out) -or (Get-Item -LiteralPath $out).Length -le 0) { throw '计划任务 XML 备份写入失败' }
+    try { [xml]$verified = Get-Content -LiteralPath $out -Raw -Encoding UTF8 -ErrorAction Stop } catch { throw ('计划任务 XML 备份验证失败: ' + $_.Exception.Message) }
+    if ($null -eq $verified.DocumentElement -or $verified.DocumentElement.LocalName -cne 'Task') { throw '计划任务 XML 备份内容无效' }
+    return $out
+}
+
+function Invoke-TaskDisableAction {
+    param($Pending, $BackupDir, $Tag)
+    $taskPath = $Pending.task_path
+    if ($taskPath -isnot [string] -or [string]::IsNullOrWhiteSpace($taskPath)) {
+        return [pscustomobject]@{ status='skipped'; reason='计划任务路径无效'; backup=''; manifest=$null }
+    }
+    $taskName = $taskPath.Split('\')[-1]
+    $taskFolder = if ($taskPath.Length -gt $taskName.Length) { $taskPath.Substring(0, $taskPath.Length - $taskName.Length) } else { '\' }
+    try {
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
+        if (-not $task) { return [pscustomobject]@{ status='skipped'; reason='计划任务不存在'; backup=''; manifest=$null } }
+        $xml = Export-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop
+        $bak = Write-TaskXmlBackup -Xml $xml -BackupDir $BackupDir -Tag $Tag
+    } catch {
+        return [pscustomobject]@{ status='failed'; reason=('计划任务备份失败: ' + $_.Exception.Message); backup=''; manifest=$null }
+    }
+
+    $manifest = [pscustomobject]@{
+        type='task'; name=$taskPath; backup=$bak; backup_verified=$true; verified=$false
+        note='restore: Register-ScheduledTask -Xml <backup> -TaskName <name> -TaskPath <path> -Force'
+    }
+    try {
+        Disable-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop | Out-Null
+        $taskAfter = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
+        if (-not $taskAfter -or $taskAfter.State -eq 'Disabled') {
+            $manifest.verified = $true
+            return [pscustomobject]@{ status='success'; reason='计划任务已禁用'; backup=$bak; manifest=$manifest }
+        }
+        return [pscustomobject]@{ status='failed'; reason=("任务状态=$($taskAfter.State)"); backup=$bak; manifest=$manifest }
+    } catch {
+        return [pscustomobject]@{ status='failed'; reason=('计划任务禁用或验证失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+    }
+}
+
+function Get-ServiceRestorePlan($Manifest) {
+    if ($null -eq $Manifest) { throw '服务恢复 manifest 为空' }
+    if ($Manifest.PSObject.Properties.Name -contains 'backup_verified' -and $Manifest.backup_verified -ne $true) {
+        throw '服务恢复 manifest 未绑定验证过的备份'
+    }
+    $scVal = $null
+    if ($Manifest.PSObject.Properties.Name -contains 'start_type_sc' -and $Manifest.start_type_sc) {
+        $scVal = $Manifest.start_type_sc
+    } elseif ($Manifest.before -match '^\d+$') {
+        $scVal = Convert-NumberToSc $Manifest.before
+    } elseif ($Manifest.before) {
+        $scVal = Convert-StartTypeToSc $Manifest.before
+    } else {
+        $scVal = 'disabled'
+    }
+    if ($scVal -cnotin @('auto','demand','disabled','boot','system')) { throw '服务恢复启动类型无效' }
+    $shouldStart = ($Manifest.status -eq 'Running')
+    if ($Manifest.PSObject.Properties.Name -contains 'restart_after_restore') { $shouldStart = [bool]$Manifest.restart_after_restore }
+    return [pscustomobject]@{ StartType=$scVal; ShouldStart=$shouldStart }
+}
+
 function Invoke-Clean {
     if (-not (Is-Admin)) {
         Write-Host '错误: clean 模式需要管理员权限。请右键以管理员身份运行 PowerShell 再执行。' -ForegroundColor Red
@@ -1132,6 +1248,8 @@ function Invoke-Clean {
 
             # 用户作出最终选择后，在任何备份或系统变更前完整重读并重放保存的 matcher。
             if (-not (Test-SelectedPendingActionAuthorized $p $profiles)) { continue }
+            # 安全顺序不变量：下方分支或其事务 helper 才能调用 Backup-RegistryKey、
+            # sc.exe config、sc.exe stop、Disable-ScheduledTask 等 mutation 原语。
             if (-not $backupDirReady) {
                 New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
                 $backupDirReady = $true
@@ -1139,46 +1257,12 @@ function Invoke-Clean {
 
             switch ($p.action) {
                 'disable_service' {
-                    $srvName = $p.service_name
-                    if ($srvName -and $srvName -match '^[A-Za-z0-9_.]+$') {
-                        $info = Get-ServiceBackupInfo $srvName
-                        if (-not $info) {
-                            Write-Host "  服务不存在: $srvName" -ForegroundColor DarkYellow
-                            $p.status = 'skipped'
-                            continue
-                        }
-                        $bak = Backup-RegistryKey "HKLM:\SYSTEM\CurrentControlSet\Services\$srvName" $backupDir $tag
-                        Write-Host "  [sc] config $srvName start= disabled" -ForegroundColor DarkGray
-                        sc.exe config $srvName start= disabled
-                        Write-Host "  [sc] stop $srvName" -ForegroundColor DarkGray
-                        sc.exe stop $srvName
-                        # v1.2: 执行后验证 (重新读取真实状态, 不能"命令执行过=成功")
-                        $after = Get-Service -Name $srvName -ErrorAction SilentlyContinue
-                        if ($after -and $after.StartType -eq 'Disabled') {
-                            $p.status = 'success'
-                            $note = if ($after.Status -eq 'Running') { '已禁用但进程仍在运行(重启后消失)' } else { '已禁用并停止' }
-                            Write-Host "  验证通过: StartType=Disabled, $note" -ForegroundColor Green
-                            $manifest += [pscustomobject]@{
-                                type='service'; name=$srvName; backup=$bak
-                                start_type_sc=$info.start_type_sc; start_type_display=$info.start_type_display
-                                status=$info.status; delayed_autostart=$info.delayed_autostart
-                                verified=$true; note='restore: sc config <name> start= <start_type_sc>'
-                            }
-                        } else {
-                            $p.status = 'failed'
-                            $actual = if ($after) { $after.StartType.ToString() } else { '服务不存在' }
-                            Write-Host "  验证失败: 当前 StartType=$actual (可能被自我保护拦截)" -ForegroundColor Red
-                            $manifest += [pscustomobject]@{
-                                type='service'; name=$srvName; backup=$bak
-                                start_type_sc=$info.start_type_sc; start_type_display=$info.start_type_display
-                                status=$info.status; delayed_autostart=$info.delayed_autostart
-                                verified=$false; note='restore: sc config <name> start= <start_type_sc>'
-                            }
-                        }
-                    } else {
-                        Write-Host "  跳过: 服务名无效 ($srvName)" -ForegroundColor DarkYellow
-                        $p.status = 'skipped'
-                    }
+                    $serviceResult = Invoke-ServiceDisableAction -Pending $p -BackupDir $backupDir -Tag $tag
+                    $p.status = $serviceResult.status
+                    if ($null -ne $serviceResult.manifest) { $manifest += $serviceResult.manifest }
+                    if ($serviceResult.status -eq 'success') { Write-Host "  验证通过: $($serviceResult.reason)" -ForegroundColor Green }
+                    elseif ($serviceResult.status -eq 'skipped') { Write-Host "  跳过: $($serviceResult.reason)" -ForegroundColor DarkYellow }
+                    else { Write-Host "  失败: $($serviceResult.reason)" -ForegroundColor Red }
                 }
                 'remove_autostart' {
                     $rp = $p.autostart_source
@@ -1195,32 +1279,12 @@ function Invoke-Clean {
                     }
                 }
                 'disable_task' {
-                    $taskPath = $p.task_path
-                    if ($taskPath) {
-                        $taskName = $taskPath.Split('\')[-1]
-                        $taskFolder = if ($taskPath.Length -gt $taskName.Length) { $taskPath.Substring(0, $taskPath.Length - $taskName.Length) } else { '\' }
-                        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-                        if ($task) {
-                            $xml = Export-ScheduledTask -TaskName $taskName -TaskPath $taskFolder
-                            $bak = Join-Path $backupDir "$tag.xml"
-                            $xml | Out-File $bak -Encoding utf8
-                            Disable-ScheduledTask -TaskName $taskName -TaskPath $taskFolder | Out-Null
-                            # v1.2: 执行后验证
-                            $taskAfter = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-                            if (-not $taskAfter -or $taskAfter.State -eq 'Disabled') {
-                                $p.status = 'success'
-                                Write-Host "  验证通过: 已禁用计划任务: $taskPath (备份: $bak)" -ForegroundColor Green
-                                $manifest += [pscustomobject]@{ type='task'; name=$taskPath; backup=$bak; verified=$true; note='restore: Register-ScheduledTask -Xml <backup> -TaskName <name> -TaskPath <path> -Force' }
-                            } else {
-                                $p.status = 'failed'
-                                Write-Host "  验证失败: 任务状态=$($taskAfter.State)" -ForegroundColor Red
-                                $manifest += [pscustomobject]@{ type='task'; name=$taskPath; backup=$bak; verified=$false; note='restore: Register-ScheduledTask -Xml <backup> -TaskName <name> -TaskPath <path> -Force' }
-                            }
-                        } else {
-                            Write-Host "  跳过: 计划任务不存在 ($taskPath)" -ForegroundColor DarkYellow
-                            $p.status = 'skipped'
-                        }
-                    }
+                    $taskResult = Invoke-TaskDisableAction -Pending $p -BackupDir $backupDir -Tag $tag
+                    $p.status = $taskResult.status
+                    if ($null -ne $taskResult.manifest) { $manifest += $taskResult.manifest }
+                    if ($taskResult.status -eq 'success') { Write-Host "  验证通过: 已禁用计划任务: $($p.task_path) (备份: $($taskResult.backup))" -ForegroundColor Green }
+                    elseif ($taskResult.status -eq 'skipped') { Write-Host "  跳过: $($taskResult.reason)" -ForegroundColor DarkYellow }
+                    else { Write-Host "  失败: $($taskResult.reason)" -ForegroundColor Red }
                 }
                 'uninstall' {
                     Write-Host '  uninstall 动作需要人工确认, 请到 设置 -> 应用 -> 已安装的应用 手动卸载。' -ForegroundColor Yellow
@@ -1334,16 +1398,8 @@ function Invoke-Restore {
             'service' {
                 # v1.2: 启动类型映射修复 (Automatic→auto, Manual→demand, Disabled→disabled)
                 # 兼容三种 manifest 格式: 新格式 start_type_sc / 旧格式 before(字符串枚举) / 更旧 before(数字枚举)
-                $scVal = $null
-                if ($m.PSObject.Properties.Name -contains 'start_type_sc' -and $m.start_type_sc) {
-                    $scVal = $m.start_type_sc
-                } elseif ($m.before -match '^\d+$') {
-                    $scVal = Convert-NumberToSc $m.before
-                } elseif ($m.before) {
-                    $scVal = Convert-StartTypeToSc $m.before
-                } else {
-                    $scVal = 'disabled'
-                }
+                $restorePlan = Get-ServiceRestorePlan $m
+                $scVal = $restorePlan.StartType
                 Write-Host "  恢复服务 $($m.name): sc config start= $scVal" -ForegroundColor Yellow
                 sc.exe config $m.name start= $scVal
 
@@ -1369,11 +1425,10 @@ function Invoke-Restore {
                     }
                 }
 
-                # 原运行状态提示 (v1.2: 默认不自动启动, 保守; 记录原状态供用户决策)
+                # 恢复原运行状态；旧 manifest 可用 restart_after_restore 显式覆盖。
                 $origStatus = if ($m.PSObject.Properties.Name -contains 'status') { $m.status } else { '未知' }
-                $restartAfter = if ($m.PSObject.Properties.Name -contains 'restart_after_restore') { $m.restart_after_restore } else { $false }
                 if ($origStatus -eq 'Running') {
-                    if ($restartAfter) {
+                    if ($restorePlan.ShouldStart) {
                         Write-Host "  原状态为 Running, 按记录重新启动服务..." -ForegroundColor DarkGray
                         sc.exe start $m.name
                     } else {

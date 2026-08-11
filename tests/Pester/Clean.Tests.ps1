@@ -42,4 +42,89 @@ Describe '清理动作逻辑' {
         Get-ActionFor $h 'process' | Should -Be 'none'
         (Get-ActionKeys $h) -contains 'service' | Should -Be $true
     }
+
+    It 'reg export 返回非零时拒绝把注册表备份当作成功' {
+        Mock reg { $global:LASTEXITCODE = 1 }
+
+        { Backup-RegistryKey 'HKLM:\Software\Vendor' $TestDrive 'failed-export' } |
+            Should -Throw '*注册表备份*'
+    }
+
+    It 'reg export 未生成可恢复文件时拒绝把注册表备份当作成功' {
+        Mock reg { $global:LASTEXITCODE = 0 }
+
+        { Backup-RegistryKey 'HKLM:\Software\Vendor' $TestDrive 'missing-export' } |
+            Should -Throw '*注册表备份*'
+    }
+
+    It 'reg export 生成无效内容时拒绝把注册表备份当作成功' {
+        Mock reg {
+            param($operation, $keyPath, $outputPath)
+            [System.IO.File]::WriteAllText($outputPath, 'not a registry export')
+            $global:LASTEXITCODE = 0
+        }
+
+        { Backup-RegistryKey 'HKLM:\Software\Vendor' $TestDrive 'invalid-export' } |
+            Should -Throw '*注册表备份*'
+    }
+
+    It 'reg export 只有文件头而没有键块时拒绝把它当作可恢复备份' {
+        Mock reg {
+            param($operation, $keyPath, $outputPath)
+            [System.IO.File]::WriteAllText($outputPath, "Windows Registry Editor Version 5.00`r`n")
+            $global:LASTEXITCODE = 0
+        }
+
+        { Backup-RegistryKey 'HKLM:\Software\Vendor' $TestDrive 'header-only-export' } |
+            Should -Throw '*注册表备份*'
+    }
+
+    It '服务备份创建失败时配置和停止调用均为 0' {
+        Mock Get-ServiceBackupInfo {
+            [pscustomobject]@{ start_type_sc='auto'; start_type_display='Automatic'; status='Running'; delayed_autostart=0 }
+        }
+        Mock Backup-RegistryKey { throw 'backup failed' }
+        Mock Invoke-ServiceConfigDisable {}
+
+        $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'svc'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Invoke-ServiceConfigDisable -Times 0 -Exactly
+    }
+
+    It '服务原始配置不完整时不创建备份也不修改服务' {
+        Mock Get-ServiceBackupInfo {
+            [pscustomobject]@{ start_type_sc=''; start_type_display=''; status='Running'; delayed_autostart=0 }
+        }
+        Mock Backup-RegistryKey { throw 'must not back up invalid service state' }
+        Mock Invoke-ServiceConfigDisable {}
+
+        $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'svc-invalid'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Backup-RegistryKey -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceConfigDisable -Times 0 -Exactly
+    }
+
+    It '计划任务 XML 备份无法验证时禁用调用为 0' {
+        Mock Get-ScheduledTask { [pscustomobject]@{State='Ready'} }
+        Mock Export-ScheduledTask { '' }
+        Mock Disable-ScheduledTask {}
+
+        $result = Invoke-TaskDisableAction -Pending ([pscustomobject]@{task_path='\Vendor\Task'}) -BackupDir $TestDrive -Tag 'task'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Disable-ScheduledTask -Times 0 -Exactly
+    }
+
+    It '计划任务导出不是有效 XML 时禁用调用为 0' {
+        Mock Get-ScheduledTask { [pscustomobject]@{State='Ready'} }
+        Mock Export-ScheduledTask { 'not xml' }
+        Mock Disable-ScheduledTask {}
+
+        $result = Invoke-TaskDisableAction -Pending ([pscustomobject]@{task_path='\Vendor\Task'}) -BackupDir $TestDrive -Tag 'task-invalid'
+
+        $result.status | Should -BeExactly 'failed'
+        Should -Invoke Disable-ScheduledTask -Times 0 -Exactly
+    }
 }

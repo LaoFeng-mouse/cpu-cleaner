@@ -1,8 +1,26 @@
 ﻿# 备份恢复 (v1.7.0 拆分): 单值备份/恢复
+function Test-RegistryBackupFile($Path) {
+    if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path) -or
+        -not [System.IO.File]::Exists($Path) -or (Get-Item -LiteralPath $Path).Length -le 0) {
+        return $false
+    }
+    try {
+        $content = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        return ($content -match '^(Windows Registry Editor Version 5\.00|REGEDIT4)(\r?\n)') -and
+            ($content -match '(?m)^\[HKEY_[A-Z_]+\\[^\]]+\]\s*$')
+    } catch { return $false }
+}
+
 function Backup-RegistryKey($keyPath, $backupDir, $tag) {
     $regPath = $keyPath -replace '^HKLM:', 'HKLM' -replace '^HKCU:', 'HKCU'
     $out = Join-Path $backupDir ("$tag.reg")
+    if ([System.IO.File]::Exists($out)) { [System.IO.File]::Delete($out) }
     reg export $regPath $out /y 2>$null | Out-Null
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) { throw "注册表备份导出失败 (exit=$exitCode): $regPath" }
+    if (-not (Test-RegistryBackupFile $out)) {
+        throw "注册表备份文件格式无效: $out"
+    }
     return $out
 }
 

@@ -40,4 +40,25 @@ Describe '恢复逻辑' {
         $manifest = $null
         ($null -eq $manifest -or @($manifest).Count -eq 0) | Should -Be $true
     }
+
+    It '服务恢复计划还原原启动类型和运行状态' {
+        $manifest = [pscustomobject]@{
+            type='service'; name='ExactSvc'; backup='C:\backup\svc.reg'
+            start_type_sc='auto'; status='Running'; delayed_autostart=0; backup_verified=$true
+        }
+
+        $plan = Get-ServiceRestorePlan $manifest
+
+        $plan.StartType | Should -BeExactly 'auto'
+        $plan.ShouldStart | Should -BeTrue
+    }
+
+    It '新服务 manifest 未标记验证过的备份时拒绝生成恢复计划' {
+        $manifest = [pscustomobject]@{
+            type='service'; name='ExactSvc'; backup='C:\backup\svc.reg'
+            start_type_sc='auto'; status='Running'; delayed_autostart=0; backup_verified=$false
+        }
+
+        { Get-ServiceRestorePlan $manifest } | Should -Throw '*备份*'
+    }
 }
