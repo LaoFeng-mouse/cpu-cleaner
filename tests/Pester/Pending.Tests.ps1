@@ -624,7 +624,7 @@ Invoke-Clean
         }
 
         Save-PendingActions -Hits @() -Suspicious @($s)
-        $pending = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $pending = ConvertFrom-StrictPendingJson (Get-Content $script:PendingFile -Raw -Encoding UTF8)
 
         $pending.suspicious[0].status | Should -BeExactly 'pending'
         $pending.suspicious[0].StartTimeUtc | Should -BeExactly $s.StartTimeUtc

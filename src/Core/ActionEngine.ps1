@@ -454,6 +454,10 @@ function Test-JsonPropertyNamesUnique($Json) {
 function ConvertFrom-StrictPendingJson($Json) {
     if ($Json -isnot [string]) { throw 'pending JSON 必须是字符串' }
     Assert-JsonPropertyNamesUnique $Json
+    $convertCommand = Get-Command ConvertFrom-Json -ErrorAction Stop
+    if ($convertCommand.Parameters.ContainsKey('DateKind')) {
+        return $Json | ConvertFrom-Json -DateKind String -ErrorAction Stop
+    }
     return $Json | ConvertFrom-Json -ErrorAction Stop
 }
 
@@ -962,8 +966,10 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             if ($svc -and $svc.StartType -eq 'Disabled' -and $svc.Status -eq 'Stopped') { $skip = $true }
         }
         elseif ($h.action -eq 'disable_task' -and $h.task_path) {
-            $taskName = $h.task_path.Split('\\')[-1]
-            $taskFolder = if ($h.task_path.Length -gt $taskName.Length) { $h.task_path.Substring(0, $h.task_path.Length - $taskName.Length) } else { '\\' }
+            $separator = $h.task_path.LastIndexOf('\')
+            if ($separator -lt 0 -or $separator -ge ($h.task_path.Length - 1)) { continue }
+            $taskName = $h.task_path.Substring($separator + 1)
+            $taskFolder = if ($separator -eq 0) { '\' } else { $h.task_path.Substring(0, $separator + 1) }
             $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
             if ($task -and $task.State -eq 'Disabled') { $skip = $true }
         }
