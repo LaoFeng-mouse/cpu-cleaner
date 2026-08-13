@@ -7,16 +7,17 @@
 #    powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode scan -ReportPath D:\报告.html
 #    (管理员) powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode clean
 #    (管理员) powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode restore -BackupDir D:\CPU后台整理工具\backups\20260809_120000
+#    powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode stop_process -PendingFileArg <subset.json> -PendingSha256Arg <sha256>
 #    powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update    (需先配置 ProfileUrl)
 #
 #  安全设计:
 #    - scan 完全只读
-#    - clean 必须先 scan, 逐条确认后才执行; 结束进程必须显式输入 PID, 绝不自动杀
+#    - clean 必须先 scan, 逐条确认后才执行; 结束进程使用独立哈希绑定清单并重验完整进程身份
 #    - 每个处理动作自动备份到 backups\, restore 一键恢复
 # ============================================================
 
 param(
-    [ValidateSet('scan','clean','restore','update')]
+    [ValidateSet('scan','clean','restore','update','stop_process')]
     [string]$Mode = 'scan',
     [string]$ReportPath = '',
     [string]$BackupDir = '',
@@ -93,5 +94,12 @@ switch ($Mode) {
         Invoke-Clean
     }
     'restore' { Invoke-Restore }
+    'stop_process' {
+        $result = Invoke-StopProcessPending -Path $PendingFileArg -ExpectedSha256 $PendingSha256Arg
+        foreach ($row in @($result.Results)) {
+            Write-Host ("PID {0} {1}: {2}" -f $row.PID, $row.status, $row.result_reason)
+        }
+        exit ([int]$result.ExitCode)
+    }
     'update' { Update-Profiles }
 }

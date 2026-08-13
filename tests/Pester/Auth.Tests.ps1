@@ -521,7 +521,7 @@ Describe '执行前最终授权防 TOCTOU' {
         $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
         $loop = $source.IndexOf('foreach ($idx in $indexes)')
         $guard = $source.IndexOf('Test-SelectedPendingActionAuthorized', $loop)
-        $mutations = @('New-Item -ItemType Directory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Invoke-LiteralAutostartRemoval', 'Disable-ScheduledTask', 'Stop-Process') |
+        $mutations = @('Initialize-ProtectedBackupDirectory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Invoke-LiteralAutostartRemoval', 'Disable-ScheduledTask') |
             ForEach-Object { $source.IndexOf($_, $loop) }
 
         $loop | Should -BeGreaterOrEqual 0
@@ -529,6 +529,62 @@ Describe '执行前最终授权防 TOCTOU' {
         foreach ($mutation in $mutations) {
             $mutation | Should -BeGreaterThan $guard
         }
+    }
+
+    It 'restore 主入口严格按 resolve trusted-package plan-mutation 顺序且可信包 helper 完成 manifest 验证' {
+        $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
+        $start = $source.IndexOf('function Invoke-Restore {')
+        $end = $source.IndexOf('function Update-Profiles {', $start)
+        $body = $source.Substring($start, $end - $start)
+        $resolve = $body.IndexOf('Resolve-TrustedRestoreBackupDirectory')
+        $trustedPackage = $body.IndexOf('Get-TrustedRestorePackage -BackupDir')
+        $execute = $body.IndexOf('Invoke-ValidatedRestoreManifest')
+
+        $resolve | Should -BeGreaterOrEqual 0
+        $trustedPackage | Should -BeGreaterThan $resolve
+        $execute | Should -BeGreaterThan $trustedPackage
+
+        $helperStart = $source.IndexOf('function Get-TrustedRestorePackage')
+        $helperEnd = $source.IndexOf('function Resolve-LatestTrustedRestorePackage', $helperStart)
+        $helperBody = $source.Substring($helperStart, $helperEnd - $helperStart)
+        $packageAcl = $helperBody.IndexOf('Assert-TrustedBackupPackagePath')
+        $join = $helperBody.IndexOf("Join-Path `$resolvedBackupDir 'manifest.json'")
+        $manifestAcl = $helperBody.IndexOf('Assert-TrustedBackupPathAcl')
+        $read = $helperBody.IndexOf('Read-BackupManifestEntries')
+        $plan = $helperBody.IndexOf('Get-RestorePlan')
+        $packageAcl | Should -BeGreaterOrEqual 0
+        $join | Should -BeGreaterThan $packageAcl
+        $manifestAcl | Should -BeGreaterThan $join
+        $read | Should -BeGreaterThan $manifestAcl
+        $plan | Should -BeGreaterThan $read
+
+        $driver = Join-Path $TestDrive 'restore-order-driver.ps1'
+        $orderFile = Join-Path $TestDrive 'restore-order.txt'
+        $projectRootLiteral = $script:Root.Replace("'", "''")
+        $orderFileLiteral = $orderFile.Replace("'", "''")
+        $driverSource = @"
+`$projectRoot = '$projectRootLiteral'
+`$orderFile = '$orderFileLiteral'
+`$src = Get-Content (Join-Path `$projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
+`$idx = `$src.IndexOf("switch (```$Mode)")
+`$defs = `$src.Substring(0, `$idx).Replace('`$script:Root = Split-Path -Parent `$MyInvocation.MyCommand.Path', '`$script:Root = `$projectRoot')
+Invoke-Expression `$defs
+`$BackupDir = 'C:\legacy\20260811_120000'
+`$script:BackupRoot = 'C:\legacy'
+`$script:Order = @()
+function Is-Admin { return `$true }
+function Resolve-TrustedRestoreBackupDirectory { param(`$RequestedPath, `$LegacyRoot); `$script:Order += 'resolve'; return 'C:\trusted\20260811_120000' }
+function Get-TrustedRestorePackage { param(`$BackupDir); if (`$BackupDir -notmatch 'trusted') { throw ('wrong backup dir: ' + `$BackupDir) }; `$script:Order += 'trusted-package'; return [pscustomobject]@{BackupDir=`$BackupDir;Manifest=@([pscustomobject]@{type='process';name='noop';path=''})} }
+function Invoke-ValidatedRestoreManifest { `$script:Order += 'plans-then-pre-mutation'; [System.IO.File]::WriteAllText(`$orderFile, ('ORDER=' + (`$script:Order -join ','))); return [pscustomobject]@{success=`$true} }
+function Write-Step {}
+Invoke-Restore
+"@
+        [System.IO.File]::WriteAllText($driver, $driverSource, [System.Text.UTF8Encoding]::new($false))
+
+        $output = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $driver 2>&1
+
+        $LASTEXITCODE | Should -Be 0 -Because ($output -join "`n")
+        (Get-Content -LiteralPath $orderFile -Raw) | Should -BeExactly 'ORDER=resolve,trusted-package,plans-then-pre-mutation'
     }
 }
 

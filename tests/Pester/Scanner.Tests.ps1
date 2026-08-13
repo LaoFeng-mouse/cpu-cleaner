@@ -58,7 +58,30 @@ Describe '扫描器与评分' {
         $susp = Get-SuspiciousProcesses @()
         @($susp).Count | Should -Be 0
     }
-    It 'CIM 服务采集被拒时降级到 Get-Service 并保留匹配身份' {
+    It '可疑进程保留 PID 名称 路径与 UTC 启动时间' {
+        $top = [pscustomobject]@{
+            PID=4242; Name='suspect'; 'CPU%'=8; MemMB=50
+            Path='C:\Temp\suspect.exe'; StartTimeUtc='2026-08-11T00:00:00.0000000Z'
+        }
+
+        $row = @(Get-SuspiciousProcesses @($top))[0]
+
+        $row.PID | Should -Be 4242
+        $row.Name | Should -BeExactly 'suspect'
+        $row.Path | Should -BeExactly 'C:\Temp\suspect.exe'
+        $row.StartTimeUtc | Should -BeExactly '2026-08-11T00:00:00.0000000Z'
+        $row.CanStop | Should -BeTrue
+        $row.StopBlockReason | Should -BeExactly ''
+    }
+    It '可疑进程身份缺少路径或启动时间时不可停止' {
+        $top = [pscustomobject]@{PID=4242;Name='suspect';'CPU%'=8;MemMB=50;Path='';StartTimeUtc=''}
+
+        $row = @(Get-SuspiciousProcesses @($top))[0]
+
+        $row.CanStop | Should -BeFalse
+        $row.StopBlockReason | Should -Match '身份不完整'
+    }
+    It 'CIM 服务采集被拒时完整 Get-Service fallback 保留匹配身份与可执行健康状态' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
         Mock Get-Service {
             [pscustomobject]@{
@@ -79,13 +102,14 @@ Describe '扫描器与评分' {
         $services[0].TriggerHint | Should -BeFalse
         @($script:ScanWarnings).Count | Should -BeGreaterThan 0
         ($script:ScanWarnings -join "`n") | Should -Match 'CIM'
-        $script:ScanHealth.services | Should -Be 'degraded'
+        $script:ScanHealth.services | Should -BeExactly 'complete'
     }
     It 'CIM 与 Get-Service 都失败时拒绝生成假干净服务列表' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
         Mock Get-Service { throw [System.InvalidOperationException]::new('service fallback denied') }
 
         { Get-ServicesInfo } | Should -Throw '*无法读取系统服务*'
+        $script:ScanHealth.services | Should -Not -BeExactly 'complete'
     }
     It 'CIM 服务对象存在但身份为空时转入 Get-Service 兼容采集' {
         Mock Get-CimInstance { [pscustomobject]@{ Name=''; DisplayName=''; State='Running'; StartMode='Auto'; PathName=''; ProcessId=1 } }
@@ -95,7 +119,7 @@ Describe '扫描器与评分' {
 
         $services.Count | Should -Be 1
         $services[0].Name | Should -Be 'FallbackService'
-        $script:ScanHealth.services | Should -Be 'degraded'
+        $script:ScanHealth.services | Should -BeExactly 'complete'
     }
     It 'CIM 服务名称有效但显示名或状态字段为空时转入兼容采集' {
         Mock Get-CimInstance {
@@ -110,13 +134,46 @@ Describe '扫描器与评分' {
         $services.Count | Should -Be 1
         $services[0].Name | Should -Be 'FallbackService'
         $services[0].DisplayName | Should -Be 'Fallback Service'
-        $script:ScanHealth.services | Should -Be 'degraded'
+        $script:ScanHealth.services | Should -BeExactly 'complete'
     }
     It 'Get-Service 兼容采集返回空身份时拒绝假报服务列表' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
         Mock Get-Service { [pscustomobject]@{ Name=''; DisplayName=''; Status='Running'; StartType='Automatic' } }
 
         { Get-ServicesInfo } | Should -Throw '*无法读取系统服务*'
+        $script:ScanHealth.services | Should -Not -BeExactly 'complete'
+    }
+    It 'Get-Service 兼容采集缺少动作所需状态时失败关闭' {
+        Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
+        Mock Get-Service { [pscustomobject]@{ Name='ExactSvc'; DisplayName='Exact'; Status=''; StartType='Automatic' } }
+
+        { Get-ServicesInfo } | Should -Throw '*不完整*'
+        $script:ScanHealth.services | Should -Not -BeExactly 'complete'
+    }
+    It 'Get-Service 兼容采集拒绝不可恢复的未知 StartMode' {
+        foreach ($invalidStartMode in @('Unknown','DelayedAuto','arbitrary')) {
+            Reset-ScanDiagnostics
+            Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
+            Mock Get-Service {
+                [pscustomobject]@{ Name='ExactSvc'; DisplayName='Exact'; Status='Running'; StartType=$invalidStartMode }
+            }
+
+            { Get-ServicesInfo } | Should -Throw '*不完整*' -Because "StartMode $invalidStartMode cannot be restored safely"
+            $script:ScanHealth.services | Should -Not -BeExactly 'complete'
+        }
+    }
+    It 'Get-Service 兼容采集接受可恢复 StartMode 且大小写不敏感' {
+        foreach ($validStartMode in @('Automatic','manual','DISABLED','Boot','system')) {
+            Reset-ScanDiagnostics
+            Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
+            Mock Get-Service {
+                [pscustomobject]@{ Name='ExactSvc'; DisplayName='Exact'; Status='Running'; StartType=$validStartMode }
+            }
+
+            $services = @(Get-ServicesInfo)
+            $services.Count | Should -Be 1
+            $script:ScanHealth.services | Should -BeExactly 'complete'
+        }
     }
     It 'CIM 系统概况被拒时返回明确的兼容数据而不是空字段' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }

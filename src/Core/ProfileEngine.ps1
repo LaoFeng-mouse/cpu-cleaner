@@ -74,7 +74,12 @@ function Test-DetectMatch($target, $pattern, $Context = $null) {
             $sig = $null
             if ($Context -and $Context.Signature) { $sig = $Context.Signature }
             elseif ($Context -and $Context.Path) { try { $sig = Get-AuthenticodeSignature $Context.Path -ErrorAction SilentlyContinue } catch {} }
-            return $sig -and $sig.SignerCertificate -and ($sig.SignerCertificate.Subject -match $n.match)
+            $certificate = if ($sig) { $sig.SignerCertificate } else { $null }
+            if (-not $certificate) { return $false }
+            $subjectText = [string]$certificate.Subject
+            try { [void][regex]::new($n.match) }
+            catch [System.ArgumentException] { return $false }
+            return ($subjectText -match $n.match)
         }
         'sha256'   {
             $hash = ''
@@ -96,9 +101,23 @@ function Test-ProcessDetectMatch($target, $pattern, $Context = $null) {
     return Test-DetectMatch $normalizedTarget $matchPattern -Context $Context
 }
 
-# 按规则声明顺序和候选字段顺序寻找首个命中，并返回该命中的可审计证据
+function Get-DetectMatchStrength([string]$Type) {
+    switch ($Type) {
+        'exact' { return 0 }
+        'path' { return 1 }
+        'contains' { return 2 }
+        'regex' { return 3 }
+        default { return 4 }
+    }
+}
+
+# 收集真实命中并优先返回最强证据; 同强度保持规则声明和候选字段顺序
 function Find-DetectMatch($Patterns, $Candidates, [switch]$NormalizeProcessName) {
-    foreach ($pattern in @($Patterns)) {
+    $actualMatches = @()
+    $patternList = @($Patterns)
+    $candidateList = @($Candidates)
+    for ($patternIndex = 0; $patternIndex -lt $patternList.Count; $patternIndex++) {
+        $pattern = $patternList[$patternIndex]
         $n = Normalize-DetectItem $pattern
         $processField = ''
         if ($NormalizeProcessName) {
@@ -112,10 +131,12 @@ function Find-DetectMatch($Patterns, $Candidates, [switch]$NormalizeProcessName)
                 'path'      { $processField = 'process_path' }
                 'publisher' { $processField = 'process_path' }
                 'sha256'    { $processField = 'process_path' }
-                default     { continue }
+                default     { $processField = '' }
             }
+            if (-not $processField) { continue }
         }
-        foreach ($candidate in @($Candidates)) {
+        for ($candidateIndex = 0; $candidateIndex -lt $candidateList.Count; $candidateIndex++) {
+            $candidate = $candidateList[$candidateIndex]
             if (-not $candidate) { continue }
             $field = [string]$candidate.field
             if ($NormalizeProcessName -and $field -ne $processField) { continue }
@@ -126,15 +147,24 @@ function Find-DetectMatch($Patterns, $Candidates, [switch]$NormalizeProcessName)
                 $matched = Test-DetectMatch $candidate.value $n -Context $candidate.context
             }
             if ($matched) {
-                return [pscustomobject]@{
+                $actualMatches += [pscustomobject]@{
                     matched_pattern = $n.match
                     matched_type = $n.type
                     matched_field = $field
+                    strength = Get-DetectMatchStrength $n.type
+                    declaration_index = $patternIndex
+                    candidate_index = $candidateIndex
                 }
             }
         }
     }
-    return $null
+    $bestMatch = $actualMatches | Sort-Object -Property strength, declaration_index, candidate_index | Select-Object -First 1
+    if (-not $bestMatch) { return $null }
+    return [pscustomobject]@{
+        matched_pattern = $bestMatch.matched_pattern
+        matched_type = $bestMatch.matched_type
+        matched_field = $bestMatch.matched_field
+    }
 }
 
 # v1.6.0: v2 → v3 迁移 — detect 字符串对象化 + 保留历史 execution 审计字段
