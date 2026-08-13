@@ -617,4 +617,34 @@ Invoke-Clean
         ('success') -in @('pending','failed') | Should -Be $false
         ('manual_required') -in @('pending','failed') | Should -Be $false
     }
+    It 'pending 序列化完整可疑进程身份并设置 pending 状态' {
+        $s = [pscustomobject]@{
+            PID=42; Name='suspect'; 'CPU%'=8; MemMB=50; Path='C:\Temp\suspect.exe'; Reason='temp'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; CanStop=$true; StopBlockReason=''
+        }
+
+        Save-PendingActions -Hits @() -Suspicious @($s)
+        $pending = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        $pending.suspicious[0].status | Should -BeExactly 'pending'
+        $pending.suspicious[0].StartTimeUtc | Should -BeExactly $s.StartTimeUtc
+        $pending.suspicious[0].CanStop | Should -BeTrue
+    }
+    It '选择的可疑进程拒绝数组 PID 和缺失身份字段' {
+        $arrayPid = [pscustomobject]@{PID=@(42);Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;status='pending'}
+        $missingPath = [pscustomobject]@{PID=42;Name='suspect';Path='';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;status='pending'}
+
+        { Assert-SuspiciousPendingRow $arrayPid -RequireStoppable } | Should -Throw '*PID*'
+        { Assert-SuspiciousPendingRow $missingPath -RequireStoppable } | Should -Throw '*Path*'
+    }
+    It '可疑停止子集保持与 OEM actions observations 完全分离' {
+        $row = [pscustomobject]@{PID=42;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;StopBlockReason='';status='pending';Reason='temp';'CPU%'=8;MemMB=50}
+
+        $subset = Build-SuspiciousSubsetPayload @($row)
+
+        @($subset.actions).Count | Should -Be 0
+        @($subset.observations).Count | Should -Be 0
+        @($subset.suspicious).Count | Should -Be 1
+        $subset.suspicious[0].PID | Should -Be 42
+    }
 }

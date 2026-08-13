@@ -221,6 +221,57 @@ function Invoke-LiteralAutostartRemovalFromKey {
     } finally { Close-BackupArtifact $artifact }
 }
 
+function Test-StrictUtcProcessStartTime($Value) {
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value) -or -not $Value.EndsWith('Z', [System.StringComparison]::Ordinal)) {
+        return $false
+    }
+    $parsed = [datetime]::MinValue
+    return [datetime]::TryParseExact(
+        $Value,
+        'o',
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$parsed
+    ) -and $parsed.Kind -eq [System.DateTimeKind]::Utc
+}
+
+function Assert-SuspiciousPendingRow {
+    param($Row, [switch]$RequireStoppable)
+    if ($null -eq $Row) { throw '可疑进程行为空' }
+    if ($Row.PSObject.Properties.Name -notcontains 'PID' -or -not (Test-PositiveScalarProcessId $Row.PID)) { throw '可疑进程 PID 必须是正整数标量' }
+    $name = Get-StrictNonBlankStringProperty $Row 'Name'
+    if ($null -eq $name) { throw '可疑进程 Name 缺失或无效' }
+    $path = Get-StrictNonBlankStringProperty $Row 'Path'
+    if ($null -eq $path -or -not [System.IO.Path]::IsPathRooted($path)) { throw '可疑进程 Path 缺失或不是绝对路径' }
+    $startTimeUtc = Get-StrictNonBlankStringProperty $Row 'StartTimeUtc'
+    if ($null -eq $startTimeUtc -or -not (Test-StrictUtcProcessStartTime $startTimeUtc)) { throw '可疑进程 StartTimeUtc 缺失或不是严格 UTC 时间' }
+    $status = Get-StrictNonBlankStringProperty $Row 'status'
+    if ($null -eq $status -or $status -cnotin @('pending','success','failed','skipped')) { throw '可疑进程 status 无效' }
+    if ($Row.PSObject.Properties.Name -notcontains 'CanStop' -or $Row.CanStop -isnot [bool]) { throw '可疑进程 CanStop 必须是 Boolean' }
+    if ($RequireStoppable -and $Row.CanStop -ne $true) { throw '可疑进程 CanStop=false，不能加入停止子集' }
+    return $true
+}
+
+function Build-SuspiciousSubsetPayload($Rows) {
+    $selected = @()
+    foreach ($row in @($Rows)) {
+        $null = Assert-SuspiciousPendingRow $row -RequireStoppable
+        if ($row.status -cnotin @('pending','failed')) { throw '仅 pending/failed 可疑进程可以重试停止' }
+        $selected += [pscustomobject]@{
+            PID=[int]$row.PID; Name=[string]$row.Name; Path=[string]$row.Path; StartTimeUtc=[string]$row.StartTimeUtc
+            CanStop=$true; StopBlockReason=''; status=[string]$row.status; Reason=[string]$row.Reason
+            'CPU%'=$row.'CPU%'; MemMB=$row.MemMB
+        }
+    }
+    return [pscustomobject]@{
+        pending_schema_version=2
+        generated=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        actions=@()
+        observations=@()
+        suspicious=@($selected)
+    }
+}
+
 function Invoke-LiteralAutostartRemoval {
     param($Source, $Name, $ExpectedValue, $BackupDir, $Tag)
     try { $null = Assert-TrustedBackupPackagePath $BackupDir } catch {
@@ -951,7 +1002,12 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
     $suspArr = @()
     if ($Suspicious) {
         $suspArr = @($Suspicious | ForEach-Object {
-            [pscustomobject]@{ PID=$_.PID; Name=$_.Name; 'CPU%'=$_.'CPU%'; MemMB=$_.MemMB; Path=$_.Path; Reason=$_.Reason }
+            $canStop = ($_.CanStop -is [bool]) -and $_.CanStop
+            $stopBlockReason = if ($_.StopBlockReason -is [string]) { $_.StopBlockReason } else { '' }
+            [pscustomobject]@{
+                PID=$_.PID; Name=$_.Name; 'CPU%'=$_.'CPU%'; MemMB=$_.MemMB; Path=$_.Path; Reason=$_.Reason
+                StartTimeUtc=$_.StartTimeUtc; CanStop=[bool]$canStop; StopBlockReason=$stopBlockReason; status='pending'
+            }
         })
     }
     $payload = [pscustomobject]@{
