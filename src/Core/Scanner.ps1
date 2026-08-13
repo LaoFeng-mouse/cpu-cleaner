@@ -125,7 +125,11 @@ function Get-TopProcesses([int]$TopN = 12, [int]$Samples = 5, [int]$IntervalSec 
                 $delta = $_.CPU - $prev[$id]
                 if ($delta -lt 0) { $delta = 0 }
                 $cpuPct = [math]::Round($delta / $IntervalSec * 100 / [Environment]::ProcessorCount, 2)
-                if (-not $acc.ContainsKey($id)) { $acc[$id] = @{ sum=0; peak=0; high=0; name=$_.ProcessName; path=$_.Path; mem=0 } }
+                if (-not $acc.ContainsKey($id)) {
+                    $startTimeUtc = ''
+                    try { $startTimeUtc = $_.StartTime.ToUniversalTime().ToString('o') } catch {}
+                    $acc[$id] = @{ sum=0; peak=0; high=0; name=$_.ProcessName; path=$_.Path; startTimeUtc=$startTimeUtc; mem=0 }
+                }
                 $e = $acc[$id]
                 $e.sum += $cpuPct
                 if ($cpuPct -gt $e.peak) { $e.peak = $cpuPct }
@@ -158,6 +162,7 @@ function Get-TopProcesses([int]$TopN = 12, [int]$Samples = 5, [int]$IntervalSec 
             ChildCount  = if ($children.ContainsKey($id)) { $children[$id] } else { 0 }
             MemMB       = [math]::Round($e.mem / 1MB, 0)
             Path        = $e.path
+            StartTimeUtc = $e.startTimeUtc
         }
     }
     return ($result | Sort-Object 'CPU%' -Descending | Select-Object -First $TopN)
@@ -183,6 +188,11 @@ function Get-SuspiciousProcesses($TopProcs) {
             } catch { $reason = '签名检查失败: ' + $path }
         }
         if ($reason) {
+            $completeIdentity = [int64]$p.PID -gt 0 -and
+                -not [string]::IsNullOrWhiteSpace([string]$p.Name) -and
+                -not [string]::IsNullOrWhiteSpace([string]$p.Path) -and
+                [System.IO.Path]::IsPathRooted([string]$p.Path) -and
+                -not [string]::IsNullOrWhiteSpace([string]$p.StartTimeUtc)
             $susp += [pscustomobject]@{
                 PID = $p.PID
                 Name = $p.Name
@@ -190,6 +200,9 @@ function Get-SuspiciousProcesses($TopProcs) {
                 MemMB = $p.MemMB
                 Path = $path
                 Reason = $reason
+                StartTimeUtc = [string]$p.StartTimeUtc
+                CanStop = [bool]$completeIdentity
+                StopBlockReason = if ($completeIdentity) { '' } else { '进程身份不完整，不能安全停止' }
             }
         }
     }

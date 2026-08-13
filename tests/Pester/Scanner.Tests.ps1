@@ -58,6 +58,29 @@ Describe '扫描器与评分' {
         $susp = Get-SuspiciousProcesses @()
         @($susp).Count | Should -Be 0
     }
+    It '可疑进程保留 PID 名称 路径与 UTC 启动时间' {
+        $top = [pscustomobject]@{
+            PID=4242; Name='suspect'; 'CPU%'=8; MemMB=50
+            Path='C:\Temp\suspect.exe'; StartTimeUtc='2026-08-11T00:00:00.0000000Z'
+        }
+
+        $row = @(Get-SuspiciousProcesses @($top))[0]
+
+        $row.PID | Should -Be 4242
+        $row.Name | Should -BeExactly 'suspect'
+        $row.Path | Should -BeExactly 'C:\Temp\suspect.exe'
+        $row.StartTimeUtc | Should -BeExactly '2026-08-11T00:00:00.0000000Z'
+        $row.CanStop | Should -BeTrue
+        $row.StopBlockReason | Should -BeExactly ''
+    }
+    It '可疑进程身份缺少路径或启动时间时不可停止' {
+        $top = [pscustomobject]@{PID=4242;Name='suspect';'CPU%'=8;MemMB=50;Path='';StartTimeUtc=''}
+
+        $row = @(Get-SuspiciousProcesses @($top))[0]
+
+        $row.CanStop | Should -BeFalse
+        $row.StopBlockReason | Should -Match '身份不完整'
+    }
     It 'CIM 服务采集被拒时完整 Get-Service fallback 保留匹配身份与可执行健康状态' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
         Mock Get-Service {
