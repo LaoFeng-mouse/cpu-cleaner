@@ -1714,6 +1714,99 @@ function Resolve-LatestTrustedRestorePackage {
     throw (New-RestoreNoTrustedBackupException '没有通过 owner、DACL、manifest、哈希和身份验证的可信备份')
 }
 
+function Get-CurrentProcessIdentity($ProcessId) {
+    if (-not (Test-PositiveScalarProcessId $ProcessId)) { return $null }
+    try { $processes = @(Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue) } catch { return $null }
+    if ($processes.Count -ne 1 -or $null -eq $processes[0]) { return $null }
+    $process = $processes[0]
+    $path = ''
+    $startTimeUtc = ''
+    try { $path = [string]$process.Path } catch {}
+    try { $startTimeUtc = $process.StartTime.ToUniversalTime().ToString('o') } catch {}
+    $name = ''
+    try { $name = [string]$process.ProcessName } catch {}
+    return [pscustomobject]@{ PID=[int]$process.Id; Name=$name; Path=$path; StartTimeUtc=$startTimeUtc }
+}
+
+function Test-SameProcessIdentity($Expected, $Current) {
+    if ($null -eq $Expected -or $null -eq $Current) { return $false }
+    try {
+        if (-not (Test-PositiveScalarProcessId $Expected.PID) -or -not (Test-PositiveScalarProcessId $Current.PID) -or
+            [int]$Expected.PID -ne [int]$Current.PID) { return $false }
+        $expectedName = Get-StrictNonBlankStringProperty $Expected 'Name'
+        $currentName = Get-StrictNonBlankStringProperty $Current 'Name'
+        $expectedPath = Get-StrictNonBlankStringProperty $Expected 'Path'
+        $currentPath = Get-StrictNonBlankStringProperty $Current 'Path'
+        $expectedStart = Get-StrictNonBlankStringProperty $Expected 'StartTimeUtc'
+        $currentStart = Get-StrictNonBlankStringProperty $Current 'StartTimeUtc'
+        if ($null -in @($expectedName,$currentName,$expectedPath,$currentPath,$expectedStart,$currentStart)) { return $false }
+        return [string]::Equals((Normalize-ProcessName $expectedName),(Normalize-ProcessName $currentName),[System.StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals([System.IO.Path]::GetFullPath($expectedPath),[System.IO.Path]::GetFullPath($currentPath),[System.StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals($expectedStart,$currentStart,[System.StringComparison]::Ordinal)
+    } catch { return $false }
+}
+
+function New-ProcessStopResult($Row, [string]$Status, [string]$Reason) {
+    $copy = $Row.PSObject.Copy()
+    $copy.status = $Status
+    $copy | Add-Member NoteProperty result_reason $Reason -Force
+    return $copy
+}
+
+function Invoke-OneTimeProcessStop($Row) {
+    try { $null = Assert-SuspiciousPendingRow $Row -RequireStoppable } catch {
+        return New-ProcessStopResult $Row 'failed' ('身份结构无效: ' + $_.Exception.Message)
+    }
+    if ($Row.status -cnotin @('pending','failed')) { return New-ProcessStopResult $Row 'skipped' '该条目已是终态' }
+    $protectedNames = @('system','system idle process','registry','smss','csrss','wininit','services','lsass','winlogon','svchost','fontdrvhost','dwm')
+    $normalizedName = Normalize-ProcessName ([string]$Row.Name)
+    if ($protectedNames -contains $normalizedName -or [int]$Row.PID -eq [int]$PID) {
+        return New-ProcessStopResult $Row 'skipped' '受保护进程或当前执行进程，拒绝停止'
+    }
+    $current = Get-CurrentProcessIdentity ([int]$Row.PID)
+    if ($null -eq $current) { return New-ProcessStopResult $Row 'skipped' 'PID 已退出或身份不可读取' }
+    if (-not (Test-SameProcessIdentity $Row $current)) { return New-ProcessStopResult $Row 'skipped' 'PID 对应的名称、路径或启动时间已变化' }
+    try { Stop-Process -Id ([int]$Row.PID) -Force -ErrorAction Stop } catch {
+        return New-ProcessStopResult $Row 'failed' ('停止进程失败: ' + $_.Exception.Message)
+    }
+    $after = Get-CurrentProcessIdentity ([int]$Row.PID)
+    if ($null -ne $after) { return New-ProcessStopResult $Row 'failed' '停止命令返回后进程仍存在' }
+    return New-ProcessStopResult $Row 'success' '已结束这一次进程实例'
+}
+
+function Invoke-StopProcessPending {
+    param([string]$Path, [string]$ExpectedSha256)
+    if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path)) { throw 'stop_process 缺失 pending 文件路径' }
+    if ($ExpectedSha256 -isnot [string] -or $ExpectedSha256 -cnotmatch '^[0-9a-fA-F]{64}$') { throw 'stop_process 缺失有效 SHA-256' }
+    $stream = $null
+    try {
+        $stream = Open-LockedPendingFile $Path
+        $actualHash = Get-PendingStreamSha256 $stream
+        if (-not [string]::Equals($actualHash,$ExpectedSha256,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'stop_process pending SHA-256 不匹配' }
+        $pending = ConvertFrom-StrictPendingJson (Read-LimitedPendingJsonStream $stream)
+        if (-not (Test-PendingSchemaSupported $pending)) { throw 'stop_process pending schema 不兼容' }
+        foreach ($name in @('actions','observations','suspicious')) {
+            if ($pending.PSObject.Properties.Name -notcontains $name -or $pending.$name -isnot [System.Array]) { throw "stop_process $name 必须是数组" }
+        }
+        if (@($pending.actions).Count -ne 0) { throw 'stop_process actions 必须为空' }
+        if (@($pending.observations).Count -ne 0) { throw 'stop_process observations 必须为空' }
+        $rows = @($pending.suspicious)
+        if ($rows.Count -eq 0) { throw 'stop_process suspicious 不能为空' }
+        foreach ($row in $rows) { $null = Assert-SuspiciousPendingRow $row -RequireStoppable }
+        $results = @()
+        foreach ($row in $rows) {
+            if ($row.status -cin @('pending','failed')) { $results += Invoke-OneTimeProcessStop $row }
+            else { $results += $row }
+        }
+        $payload = Build-PendingV2Payload -Source $pending -Actions @() -Observations @() -Suspicious @($results)
+        Write-PendingToLockedStream -Stream $stream -Pending $payload
+        $failed = @($results | Where-Object { $_.status -ceq 'failed' }).Count
+        return [pscustomobject]@{ ExitCode=$(if ($failed -gt 0) { 2 } else { 0 }); Results=@($results) }
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 function Invoke-Clean {
     if (-not (Is-Admin)) {
         Write-Host '错误: clean 模式需要管理员权限。请右键以管理员身份运行 PowerShell 再执行。' -ForegroundColor Red
@@ -1877,47 +1970,14 @@ function Invoke-Clean {
 
     }
 
-    # ---- 可疑进程处理 (B4: 显式输入 PID, 不自动杀) ----
+    # 可疑进程与持久化 OEM 清理严格分离。进程只能经 stop_process 的
+    # hash-bound subset 和 PID/name/path/start-time 重验后执行一次性停止。
     if ($suspicious.Count -gt 0) {
-        Write-Step '检测到可疑高占用进程 (路径可疑或无签名):'
+        Write-Step '检测到可疑高占用进程（本次 clean 不会结束它们）:'
         foreach ($s in $suspicious) {
             Write-Host ('  PID {0}  {1}  CPU={2}%  {3}' -f $s.PID, $s.Name, $s.'CPU%', $s.Reason) -ForegroundColor Yellow
         }
-        if (-not $YesToAll) {
-            $killSel = Read-Host '输入要结束的 PID(逗号分隔), 直接回车跳过'
-            if ($killSel -match '\d') {
-                $pids = @()
-                foreach ($part in ($killSel -split ',')) {
-                    $n = 0
-                    if ([int]::TryParse($part.Trim(), [ref]$n)) { $pids += $n }
-                }
-                foreach ($pidNum in $pids) {
-                    $proc = Get-Process -Id $pidNum -ErrorAction SilentlyContinue
-                    if ($proc) {
-                        Write-Host "  结束进程: $($proc.ProcessName) (PID $pidNum) 路径: $($proc.Path)" -ForegroundColor DarkGray
-                        Stop-Process -Id $pidNum -Force -ErrorAction SilentlyContinue
-                        if (Get-Process -Id $pidNum -ErrorAction SilentlyContinue) {
-                            Write-Host "  失败: 进程 $pidNum 仍在运行 (可能拒绝终止)" -ForegroundColor Red
-                        } else {
-                            Write-Host "  已结束 PID $pidNum" -ForegroundColor Green
-                            # 记录到备份(提示可手动重启), 追加到最近一次备份的 manifest
-                            $latest = Get-ChildItem $script:BackupRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                            if ($latest) {
-                                $mf = Join-Path $latest.FullName 'manifest.json'
-                                $man = @()
-                                if (Test-Path $mf) { $man = @(Get-Content $mf -Raw -Encoding UTF8 | ConvertFrom-Json) }
-                                $man += [pscustomobject]@{ type='process'; name=$proc.ProcessName; pid=$pidNum; path=$proc.Path; note="restore: 如需恢复请手动启动 $($proc.Path)" }
-                                $man | ConvertTo-Json -Depth 100 | Out-File $mf -Encoding utf8
-                            }
-                        }
-                    } else {
-                        Write-Host "  PID $pidNum 不存在, 跳过" -ForegroundColor DarkYellow
-                    }
-                }
-            }
-        } else {
-            Write-Host '  (YesToAll 模式: 进程默认不杀, 需显式输入 PID)' -ForegroundColor DarkYellow
-        }
+        Write-Host '  如需结束，请在界面单独选择并使用“一次性结束进程”。' -ForegroundColor DarkYellow
     } else {
         Write-Host "`n无可疑高占用进程。" -ForegroundColor Green
     }
