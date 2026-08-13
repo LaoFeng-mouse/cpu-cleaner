@@ -31,7 +31,7 @@ $script:I18N = @{
         TabScan='🐹 1. 扫描（只读）'; TabPending='📋 2. 处理建议'; TabExec='⚙️ 3. 执行（管理员）'; TabResult='✅ 4. 结果与恢复'
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
         ScanPhaseInitial='正在检查服务、启动项、计划任务和进程'; ScanPhaseSystemInfo='读取系统信息'; ScanPhaseProcesses='检查高占用进程'; ScanPhaseServices='检查系统服务'; ScanPhaseAutoStart='检查启动项'; ScanPhaseTasks='检查计划任务'; ScanPhaseRules='匹配安全规则'; ScanPhaseReport='生成扫描报告'
-        ScanResultSummary='{0} 项可以安全处理，{1} 项建议观察'; ScanErrorSummary='扫描失败：{0}'; ScanNoMutation='扫描阶段未修改任何系统设置。'; ScanStatusStart='启动'; ScanStatusOutput='输出读取'; ScanStatusResults='结果处理'
+        ScanResultSummary='{0} 项可以安全处理，{1} 项建议观察'; ScanErrorSummary='扫描失败：{0}'; ScanNoMutation='扫描阶段未修改任何系统设置。'; ScanStatusStart='启动'; ScanStatusOutput='输出读取'; ScanStatusResults='结果处理'; ScanStatusTimeout='超时'
         ReviewErrorSummary='待处理清单已过期，必须重新扫描。'; ReviewNoMutation='没有执行任何系统修改。'
         BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
         ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
@@ -60,7 +60,7 @@ $script:I18N = @{
         TabScan='🐹 1. Scan (read-only)'; TabPending='📋 2. Recommendations'; TabExec='⚙️ 3. Execute (admin)'; TabResult='✅ 4. Result & Restore'
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
         ScanPhaseInitial='Checking services, startup items, scheduled tasks, and processes'; ScanPhaseSystemInfo='Reading system information'; ScanPhaseProcesses='Checking high-usage processes'; ScanPhaseServices='Checking system services'; ScanPhaseAutoStart='Checking startup items'; ScanPhaseTasks='Checking scheduled tasks'; ScanPhaseRules='Matching safety rules'; ScanPhaseReport='Generating scan report'
-        ScanResultSummary='{0} safe item(s), {1} observation(s)'; ScanErrorSummary='Scan failed: {0}'; ScanNoMutation='The scan did not change any system settings.'; ScanStatusStart='startup'; ScanStatusOutput='output read'; ScanStatusResults='result processing'
+        ScanResultSummary='{0} safe item(s), {1} observation(s)'; ScanErrorSummary='Scan failed: {0}'; ScanNoMutation='The scan did not change any system settings.'; ScanStatusStart='startup'; ScanStatusOutput='output read'; ScanStatusResults='result processing'; ScanStatusTimeout='timeout'
         ReviewErrorSummary='The pending review is stale and must be rescanned.'; ReviewNoMutation='No system settings were changed.'
         BtnLoad='Load Pending Items'; PendingHint='Risk & evidence shown; check items to process (unverified = observe only, unchecked)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Check items, then go to tab 3.'
         ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
@@ -236,6 +236,10 @@ $script:ExecutionTempPath = $null
 $script:ExecutionActions = @()
 $script:ExecutionInProgress = $false
 $script:RestoreInProgress = $false
+$script:RestoreProcess = $null
+$script:RestoreTimer = $null
+$script:RestoreLifecycle = 'idle'
+$script:RestoreUnknownProbeCount = 0
 $script:ExecutionLifecycle = 'idle'
 $script:ExecutionUnknownProbeCount = 0
 $script:ExecutionUnknownProbeLimit = 3
@@ -254,7 +258,8 @@ function Update-GuiExecuteAvailability {
         ($_.CanExecute -is [bool]) -and $_.CanExecute -and
         ($_.IsChecked -is [bool]) -and $_.IsChecked
     })
-    $window.FindName('BtnExecute').IsEnabled = ($selectedExecutable.Count -gt 0 -and -not $script:ExecutionInProgress -and -not $script:SuspiciousStopInProgress)
+    $restoreBusy = $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')
+    $window.FindName('BtnExecute').IsEnabled = ($selectedExecutable.Count -gt 0 -and -not $script:ExecutionInProgress -and -not $script:SuspiciousStopInProgress -and -not $restoreBusy)
 }
 
 function Update-GuiStopProcessAvailability {
@@ -263,7 +268,8 @@ function Update-GuiStopProcessAvailability {
         ($_.CanStop -is [bool]) -and $_.CanStop -and
         ($_.IsChecked -is [bool]) -and $_.IsChecked
     })
-    $window.FindName('BtnStopProcesses').IsEnabled = ($selected.Count -gt 0 -and -not $script:SuspiciousStopInProgress -and -not $script:ExecutionInProgress)
+    $restoreBusy = $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')
+    $window.FindName('BtnStopProcesses').IsEnabled = ($selected.Count -gt 0 -and -not $script:SuspiciousStopInProgress -and -not $script:ExecutionInProgress -and -not $restoreBusy)
 }
 
 function Set-GuiState {
@@ -928,6 +934,7 @@ function Invoke-GuiScanResourceCleanup {
     $script:ScanJob = $null
     $script:ScanCheckTimer = $null
     $script:ScanTimer = $null
+    $script:ScanDeadlineUtc = $null
 }
 
 function Set-GuiError {
@@ -991,6 +998,7 @@ function Complete-ScanPoll {
         $script:ScanJob = $null
         $script:ScanCheckTimer = $null
         $script:ScanTimer = $null
+        $script:ScanDeadlineUtc = $null
         $window.FindName('ScanProgress').IsIndeterminate = $false
         $window.FindName('BtnStartScan').IsEnabled = $true
     }
@@ -1001,6 +1009,11 @@ function Invoke-GuiScanPoll {
     param($job, $checkTimer, $scanTimer)
     try {
         $null = Receive-GuiScanOutput $job
+        if ($job.State -notin @('Completed','Failed','Stopped') -and $null -ne $script:ScanDeadlineUtc -and [datetime]::UtcNow -ge $script:ScanDeadlineUtc) {
+            Invoke-GuiScanResourceCleanup -Job $job -CheckTimer $checkTimer -ScanTimer $scanTimer
+            Show-GuiScanError -Status (Get-Text 'ScanStatusTimeout') -Detail '扫描超过 180 秒安全上限，后台扫描已停止；未修改任何系统设置。'
+            return $true
+        }
         return (Complete-ScanPoll -job $job -checkTimer $checkTimer -scanTimer $scanTimer)
     } catch {
         Invoke-GuiScanResourceCleanup -Job $job -CheckTimer $checkTimer -ScanTimer $scanTimer
@@ -1032,6 +1045,8 @@ $window.FindName('BtnLang').Add_Click({
 $script:ScanTimer = $null
 $script:ScanCheckTimer = $null
 $script:ScanJob = $null
+$script:ScanDeadlineUtc = $null
+$script:ScanTimeoutSeconds = 180
 $script:ScanJobScript = {
     param($scriptPath)
     $utf8 = [System.Text.UTF8Encoding]::new($false)
@@ -1053,6 +1068,7 @@ function Start-GuiScan {
         $window.FindName('BtnStartScan').IsEnabled = $false
         $script:ScanTranscript = ''
         $script:CurrentScanPhaseTextKey = 'ScanPhaseInitial'
+        $script:ScanDeadlineUtc = [datetime]::UtcNow.AddSeconds($script:ScanTimeoutSeconds)
 
         $script:ScanJob = Start-Job -ScriptBlock $script:ScanJobScript -ArgumentList (Join-Path $script:Root 'cpu-cleaner.ps1')
 
@@ -1230,8 +1246,41 @@ function Read-GuiStrictSuspiciousStopResult {
         $key = Get-GuiSuspiciousIdentityKey $row
         if (-not $resultKeys.Add($key) -or -not $expectedKeys.Contains($key)) { throw 'suspicious stop result identity changed.' }
         if ([string]$row.status -cnotin @('success','failed','skipped')) { throw 'suspicious stop result contains a non-terminal status.' }
+        if ([string]$row.status -ceq 'success') {
+            $identityProbe = Get-GuiProcessIdentityProbe -ProcessId ([int]$row.PID)
+            if ($identityProbe.State -eq 'unknown') {
+                throw ('suspicious stop success cannot be verified: ' + $identityProbe.Detail)
+            }
+            if ($identityProbe.State -eq 'present' -and (Get-GuiSuspiciousIdentityKey $identityProbe.Identity) -ceq $key) {
+                throw 'suspicious stop success is untrusted: the exact process instance is still running.'
+            }
+        }
     }
     return @($items)
+}
+
+function Get-GuiProcessIdentityProbe {
+    param([int]$ProcessId)
+    try {
+        $process = [System.Diagnostics.Process]::GetProcessById($ProcessId)
+    } catch [System.ArgumentException] {
+        return [pscustomobject]@{ State='absent'; Identity=$null; Detail='' }
+    } catch {
+        return [pscustomobject]@{ State='unknown'; Identity=$null; Detail=$_.Exception.Message }
+    }
+    try {
+        $identity = [pscustomobject]@{
+            PID = [int64]$process.Id
+            Name = [string]$process.ProcessName
+            Path = [string]$process.Path
+            StartTimeUtc = $process.StartTime.ToUniversalTime().ToString('o')
+        }
+        return [pscustomobject]@{ State='present'; Identity=$identity; Detail='' }
+    } catch {
+        return [pscustomobject]@{ State='unknown'; Identity=$null; Detail=$_.Exception.Message }
+    } finally {
+        try { $process.Dispose() } catch {}
+    }
 }
 
 function Resolve-GuiReviewedSuspiciousRows {
@@ -1296,7 +1345,8 @@ function Complete-SuspiciousStopPoll {
 
 function Start-GuiSuspiciousStop {
     param($List = $window.FindName('SuspiciousList'))
-    if ($script:SuspiciousStopInProgress -or $script:ExecutionInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached')) { return $false }
+    if ($script:SuspiciousStopInProgress -or $script:ExecutionInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) { return $false }
     $selectedRows = @(Resolve-GuiReviewedSuspiciousRows -List $List)
     if ($selectedRows.Count -eq 0) { return $false }
     $script:SuspiciousStopInProgress = $true
@@ -1376,7 +1426,8 @@ function Clear-GuiExecutionResources {
 function Protect-GuiExecutionWindowClose {
     param([Parameter(Mandatory=$true)]$EventArgs)
     if ($script:ExecutionInProgress -or $script:ExecutionLifecycle -cin @('starting','running','unknown') -or
-        $script:SuspiciousStopInProgress -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown')) {
+        $script:SuspiciousStopInProgress -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown') -or
+        $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) {
         $EventArgs.Cancel = $true
         $window.FindName('StateSubtitle').Text = Get-Text 'ExecCloseBlocked'
         return $false
@@ -1628,7 +1679,8 @@ function Complete-ExecutionPoll {
 
 function Start-GuiExecution {
     param($List = $window.FindName('PendingList'))
-    if ($script:ExecutionInProgress -or $script:SuspiciousStopInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached')) {
+    if ($script:ExecutionInProgress -or $script:SuspiciousStopInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) {
         return $false
     }
     $script:ExecutionInProgress = $true
@@ -1704,52 +1756,102 @@ function Show-GuiMessage {
 }
 
 function Invoke-GuiRestoreLatest {
-    if ($script:RestoreInProgress) { return $false }
+    if ($script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:ExecutionInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:SuspiciousStopInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached')) { return $false }
     $script:RestoreInProgress = $true
-    $processStarted = $false
+    $script:RestoreLifecycle = 'starting'
+    $script:RestoreUnknownProbeCount = 0
     $restoreButton = $window.FindName('BtnRestore')
     $restoreButton.IsEnabled = $false
+    Update-GuiExecuteAvailability
+    Update-GuiStopProcessAvailability
     $window.FindName('CompletedSummaryText').Text = ''
     $window.FindName('CompletedList').ItemsSource = $null
     try {
-        $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','restore','-BackupDir','latest'
-        if ($null -eq $proc) { throw '管理员恢复进程未启动。' }
-        $processStarted = $true
-        $proc.WaitForExit()
-        $rawExitCode = $proc.ExitCode
-        if ($null -eq $rawExitCode -or $rawExitCode -isnot [int]) {
-            throw '恢复进程退出码不可读或不是整数。'
-        }
-        $exitCode = [int]$rawExitCode
-        if ($exitCode -eq 0) {
-            Set-GuiCompletedSummary -Text (Get-Text 'RestoreOk')
-            Set-GuiState completed -Force
-            return $true
-        }
-        if ($exitCode -eq 2) {
-            Set-GuiCompletedSummary -Failed 1 -Text (Get-Text 'RestorePartial')
-            Set-GuiState completed -Force
-            return $false
-        }
-        if ($exitCode -eq 3) {
-            $summary = Get-Text 'RestoreNone'
-            Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreNone') -Detail $summary
-            return $false
-        }
-        $summary = (Get-Text 'RestoreErr') -f "ExitCode=$exitCode"
-        Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreMayHaveChanged') -Detail $summary
-        Show-GuiMessage -Message $summary -Icon Warning
-        return $false
+        $script:RestoreProcess = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','restore','-BackupDir','latest'
+        if ($null -eq $script:RestoreProcess) { throw '管理员恢复进程未启动。' }
+        $script:RestoreLifecycle = 'running'
+        $script:RestoreTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:RestoreTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $script:RestoreTimer.Add_Tick({ $null = Complete-GuiRestorePoll })
+        $script:RestoreTimer.Start()
+        return $true
     } catch {
         $summary = (Get-Text 'RestoreErr') -f $_.Exception.Message
+        $processStarted = $null -ne $script:RestoreProcess
         $mutation = if ($processStarted) { Get-Text 'RestoreStatusUnknown' } else { Get-Text 'RestoreNotStarted' }
         Set-GuiError -Summary $summary -Mutation $mutation -Detail $_.Exception.ToString()
         Show-GuiMessage -Message $summary -Icon Warning
+        if ($processStarted) {
+            Invoke-GuiTimerStop $script:RestoreTimer
+            $script:RestoreLifecycle = 'detached'
+            $script:RestoreInProgress = $false
+            Update-GuiExecuteAvailability
+            Update-GuiStopProcessAvailability
+        } else {
+            $script:RestoreProcess = $null
+            $script:RestoreTimer = $null
+            $script:RestoreLifecycle = 'idle'
+            $script:RestoreInProgress = $false
+            $restoreButton.IsEnabled = $true
+        }
         return $false
-    } finally {
-        $script:RestoreInProgress = $false
-        $restoreButton.IsEnabled = $true
     }
+}
+
+function Clear-GuiRestoreResources {
+    param([switch]$ProcessExitConfirmed)
+    if ($null -ne $script:RestoreProcess -and -not $ProcessExitConfirmed) { return $false }
+    Invoke-GuiTimerStop $script:RestoreTimer
+    $script:RestoreProcess = $null
+    $script:RestoreTimer = $null
+    $script:RestoreInProgress = $false
+    $script:RestoreLifecycle = 'idle'
+    $script:RestoreUnknownProbeCount = 0
+    $window.FindName('BtnRestore').IsEnabled = $true
+    Update-GuiExecuteAvailability
+    Update-GuiStopProcessAvailability
+    return $true
+}
+
+function Complete-GuiRestorePoll {
+    if ($null -eq $script:RestoreProcess) { return $false }
+    $probe = Get-GuiExecutionProcessStatus -Process $script:RestoreProcess
+    if ($probe.State -eq 'running') { return $false }
+    if ($probe.State -eq 'unknown') {
+        $script:RestoreLifecycle = 'unknown'
+        $script:RestoreUnknownProbeCount++
+        if ($script:RestoreUnknownProbeCount -ge $script:ExecutionUnknownProbeLimit) {
+            Invoke-GuiTimerStop $script:RestoreTimer
+            $script:RestoreInProgress = $false
+            $script:RestoreLifecycle = 'detached'
+            $summary = (Get-Text 'RestoreErr') -f 'process status unknown'
+            Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreStatusUnknown') -Detail $probe.Detail
+            return $true
+        }
+        return $false
+    }
+
+    Invoke-GuiTimerStop $script:RestoreTimer
+    $script:RestoreLifecycle = 'exited'
+    $exitCode = $probe.ExitCode
+    if ($exitCode -eq 0) {
+        Set-GuiCompletedSummary -Text (Get-Text 'RestoreOk')
+        Set-GuiState completed -Force
+    } elseif ($exitCode -eq 2) {
+        Set-GuiCompletedSummary -Failed 1 -Text (Get-Text 'RestorePartial')
+        Set-GuiState completed -Force
+    } elseif ($exitCode -eq 3) {
+        $summary = Get-Text 'RestoreNone'
+        Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreNone') -Detail $summary
+    } else {
+        $summary = (Get-Text 'RestoreErr') -f "ExitCode=$exitCode"
+        Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreMayHaveChanged') -Detail $summary
+        Show-GuiMessage -Message $summary -Icon Warning
+    }
+    $null = Clear-GuiRestoreResources -ProcessExitConfirmed
+    return $true
 }
 
 # ---------- 恢复最近一次处理 ----------

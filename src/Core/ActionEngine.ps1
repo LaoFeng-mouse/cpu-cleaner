@@ -1728,6 +1728,37 @@ function Get-CurrentProcessIdentity($ProcessId) {
     return [pscustomobject]@{ PID=[int]$process.Id; Name=$name; Path=$path; StartTimeUtc=$startTimeUtc }
 }
 
+function Get-BoundProcessTarget($ProcessId) {
+    if (-not (Test-PositiveScalarProcessId $ProcessId)) { return $null }
+    try { $processes = @(Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue) } catch { return $null }
+    if ($processes.Count -ne 1 -or $null -eq $processes[0]) { return $null }
+    $process = $processes[0]
+    try { $null = $process.Handle } catch {
+        try { $process.Dispose() } catch {}
+        return $null
+    }
+    $path = ''
+    $startTimeUtc = ''
+    $name = ''
+    try { $path = [string]$process.Path } catch {}
+    try { $startTimeUtc = $process.StartTime.ToUniversalTime().ToString('o') } catch {}
+    try { $name = [string]$process.ProcessName } catch {}
+    return [pscustomobject]@{
+        Process = $process
+        Identity = [pscustomobject]@{ PID=[int]$process.Id; Name=$name; Path=$path; StartTimeUtc=$startTimeUtc }
+    }
+}
+
+function Stop-BoundProcessTarget {
+    param([Parameter(Mandatory=$true)]$Target, [int]$TimeoutMilliseconds = 1000)
+    $process = $Target.Process
+    if ($null -eq $process) { throw '绑定的进程对象不可用' }
+    $process.Kill()
+    $waited = $process.WaitForExit($TimeoutMilliseconds)
+    if ($waited -isnot [bool] -or -not $waited) { return $false }
+    return $true
+}
+
 function Test-SameProcessIdentity($Expected, $Current) {
     if ($null -eq $Expected -or $null -eq $Current) { return $false }
     try {
@@ -1772,14 +1803,18 @@ function Invoke-OneTimeProcessStop($Row) {
     if ($protectedNames -contains $normalizedName -or [int]$Row.PID -eq [int]$PID) {
         return New-ProcessStopResult $Row 'skipped' '受保护进程或当前执行进程，拒绝停止'
     }
-    $current = Get-CurrentProcessIdentity ([int]$Row.PID)
-    if ($null -eq $current) { return New-ProcessStopResult $Row 'skipped' 'PID 已退出或身份不可读取' }
-    if (-not (Test-SameProcessIdentity $Row $current)) { return New-ProcessStopResult $Row 'skipped' 'PID 对应的名称、路径或启动时间已变化' }
-    try { Stop-Process -Id ([int]$Row.PID) -Force -ErrorAction Stop } catch {
-        return New-ProcessStopResult $Row 'failed' ('停止进程失败: ' + $_.Exception.Message)
+    $target = Get-BoundProcessTarget ([int]$Row.PID)
+    if ($null -eq $target) { return New-ProcessStopResult $Row 'skipped' 'PID 已退出或身份不可读取' }
+    try {
+        if (-not (Test-SameProcessIdentity $Row $target.Identity)) { return New-ProcessStopResult $Row 'skipped' 'PID 对应的名称、路径或启动时间已变化' }
+        try { $exited = Stop-BoundProcessTarget -Target $target } catch {
+            return New-ProcessStopResult $Row 'failed' ('停止进程失败: ' + $_.Exception.Message)
+        }
+        if (-not $exited) { return New-ProcessStopResult $Row 'failed' '等待退出超时，进程仍存在' }
+        return New-ProcessStopResult $Row 'success' '已结束这一次进程实例'
+    } finally {
+        try { if ($null -ne $target.Process) { $target.Process.Dispose() } } catch {}
     }
-    if (-not (Wait-ProcessIdentityExit -ProcessId ([int]$Row.PID))) { return New-ProcessStopResult $Row 'failed' '等待退出超时，进程仍存在' }
-    return New-ProcessStopResult $Row 'success' '已结束这一次进程实例'
 }
 
 function Invoke-StopProcessPending {

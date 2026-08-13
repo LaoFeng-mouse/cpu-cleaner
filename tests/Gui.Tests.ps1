@@ -482,6 +482,23 @@ exit 0
         $script:Win.FindName('ErrorDetailText').Text | Should -Match 'drain failed'
     }
 
+    It 'stops and removes a scan job after the explicit deadline instead of polling forever' {
+        $job = [pscustomobject]@{ State='Running' }
+        $checkTimer = New-FakeTimer
+        $scanTimer = New-FakeTimer
+        $script:ScanDeadlineUtc = [datetime]::UtcNow.AddSeconds(-1)
+        Mock Read-GuiBackgroundJob { @() }
+        Mock Invoke-GuiBackgroundJobStop {}
+        Mock Invoke-GuiBackgroundJobRemoval {}
+        Set-GuiState scanning -Force
+
+        Invoke-GuiScanPoll -job $job -checkTimer $checkTimer -scanTimer $scanTimer | Should -BeTrue
+        Should -Invoke Invoke-GuiBackgroundJobStop -Times 1 -Exactly
+        Should -Invoke Invoke-GuiBackgroundJobRemoval -Times 1 -Exactly
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorDetailText').Text | Should -Match '180|timeout|超时'
+    }
+
     It 'pending load failure cleans up and enters recoverable error' {
         Mock Read-GuiBackgroundJob { 'scan complete' }
         Mock Invoke-GuiBackgroundJobRemoval {}
@@ -799,6 +816,12 @@ Describe '勾选视图 (v1.5.5)' {
         $script:SuspiciousStopRows = @()
         $script:SuspiciousStopInProgress = $false
         $script:SuspiciousStopLifecycle = 'idle'
+        $script:RestoreProcess = $null
+        $script:RestoreTimer = $null
+        $script:RestoreInProgress = $false
+        $script:RestoreLifecycle = 'idle'
+        $script:RestoreUnknownProbeCount = 0
+        $script:Win.FindName('BtnRestore').IsEnabled = $true
     }
 
     It 'projects suspicious rows separately from reviewed OEM actions' {
@@ -902,6 +925,36 @@ Describe '勾选视图 (v1.5.5)' {
         $payload.suspicious[0].status = 'pending'
         [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
         { Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected) } | Should -Throw '*terminal*'
+    }
+
+    It 'rejects a forged success result while the exact reviewed process instance is still alive' {
+        $expected = [pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        }
+        $path = Join-Path $TestDrive 'forged-stop-success.json'
+        $payload = New-GuiSuspiciousSubsetPayload -Selected @($expected) -SourcePending (New-GuiReviewPendingFixture)
+        $payload.suspicious[0].status = 'success'
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+        Mock Get-GuiProcessIdentityProbe { [pscustomobject]@{ State='present'; Identity=$expected; Detail='' } }
+
+        { Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected) } | Should -Throw '*still running*'
+    }
+
+    It 'fails closed when a success result cannot be independently verified' {
+        $expected = [pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        }
+        $path = Join-Path $TestDrive 'unverifiable-stop-success.json'
+        $payload = New-GuiSuspiciousSubsetPayload -Selected @($expected) -SourcePending (New-GuiReviewPendingFixture)
+        $payload.suspicious[0].status = 'success'
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+        Mock Get-GuiProcessIdentityProbe { [pscustomobject]@{ State='unknown'; Identity=$null; Detail='access denied' } }
+
+        { Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected) } | Should -Throw '*cannot be verified*'
     }
 
     It '动作中文标签映射' {
@@ -2440,7 +2493,7 @@ Describe '勾选视图 (v1.5.5)' {
 
     It '恢复只把固定 latest 哨兵交给管理员核心且不读取旧 backups 或 manifest' {
         $process = [pscustomobject]@{ ExitCode=0; Waited=$false }
-        $process | Add-Member ScriptMethod WaitForExit { $this.Waited=$true }
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds); $this.Waited=$true; return $true }
         Mock Start-Process {
             $ArgumentList | Should -Contain '-BackupDir'
             $ArgumentList | Should -Contain 'latest'
@@ -2449,6 +2502,7 @@ Describe '勾选视图 (v1.5.5)' {
         }
         Mock Show-GuiMessage {}
         Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeTrue
 
         $process.Waited | Should -BeTrue
         $script:GuiState | Should -Be 'completed'
@@ -2461,6 +2515,8 @@ Describe '勾选视图 (v1.5.5)' {
         $restoreEnd = $source.IndexOf('# ---------- 恢复最近一次处理', $restoreStart)
         $restoreBody = $source.Substring($restoreStart, $restoreEnd - $restoreStart)
         $restoreBody | Should -Not -Match 'Join-Path \$script:Root ''backups''|Get-ChildItem|Get-Content|manifest\.json'
+        $restoreBody | Should -Not -Match '\.WaitForExit\(\)'
+        $restoreBody | Should -Match 'DispatcherTimer'
     }
 
     It 'completed 摘要在存在失败项时使用危险色强调' {
@@ -2473,10 +2529,11 @@ Describe '勾选视图 (v1.5.5)' {
 
     It '恢复 exit 2 只展示脱敏的部分失败状态且不伪报成功' {
         $process = [pscustomobject]@{ ExitCode=2 }
-        $process | Add-Member ScriptMethod WaitForExit {}
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds); return $true }
         Mock Start-Process { $process }
         Mock Show-GuiMessage {}
-        Invoke-GuiRestoreLatest | Should -BeFalse
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeTrue
 
         $script:GuiState | Should -Be 'completed'
         $script:Win.FindName('CompletedSummaryText').Text | Should -Match '部分'
@@ -2486,11 +2543,12 @@ Describe '勾选视图 (v1.5.5)' {
 
     It '恢复 exit 3 如实显示无可信备份且失败关闭' {
         $process = [pscustomobject]@{ ExitCode=3 }
-        $process | Add-Member ScriptMethod WaitForExit {}
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds); return $true }
         Mock Start-Process { $process }
         Mock Show-GuiMessage {}
 
-        Invoke-GuiRestoreLatest | Should -BeFalse
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeTrue
 
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '备份|backup'
@@ -2499,10 +2557,11 @@ Describe '勾选视图 (v1.5.5)' {
 
     It '恢复非零错误进入 error 且只显示警告模态框' {
         $process = [pscustomobject]@{ ExitCode=7 }
-        $process | Add-Member ScriptMethod WaitForExit {}
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds); return $true }
         Mock Start-Process { $process }
         Mock Show-GuiMessage {}
-        Invoke-GuiRestoreLatest | Should -BeFalse
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeTrue
 
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '7'
@@ -2520,7 +2579,7 @@ Describe '勾选视图 (v1.5.5)' {
         Assert-MockCalled Show-GuiMessage -Times 1 -Exactly
     }
 
-    It '恢复进程启动后 WaitForExit 异常显示状态未知并恢复按钮' {
+    It '恢复进程状态连续不可读时安全脱离且不阻塞 UI' {
         $process = [pscustomobject]@{}
         $process | Add-Member ScriptMethod WaitForExit { throw 'simulated wait failure' }
         Mock Start-Process {
@@ -2529,39 +2588,45 @@ Describe '勾选视图 (v1.5.5)' {
         }
         Mock Show-GuiMessage {}
 
-        Invoke-GuiRestoreLatest | Should -BeFalse
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeFalse
+        Complete-GuiRestorePoll | Should -BeFalse
+        Complete-GuiRestorePoll | Should -BeTrue
 
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '已启动|started'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '状态未知|unknown'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分修改|partial'
         $script:Win.FindName('ErrorMutationText').Text | Should -Not -Match '没有开始|did not start'
-        $script:Win.FindName('BtnRestore').IsEnabled | Should -BeTrue
+        $script:Win.FindName('BtnRestore').IsEnabled | Should -BeFalse
         Assert-MockCalled Start-Process -Times 1 -Exactly
-        Assert-MockCalled Show-GuiMessage -Times 1 -Exactly
+        Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
     }
 
     It '恢复进程启动后 ExitCode 不可读显示状态未知且不重复启动' {
         # Windows PowerShell 5.1 may surface a failing property getter as $null.
         # Exercise the production fail-closed boundary using that observable result.
         $process = [pscustomobject]@{ ExitCode=$null }
-        $process | Add-Member ScriptMethod WaitForExit {}
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds); return $true }
         Mock Start-Process {
             $script:Win.FindName('BtnRestore').IsEnabled | Should -BeFalse
             $process
         }
         Mock Show-GuiMessage {}
 
-        Invoke-GuiRestoreLatest | Should -BeFalse
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeFalse
+        Complete-GuiRestorePoll | Should -BeFalse
+        Complete-GuiRestorePoll | Should -BeTrue
 
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '已启动|started'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '状态未知|unknown'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分修改|partial'
         $script:Win.FindName('ErrorMutationText').Text | Should -Not -Match '没有开始|did not start'
-        $script:Win.FindName('BtnRestore').IsEnabled | Should -BeTrue
+        $script:Win.FindName('BtnRestore').IsEnabled | Should -BeFalse
         Assert-MockCalled Start-Process -Times 1 -Exactly
-        Assert-MockCalled Show-GuiMessage -Times 1 -Exactly
+        Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
     }
 
     It '恢复门闩已占用时拒绝再次启动管理员恢复进程' {
@@ -2574,5 +2639,32 @@ Describe '勾选视图 (v1.5.5)' {
         } finally {
             $script:RestoreInProgress = $oldRestoreInProgress
         }
+    }
+
+    It '恢复 detached 时阻止所有其他变更入口和窗口关闭' {
+        $script:RestoreProcess = [pscustomobject]@{}
+        $script:RestoreLifecycle = 'detached'
+        $script:RestoreInProgress = $false
+        Mock Start-Process { throw 'must not start a competing mutation' }
+        $eventArgs = [pscustomobject]@{ Cancel=$false }
+
+        Start-GuiExecution | Should -BeFalse
+        Start-GuiSuspiciousStop | Should -BeFalse
+        Protect-GuiExecutionWindowClose -EventArgs $eventArgs | Should -BeFalse
+        $eventArgs.Cancel | Should -BeTrue
+        Assert-MockCalled Start-Process -Times 0 -Exactly
+    }
+
+    It '已有 detached 清理或进程停止时拒绝启动恢复' {
+        Mock Start-Process { throw 'must not start restore during another mutation' }
+        $script:ExecutionProcess = [pscustomobject]@{}
+        $script:ExecutionLifecycle = 'detached'
+        Invoke-GuiRestoreLatest | Should -BeFalse
+        $script:ExecutionProcess = $null
+        $script:ExecutionLifecycle = 'idle'
+        $script:SuspiciousStopProcess = [pscustomobject]@{}
+        $script:SuspiciousStopLifecycle = 'detached'
+        Invoke-GuiRestoreLatest | Should -BeFalse
+        Assert-MockCalled Start-Process -Times 0 -Exactly
     }
 }

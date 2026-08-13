@@ -11,26 +11,25 @@ Describe 'one-time suspicious process stop' {
             PID=4242; Name='suspect'; Path='C:\Temp\suspect.exe'; StartTimeUtc='2026-08-11T00:00:00.0000000Z'
             CanStop=$true; StopBlockReason=''; status='pending'; Reason='temp'; 'CPU%'=8; MemMB=50
         }
+        function New-TestBoundTarget($Identity) {
+            [pscustomobject]@{ Process = [pscustomobject]@{}; Identity = $Identity }
+        }
     }
 
     It 'skips when the PID now belongs to a different path' {
-        Mock Get-CurrentProcessIdentity { [pscustomobject]@{PID=4242;Name='suspect';Path='C:\Other\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'} }
-        Mock Stop-Process {}
+        Mock Get-BoundProcessTarget { New-TestBoundTarget ([pscustomobject]@{PID=4242;Name='suspect';Path='C:\Other\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'}) }
+        Mock Stop-BoundProcessTarget { $true }
         $result = Invoke-OneTimeProcessStop $script:selectedRow
         $result.status | Should -BeExactly 'skipped'
-        Should -Invoke Stop-Process -Times 0 -Exactly
+        Should -Invoke Stop-BoundProcessTarget -Times 0 -Exactly
     }
 
     It 'stops only an exact four-field identity and confirms exit' {
-        $script:afterStop = $false
-        Mock Get-CurrentProcessIdentity {
-            if ($script:afterStop) { return $null }
-            [pscustomobject]@{PID=4242;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'}
-        }
-        Mock Stop-Process { $script:afterStop = $true }
+        Mock Get-BoundProcessTarget { New-TestBoundTarget ([pscustomobject]@{PID=4242;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'}) }
+        Mock Stop-BoundProcessTarget { $true }
         $result = Invoke-OneTimeProcessStop $script:selectedRow
         $result.status | Should -BeExactly 'success'
-        Should -Invoke Stop-Process -Times 1 -Exactly
+        Should -Invoke Stop-BoundProcessTarget -Times 1 -Exactly
     }
 
     It 'skips name or start-time mismatches' {
@@ -38,52 +37,43 @@ Describe 'one-time suspicious process stop' {
             [pscustomobject]@{PID=4242;Name='other';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'},
             [pscustomobject]@{PID=4242;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:01.0000000Z'}
         )) {
-            Mock Get-CurrentProcessIdentity { $identity }
-            Mock Stop-Process {}
+            Mock Get-BoundProcessTarget { New-TestBoundTarget $identity }
+            Mock Stop-BoundProcessTarget { $true }
             (Invoke-OneTimeProcessStop $script:selectedRow).status | Should -BeExactly 'skipped'
-            Should -Invoke Stop-Process -Times 0 -Exactly
+            Should -Invoke Stop-BoundProcessTarget -Times 0 -Exactly
         }
     }
 
     It 'never stops a protected process name or the current Pester PID' {
-        Mock Get-CurrentProcessIdentity { throw 'must not inspect protected target' }
-        Mock Stop-Process {}
+        Mock Get-BoundProcessTarget { throw 'must not inspect protected target' }
+        Mock Stop-BoundProcessTarget { $true }
         $protected = $script:selectedRow.PSObject.Copy(); $protected.Name='lsass'
         (Invoke-OneTimeProcessStop $protected).status | Should -BeExactly 'skipped'
         $self = $script:selectedRow.PSObject.Copy(); $self.PID=$PID
         (Invoke-OneTimeProcessStop $self).status | Should -BeExactly 'skipped'
-        Should -Invoke Stop-Process -Times 0 -Exactly
+        Should -Invoke Stop-BoundProcessTarget -Times 0 -Exactly
     }
 
     It 'skips when the PID has disappeared' {
-        Mock Get-CurrentProcessIdentity { $null }
-        Mock Stop-Process {}
+        Mock Get-BoundProcessTarget { $null }
+        Mock Stop-BoundProcessTarget { $true }
         (Invoke-OneTimeProcessStop $script:selectedRow).status | Should -BeExactly 'skipped'
-        Should -Invoke Stop-Process -Times 0 -Exactly
+        Should -Invoke Stop-BoundProcessTarget -Times 0 -Exactly
     }
 
     It 'fails when stop throws or the process remains present' {
-        Mock Get-CurrentProcessIdentity { [pscustomobject]@{PID=4242;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'} }
-        Mock Stop-Process { throw 'access denied' }
+        Mock Get-BoundProcessTarget { New-TestBoundTarget ([pscustomobject]@{PID=4242;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'}) }
+        Mock Stop-BoundProcessTarget { throw 'access denied' }
         (Invoke-OneTimeProcessStop $script:selectedRow).status | Should -BeExactly 'failed'
-        Mock Stop-Process {}
+        Mock Stop-BoundProcessTarget { $false }
         (Invoke-OneTimeProcessStop $script:selectedRow).status | Should -BeExactly 'failed'
     }
 
-    It 'allows a short bounded exit delay after Stop-Process returns' {
-        $script:identityReads = 0
-        Mock Get-CurrentProcessIdentity {
-            $script:identityReads++
-            if ($script:identityReads -le 2) {
-                return [pscustomobject]@{PID=4242;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'}
-            }
-            return $null
-        }
-        Mock Stop-Process {}
-        Mock Start-Sleep {}
-
+    It 'accepts a bounded wait reported by the bound process object' {
+        Mock Get-BoundProcessTarget { New-TestBoundTarget ([pscustomobject]@{PID=4242;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'}) }
+        Mock Stop-BoundProcessTarget { $true }
         (Invoke-OneTimeProcessStop $script:selectedRow).status | Should -BeExactly 'success'
-        Should -Invoke Start-Sleep -Times 1 -Exactly
+        Should -Invoke Stop-BoundProcessTarget -Times 1 -Exactly
     }
 
     It 'requires empty OEM arrays and writes terminal status to the hash-bound file' {
@@ -120,5 +110,18 @@ Describe 'one-time suspicious process stop' {
         $start | Should -BeGreaterOrEqual 0
         $clean | Should -Not -Match 'Stop-Process'
         $clean | Should -Not -Match 'Read-Host.+PID'
+    }
+
+    It 'binds validation and termination to one Process object instead of stopping a reusable PID' {
+        $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
+        $start = $source.IndexOf('function Invoke-OneTimeProcessStop')
+        $end = $source.IndexOf('function Invoke-StopProcessPending', $start)
+        $stop = $source.Substring($start, $end - $start)
+
+        $stop | Should -Match 'Get-BoundProcessTarget'
+        $stop | Should -Match 'Stop-BoundProcessTarget'
+        $stop | Should -Not -Match 'Stop-Process\s+-Id'
+        $stop | Should -Not -Match 'Wait-ProcessIdentityExit'
+        $source | Should -Match '\$null\s*=\s*\$process\.Handle'
     }
 }
