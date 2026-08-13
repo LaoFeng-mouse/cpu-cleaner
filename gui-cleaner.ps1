@@ -228,6 +228,8 @@ $script:ReviewedPendingSnapshot = $null
 $script:ReviewedPendingGenerationSha256 = $null
 $emptyReviewedActionKeys = [System.Collections.Generic.List[string]]::new()
 $script:ReviewedActionIdentityKeys = $emptyReviewedActionKeys.AsReadOnly()
+$emptyReviewedSuspiciousKeys = [System.Collections.Generic.List[string]]::new()
+$script:ReviewedSuspiciousIdentityKeys = $emptyReviewedSuspiciousKeys.AsReadOnly()
 $script:ExecutionProcess = $null
 $script:ExecutionTimer = $null
 $script:ExecutionTempPath = $null
@@ -412,6 +414,23 @@ function Get-GuiSuspiciousIdentityKey($Item) {
         Path = $Item.Path
         StartTimeUtc = $Item.StartTimeUtc
     })
+}
+
+function Get-GuiValidatedSuspiciousIdentityKeys($Pending) {
+    $keys = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($row in @($Pending.suspicious)) {
+        if ($row.CanStop -isnot [bool] -or -not $row.CanStop -or [string]$row.status -cnotin @('pending','failed')) { continue }
+        if (($row.PID -isnot [int32] -and $row.PID -isnot [int64]) -or [int64]$row.PID -le 0) { throw 'stoppable suspicious PID is invalid.' }
+        foreach ($name in @('Name','Path','StartTimeUtc')) {
+            if ($row.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($row.$name)) { throw "stoppable suspicious $name is invalid." }
+        }
+        if (-not [System.IO.Path]::IsPathRooted([string]$row.Path) -or -not ([string]$row.StartTimeUtc).EndsWith('Z',[System.StringComparison]::Ordinal)) { throw 'stoppable suspicious identity is incomplete.' }
+        $key = Get-GuiSuspiciousIdentityKey $row
+        if (-not $seen.Add($key)) { throw 'duplicate suspicious identity in reviewed snapshot.' }
+        $keys.Add($key)
+    }
+    return @($keys)
 }
 
 function Get-GuiSuspiciousViewItems($Pending) {
@@ -1065,6 +1084,8 @@ function Dismiss-GuiResults {
     $script:ReviewedPendingGenerationSha256 = $null
     $emptyActionKeys = [System.Collections.Generic.List[string]]::new()
     $script:ReviewedActionIdentityKeys = $emptyActionKeys.AsReadOnly()
+    $emptySuspiciousKeys = [System.Collections.Generic.List[string]]::new()
+    $script:ReviewedSuspiciousIdentityKeys = $emptySuspiciousKeys.AsReadOnly()
     Set-GuiState idle -Force
 }
 $window.FindName('BtnSkipReview').Add_Click({ Dismiss-GuiResults })
@@ -1078,9 +1099,13 @@ $window.FindName('BtnOpenReview').Add_Click({
         $null = Get-GuiPendingSchemaVersion $pending
         Assert-GuiPendingPresentationShape -Pending $pending
         $validatedActionKeys = @(Get-GuiValidatedActionIdentityKeys -Pending $pending)
+        $validatedSuspiciousKeys = @(Get-GuiValidatedSuspiciousIdentityKeys -Pending $pending)
         $actionKeyList = [System.Collections.Generic.List[string]]::new()
         foreach ($key in $validatedActionKeys) { $actionKeyList.Add($key) }
         $actionAllowlist = $actionKeyList.AsReadOnly()
+        $suspiciousKeyList = [System.Collections.Generic.List[string]]::new()
+        foreach ($key in $validatedSuspiciousKeys) { $suspiciousKeyList.Add($key) }
+        $suspiciousAllowlist = $suspiciousKeyList.AsReadOnly()
         $items = @(Get-PendingViewItems -Pending $pending)
         $suspiciousItems = @(Get-GuiSuspiciousViewItems -Pending $pending)
         $list.ItemsSource = $null
@@ -1089,6 +1114,7 @@ $window.FindName('BtnOpenReview').Add_Click({
         $script:ReviewedPendingSnapshot = $pending
         $script:ReviewedPendingGenerationSha256 = $reviewSnapshot.Sha256
         $script:ReviewedActionIdentityKeys = $actionAllowlist
+        $script:ReviewedSuspiciousIdentityKeys = $suspiciousAllowlist
         Set-GuiState review
         Update-GuiExecuteAvailability -List $list
         Update-GuiStopProcessAvailability -List $suspiciousList
@@ -1101,6 +1127,8 @@ $window.FindName('BtnOpenReview').Add_Click({
         $script:ReviewedPendingGenerationSha256 = $null
         $emptyActionKeys = [System.Collections.Generic.List[string]]::new()
         $script:ReviewedActionIdentityKeys = $emptyActionKeys.AsReadOnly()
+        $emptySuspiciousKeys = [System.Collections.Generic.List[string]]::new()
+        $script:ReviewedSuspiciousIdentityKeys = $emptySuspiciousKeys.AsReadOnly()
         Update-GuiExecuteAvailability -List $list
         Update-GuiStopProcessAvailability -List $suspiciousList
         Set-GuiError -Summary (Get-Text 'ReviewErrorSummary') -Mutation (Get-Text 'ReviewNoMutation') -Detail $_.Exception.Message
@@ -1206,6 +1234,31 @@ function Read-GuiStrictSuspiciousStopResult {
     return @($items)
 }
 
+function Resolve-GuiReviewedSuspiciousRows {
+    param($List)
+    if ($null -eq $script:ReviewedPendingSnapshot -or $null -eq $script:ReviewedSuspiciousIdentityKeys) { throw 'suspicious reviewed allowlist is unavailable.' }
+    $validatedKeys = @(Get-GuiValidatedSuspiciousIdentityKeys $script:ReviewedPendingSnapshot)
+    if ($validatedKeys.Count -ne $script:ReviewedSuspiciousIdentityKeys.Count) { throw 'suspicious reviewed allowlist changed.' }
+    $byKey = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
+    foreach ($row in @($script:ReviewedPendingSnapshot.suspicious)) {
+        if ($row.CanStop -is [bool] -and $row.CanStop -and [string]$row.status -cin @('pending','failed')) {
+            $key = Get-GuiSuspiciousIdentityKey $row
+            if (-not $script:ReviewedSuspiciousIdentityKeys.Contains($key)) { throw 'suspicious reviewed allowlist changed.' }
+            $byKey.Add($key,$row)
+        }
+    }
+    $resolved = @()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($view in @($List.Items | Where-Object { $_.IsChecked })) {
+        if ($view.CanStop -isnot [bool] -or -not $view.CanStop -or $null -eq $view._raw) { throw 'selected suspicious row is not stoppable.' }
+        $key = Get-GuiSuspiciousIdentityKey $view._raw
+        if (-not $script:ReviewedSuspiciousIdentityKeys.Contains($key) -or -not $byKey.ContainsKey($key)) { throw 'selected suspicious row is outside the reviewed allowlist.' }
+        if (-not $seen.Add($key)) { throw 'selected suspicious identity is duplicated.' }
+        $resolved += $byKey[$key]
+    }
+    return @($resolved)
+}
+
 function Complete-SuspiciousStopPoll {
     if ($null -eq $script:SuspiciousStopProcess) { return $false }
     $probe = Get-GuiExecutionProcessStatus -Process $script:SuspiciousStopProcess
@@ -1244,13 +1297,13 @@ function Complete-SuspiciousStopPoll {
 function Start-GuiSuspiciousStop {
     param($List = $window.FindName('SuspiciousList'))
     if ($script:SuspiciousStopInProgress -or $script:ExecutionInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached')) { return $false }
-    $selectedViews = @($List.Items | Where-Object { $_.IsChecked -and $_.CanStop })
-    if ($selectedViews.Count -eq 0) { return $false }
+    $selectedRows = @(Resolve-GuiReviewedSuspiciousRows -List $List)
+    if ($selectedRows.Count -eq 0) { return $false }
     $script:SuspiciousStopInProgress = $true
     $script:SuspiciousStopLifecycle = 'starting'
     Update-GuiStopProcessAvailability -List $List
     try {
-        $payload = New-GuiSuspiciousSubsetPayload -Selected $selectedViews -SourcePending $script:ReviewedPendingSnapshot
+        $payload = New-GuiSuspiciousSubsetPayload -Selected $selectedRows -SourcePending $script:ReviewedPendingSnapshot
         $script:SuspiciousStopTempPath = Join-Path $env:TEMP ('shushu_suspicious_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($script:SuspiciousStopTempPath, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($true))
         $pendingSha256 = Get-GuiFileSha256 -Path $script:SuspiciousStopTempPath

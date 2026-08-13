@@ -821,6 +821,28 @@ Describe '勾选视图 (v1.5.5)' {
         @(Resolve-GuiReviewedActions -List $script:Win.FindName('PendingList')).Count | Should -Be 0
     }
 
+    It 'resolves suspicious selection only from its reviewed identity allowlist' {
+        $pending = New-GuiReviewPendingFixture
+        $pending.suspicious = @([pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        })
+        $script:ReviewedPendingSnapshot = $pending
+        $keys = [System.Collections.Generic.List[string]]::new()
+        $keys.Add((Get-GuiSuspiciousIdentityKey $pending.suspicious[0]))
+        $script:ReviewedSuspiciousIdentityKeys = $keys.AsReadOnly()
+        $list = $script:Win.FindName('SuspiciousList')
+        $valid = @(Get-GuiSuspiciousViewItems $pending); $valid[0].IsChecked = $true
+        $list.ItemsSource = $valid
+        @(Resolve-GuiReviewedSuspiciousRows -List $list).Count | Should -Be 1
+
+        $forgedRaw = $pending.suspicious[0].PSObject.Copy(); $forgedRaw.Path = 'C:\Other\forged.exe'
+        $forged = [pscustomobject]@{ IsChecked=$true; CanStop=$true; _raw=$forgedRaw }
+        $list.ItemsSource = @($forged)
+        { Resolve-GuiReviewedSuspiciousRows -List $list } | Should -Throw '*allowlist*'
+    }
+
     It 'enables one-time stop only after an explicit stoppable selection' {
         $list = $script:Win.FindName('SuspiciousList')
         $row = [pscustomobject]@{ IsChecked=$false; CanStop=$true }
