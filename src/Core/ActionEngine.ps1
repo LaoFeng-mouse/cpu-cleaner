@@ -1753,6 +1753,15 @@ function New-ProcessStopResult($Row, [string]$Status, [string]$Reason) {
     return $copy
 }
 
+function Wait-ProcessIdentityExit {
+    param([int]$ProcessId, [int]$Attempts = 20, [int]$DelayMilliseconds = 50)
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        if ($null -eq (Get-CurrentProcessIdentity $ProcessId)) { return $true }
+        if ($attempt -lt ($Attempts - 1)) { Start-Sleep -Milliseconds $DelayMilliseconds }
+    }
+    return $false
+}
+
 function Invoke-OneTimeProcessStop($Row) {
     try { $null = Assert-SuspiciousPendingRow $Row -RequireStoppable } catch {
         return New-ProcessStopResult $Row 'failed' ('身份结构无效: ' + $_.Exception.Message)
@@ -1769,8 +1778,7 @@ function Invoke-OneTimeProcessStop($Row) {
     try { Stop-Process -Id ([int]$Row.PID) -Force -ErrorAction Stop } catch {
         return New-ProcessStopResult $Row 'failed' ('停止进程失败: ' + $_.Exception.Message)
     }
-    $after = Get-CurrentProcessIdentity ([int]$Row.PID)
-    if ($null -ne $after) { return New-ProcessStopResult $Row 'failed' '停止命令返回后进程仍存在' }
+    if (-not (Wait-ProcessIdentityExit -ProcessId ([int]$Row.PID))) { return New-ProcessStopResult $Row 'failed' '等待退出超时，进程仍存在' }
     return New-ProcessStopResult $Row 'success' '已结束这一次进程实例'
 }
 
