@@ -27,7 +27,7 @@ $script:I18N = @{
         IdleBody='扫描只读，不会修改系统。'; ResultsNoMutation='目前尚未修改任何内容。'; ExecutingBody='正在逐项处理；每项均会备份并复核。'
         BtnStartScan='开始安全扫描'; BtnOpenReview='查看处理建议'; BtnSkipReview='这次先不处理'; BtnExecute='处理已选择项目'; BtnRescan='重新扫描'; BtnRetry='重试'
         ResultStatus='扫描完成，发现需要关注的项目'; ResultStatusEmpty='扫描完成，未发现匹配项'; ResultStatusDegraded='扫描完成，但扫描信息不完整'; ResultHeadlinePrefix='抓到 '; ResultHeadlineSuffix=' 个偷偷常驻的后台'; ResultHeadlineEmpty='这次没有抓到偷偷常驻的后台'; ResultHeadlineDegraded='部分信息使用兼容方式读取，暂不能判断电脑是否干净'; ResultsEvidence='专业证据与服务名称（点击展开）'; ResultsEvidenceEmpty='没有可展示的匹配证据。'; ScanResultDegradedSuffix='；部分分类使用兼容采集'
-        SelectAll='选择全部安全项'; ClearAll='清空选择'; ReviewBoundary='观察项不会自动执行；执行前将再次验证。'; TechnicalDetails='技术详情'; ErrorDetails='查看技术详情'
+        SelectAll='选择全部安全项'; ClearAll='清空选择'; ReviewBoundary='观察项不会自动执行；执行前将再次验证。'; SuspiciousBoundary='可疑进程：只结束本次进程，不删除文件或关闭自启。'; SuspiciousHint='默认不勾选；执行前会复核 PID、名称、路径和启动时间。'; BtnStopProcesses='一次性结束已选进程'; TechnicalDetails='技术详情'; ErrorDetails='查看技术详情'
         TabScan='🐹 1. 扫描（只读）'; TabPending='📋 2. 处理建议'; TabExec='⚙️ 3. 执行（管理员）'; TabResult='✅ 4. 结果与恢复'
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
         ScanPhaseInitial='正在检查服务、启动项、计划任务和进程'; ScanPhaseSystemInfo='读取系统信息'; ScanPhaseProcesses='检查高占用进程'; ScanPhaseServices='检查系统服务'; ScanPhaseAutoStart='检查启动项'; ScanPhaseTasks='检查计划任务'; ScanPhaseRules='匹配安全规则'; ScanPhaseReport='生成扫描报告'
@@ -56,7 +56,7 @@ $script:I18N = @{
         IdleBody='Scanning is read-only and changes no system settings.'; ResultsNoMutation='Nothing has been changed yet.'; ExecutingBody='Processing item by item; each action is backed up and verified.'
         BtnStartScan='Start safe scan'; BtnOpenReview='Review recommendations'; BtnSkipReview='Not this time'; BtnExecute='Process selected items'; BtnRescan='Scan again'; BtnRetry='Retry'
         ResultStatus='Scan complete — items need attention'; ResultStatusEmpty='Scan complete — no matching items found'; ResultStatusDegraded='Scan complete, but some scan information is incomplete'; ResultHeadlinePrefix='Found '; ResultHeadlineSuffix=' resident background items'; ResultHeadlineEmpty='No resident background items found this time'; ResultHeadlineDegraded='Compatibility collection was used; this scan cannot declare the PC clean'; ResultsEvidence='Evidence and service names (expand)'; ResultsEvidenceEmpty='No matcher evidence to display.'; ScanResultDegradedSuffix='; some categories used compatibility collection'
-        SelectAll='Select all safe items'; ClearAll='Clear selection'; ReviewBoundary='Observation items never run automatically; every action is revalidated.'; TechnicalDetails='Technical details'; ErrorDetails='View technical details'
+        SelectAll='Select all safe items'; ClearAll='Clear selection'; ReviewBoundary='Observation items never run automatically; every action is revalidated.'; SuspiciousBoundary='Suspicious processes: stop this instance only; do not delete files or disable startup.'; SuspiciousHint='Unchecked by default; PID, name, path, and start time are revalidated.'; BtnStopProcesses='Stop selected once'; TechnicalDetails='Technical details'; ErrorDetails='View technical details'
         TabScan='🐹 1. Scan (read-only)'; TabPending='📋 2. Recommendations'; TabExec='⚙️ 3. Execute (admin)'; TabResult='✅ 4. Result & Restore'
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
         ScanPhaseInitial='Checking services, startup items, scheduled tasks, and processes'; ScanPhaseSystemInfo='Reading system information'; ScanPhaseProcesses='Checking high-usage processes'; ScanPhaseServices='Checking system services'; ScanPhaseAutoStart='Checking startup items'; ScanPhaseTasks='Checking scheduled tasks'; ScanPhaseRules='Matching safety rules'; ScanPhaseReport='Generating scan report'
@@ -162,7 +162,8 @@ function Apply-Language {
         @('IdleBodyText','IdleBody'), @('ResultsNoMutationText','ResultsNoMutation'), @('ExecutingBodyText','ExecutingBody'),
         @('ResultStatusText','ResultStatus'), @('ResultHeadlinePrefix','ResultHeadlinePrefix'), @('ResultHeadlineSuffix','ResultHeadlineSuffix'), @('ResultsEvidenceExpander','ResultsEvidence'),
         @('BtnStartScan','BtnStartScan'), @('BtnOpenReview','BtnOpenReview'), @('BtnSkipReview','BtnSkipReview'), @('BtnExecute','BtnExecute'), @('BtnRescan','BtnRescan'), @('BtnRetry','BtnRetry'), @('BtnRestore','BtnRestore'),
-        @('BtnSelectAll','SelectAll'), @('BtnClearAll','ClearAll'), @('ReviewBoundaryText','ReviewBoundary')
+        @('BtnSelectAll','SelectAll'), @('BtnClearAll','ClearAll'), @('ReviewBoundaryText','ReviewBoundary'),
+        @('SuspiciousBoundaryText','SuspiciousBoundary'), @('SuspiciousSelectionHint','SuspiciousHint'), @('BtnStopProcesses','BtnStopProcesses')
     )) {
         $control = $w.FindName($entry[0])
         if ($null -eq $control) { throw "GUI control missing: $($entry[0])" }
@@ -174,7 +175,7 @@ function Apply-Language {
     $w.Resources['ErrorDetailsText'] = $t['ErrorDetails']
     $automationKeys = @{
         ImgStage1='AutoStage1'; ImgStage2='AutoStage2'; ImgStage3='AutoStage3'; ImgStage4='AutoStage4'
-        BtnStartScan='BtnStartScan'; BtnOpenReview='BtnOpenReview'; BtnSkipReview='BtnSkipReview'; BtnExecute='BtnExecute'; BtnRescan='BtnRescan'; BtnRetry='BtnRetry'; BtnRestore='BtnRestore'; BtnLang='LangLabel'
+        BtnStartScan='BtnStartScan'; BtnOpenReview='BtnOpenReview'; BtnSkipReview='BtnSkipReview'; BtnExecute='BtnExecute'; BtnStopProcesses='BtnStopProcesses'; BtnRescan='BtnRescan'; BtnRetry='BtnRetry'; BtnRestore='BtnRestore'; BtnLang='LangLabel'
         ResultSummaryText='AutoResult'; CompletedSummaryText='AutoCompleted'; ErrorSummaryText='AutoError'
     }
     foreach ($name in $automationKeys.Keys) {
@@ -236,6 +237,13 @@ $script:RestoreInProgress = $false
 $script:ExecutionLifecycle = 'idle'
 $script:ExecutionUnknownProbeCount = 0
 $script:ExecutionUnknownProbeLimit = 3
+$script:SuspiciousStopProcess = $null
+$script:SuspiciousStopTimer = $null
+$script:SuspiciousStopTempPath = $null
+$script:SuspiciousStopRows = @()
+$script:SuspiciousStopInProgress = $false
+$script:SuspiciousStopLifecycle = 'idle'
+$script:SuspiciousStopUnknownProbeCount = 0
 $script:StatePanels = @('IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel','ExecutingPanel','CompletedPanel','ErrorPanel')
 
 function Update-GuiExecuteAvailability {
@@ -244,7 +252,16 @@ function Update-GuiExecuteAvailability {
         ($_.CanExecute -is [bool]) -and $_.CanExecute -and
         ($_.IsChecked -is [bool]) -and $_.IsChecked
     })
-    $window.FindName('BtnExecute').IsEnabled = ($selectedExecutable.Count -gt 0 -and -not $script:ExecutionInProgress)
+    $window.FindName('BtnExecute').IsEnabled = ($selectedExecutable.Count -gt 0 -and -not $script:ExecutionInProgress -and -not $script:SuspiciousStopInProgress)
+}
+
+function Update-GuiStopProcessAvailability {
+    param($List = $window.FindName('SuspiciousList'))
+    $selected = @($List.Items | Where-Object {
+        ($_.CanStop -is [bool]) -and $_.CanStop -and
+        ($_.IsChecked -is [bool]) -and $_.IsChecked
+    })
+    $window.FindName('BtnStopProcesses').IsEnabled = ($selected.Count -gt 0 -and -not $script:SuspiciousStopInProgress -and -not $script:ExecutionInProgress)
 }
 
 function Set-GuiState {
@@ -381,6 +398,38 @@ function Copy-PendingActionForSubset($RawAction) {
     return [pscustomobject]$properties
 }
 
+function Copy-GuiSuspiciousForSubset($RawRow) {
+    $properties = [ordered]@{}
+    foreach ($property in $RawRow.PSObject.Properties) { $properties[$property.Name] = $property.Value }
+    $properties['status'] = 'pending'
+    return [pscustomobject]$properties
+}
+
+function Get-GuiSuspiciousIdentityKey($Item) {
+    return ConvertTo-Json -Compress -Depth 3 -InputObject ([ordered]@{
+        PID = $Item.PID
+        Name = $Item.Name
+        Path = $Item.Path
+        StartTimeUtc = $Item.StartTimeUtc
+    })
+}
+
+function Get-GuiSuspiciousViewItems($Pending) {
+    $rows = @()
+    if ($null -eq $Pending -or -not $Pending.suspicious) { return @() }
+    foreach ($item in @($Pending.suspicious)) {
+        $canStop = ($item.CanStop -is [bool]) -and $item.CanStop -and ([string]$item.status -cin @('pending','failed'))
+        $rows += [pscustomobject]@{
+            IsChecked = $false; CanStop = [bool]$canStop; PID = $item.PID
+            PidLabel = 'PID ' + [string]$item.PID; Name = [string]$item.Name
+            Path = [string]$item.Path; StartTimeUtc = [string]$item.StartTimeUtc
+            Reason = [string]$item.Reason; StopBlockReason = [string]$item.StopBlockReason
+            status = [string]$item.status; _raw = $item
+        }
+    }
+    return @($rows)
+}
+
 function Get-GuiPendingSchemaVersion($Pending) {
     $schemaProperty = $null
     if ($null -ne $Pending) {
@@ -425,6 +474,23 @@ function New-PendingSubsetPayload {
         }
     }
     return [pscustomobject]$properties
+}
+
+function New-GuiSuspiciousSubsetPayload {
+    param($Selected, $SourcePending)
+    $pendingVersion = Get-GuiPendingSchemaVersion $SourcePending
+    $rows = @()
+    foreach ($selectedRow in @($Selected)) {
+        $raw = if ($selectedRow.PSObject.Properties['_raw'] -and $null -ne $selectedRow._raw) { $selectedRow._raw } else { $selectedRow }
+        $rows += Copy-GuiSuspiciousForSubset $raw
+    }
+    return [pscustomobject]([ordered]@{
+        pending_schema_version = $pendingVersion
+        generated = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        actions = @()
+        observations = @()
+        suspicious = @($rows)
+    })
 }
 
 function ConvertTo-GuiPendingJson {
@@ -1004,6 +1070,7 @@ function Dismiss-GuiResults {
 $window.FindName('BtnSkipReview').Add_Click({ Dismiss-GuiResults })
 $window.FindName('BtnOpenReview').Add_Click({
     $list = $window.FindName('PendingList')
+    $suspiciousList = $window.FindName('SuspiciousList')
     try {
         $pendingPath = Join-Path $script:Root 'pending_actions.json'
         $reviewSnapshot = Read-GuiPendingByteSnapshot -Path $pendingPath
@@ -1015,6 +1082,7 @@ $window.FindName('BtnOpenReview').Add_Click({
         foreach ($key in $validatedActionKeys) { $actionKeyList.Add($key) }
         $actionAllowlist = $actionKeyList.AsReadOnly()
         $items = @(Get-PendingViewItems -Pending $pending)
+        $suspiciousItems = @(Get-GuiSuspiciousViewItems -Pending $pending)
         $list.ItemsSource = $null
         $list.ItemsSource = $items
         $list.Items.Refresh()
@@ -1023,14 +1091,18 @@ $window.FindName('BtnOpenReview').Add_Click({
         $script:ReviewedActionIdentityKeys = $actionAllowlist
         Set-GuiState review
         Update-GuiExecuteAvailability -List $list
+        Update-GuiStopProcessAvailability -List $suspiciousList
     } catch {
         $list.ItemsSource = $null
         $list.Items.Clear()
+        $suspiciousList.ItemsSource = $null
+        $suspiciousList.Items.Clear()
         $script:ReviewedPendingSnapshot = $null
         $script:ReviewedPendingGenerationSha256 = $null
         $emptyActionKeys = [System.Collections.Generic.List[string]]::new()
         $script:ReviewedActionIdentityKeys = $emptyActionKeys.AsReadOnly()
         Update-GuiExecuteAvailability -List $list
+        Update-GuiStopProcessAvailability -List $suspiciousList
         Set-GuiError -Summary (Get-Text 'ReviewErrorSummary') -Mutation (Get-Text 'ReviewNoMutation') -Detail $_.Exception.Message
     }
 })
@@ -1051,6 +1123,9 @@ if ($legacyBtnLoadPending) { $legacyBtnLoadPending.Add_Click({
         $list.ItemsSource = $null
         $list.ItemsSource = $items
         $list.Items.Refresh()
+        $suspiciousList.ItemsSource = $null
+        $suspiciousList.ItemsSource = $suspiciousItems
+        $suspiciousList.Items.Refresh()
     }
     Update-GuiExecuteAvailability -List $list
 }) }
@@ -1075,6 +1150,133 @@ $window.FindName('PendingList').AddHandler(
     [System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,
     $script:PendingSelectionChangedHandler
 )
+
+$script:SuspiciousSelectionChangedHandler = [System.Windows.RoutedEventHandler]{
+    param($sender, $eventArgs)
+    Update-GuiStopProcessAvailability -List $window.FindName('SuspiciousList')
+}
+$window.FindName('SuspiciousList').AddHandler(
+    [System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,
+    $script:SuspiciousSelectionChangedHandler
+)
+
+function Remove-GuiSuspiciousStopTempFile {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    if ([System.IO.Path]::GetFileName($Path) -cnotmatch '^shushu_suspicious_[0-9a-f]{32}\.json$') { return }
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+}
+
+function Clear-GuiSuspiciousStopResources {
+    param([switch]$RemoveTemp, [switch]$ProcessExitConfirmed)
+    if ($null -ne $script:SuspiciousStopProcess -and -not $ProcessExitConfirmed) { return $false }
+    Invoke-GuiTimerStop $script:SuspiciousStopTimer
+    if ($RemoveTemp) { Remove-GuiSuspiciousStopTempFile -Path $script:SuspiciousStopTempPath }
+    $script:SuspiciousStopProcess = $null
+    $script:SuspiciousStopTimer = $null
+    $script:SuspiciousStopTempPath = $null
+    $script:SuspiciousStopRows = @()
+    $script:SuspiciousStopInProgress = $false
+    $script:SuspiciousStopLifecycle = 'idle'
+    $script:SuspiciousStopUnknownProbeCount = 0
+    Update-GuiStopProcessAvailability
+    Update-GuiExecuteAvailability
+    return $true
+}
+
+function Read-GuiStrictSuspiciousStopResult {
+    param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)]$ExpectedRows)
+    $pending = Read-GuiPendingFile -Path $Path
+    $null = Get-GuiPendingSchemaVersion $pending
+    foreach ($name in @('actions','observations','suspicious')) {
+        if ($pending.PSObject.Properties.Name -notcontains $name -or $pending.$name -isnot [System.Array]) { throw "suspicious stop result $name is not an array." }
+    }
+    if (@($pending.actions).Count -ne 0 -or @($pending.observations).Count -ne 0) { throw 'suspicious stop result crossed the OEM action boundary.' }
+    $items = @($pending.suspicious)
+    $expected = @($ExpectedRows)
+    if ($items.Count -ne $expected.Count) { throw 'suspicious stop result identity count changed.' }
+    $expectedKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($row in $expected) { if (-not $expectedKeys.Add((Get-GuiSuspiciousIdentityKey $row))) { throw 'suspicious expected identity is duplicated.' } }
+    $resultKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($row in $items) {
+        $key = Get-GuiSuspiciousIdentityKey $row
+        if (-not $resultKeys.Add($key) -or -not $expectedKeys.Contains($key)) { throw 'suspicious stop result identity changed.' }
+        if ([string]$row.status -cnotin @('success','failed','skipped')) { throw 'suspicious stop result contains a non-terminal status.' }
+    }
+    return @($items)
+}
+
+function Complete-SuspiciousStopPoll {
+    if ($null -eq $script:SuspiciousStopProcess) { return $false }
+    $probe = Get-GuiExecutionProcessStatus -Process $script:SuspiciousStopProcess
+    if ($probe.State -eq 'running') { return $false }
+    if ($probe.State -eq 'unknown') {
+        $script:SuspiciousStopLifecycle = 'unknown'
+        $script:SuspiciousStopUnknownProbeCount++
+        $window.FindName('SuspiciousSelectionHint').Text = '进程状态暂时不可读，已保留诊断清单。'
+        if ($script:SuspiciousStopUnknownProbeCount -ge $script:ExecutionUnknownProbeLimit) {
+            Invoke-GuiTimerStop $script:SuspiciousStopTimer
+            $script:SuspiciousStopInProgress = $false
+            $script:SuspiciousStopLifecycle = 'detached'
+            Update-GuiStopProcessAvailability
+            return $true
+        }
+        return $false
+    }
+    Invoke-GuiTimerStop $script:SuspiciousStopTimer
+    try {
+        $rows = @(Read-GuiStrictSuspiciousStopResult -Path $script:SuspiciousStopTempPath -ExpectedRows $script:SuspiciousStopRows)
+        $window.FindName('SuspiciousList').ItemsSource = @(Get-GuiSuspiciousViewItems ([pscustomobject]@{ suspicious=$rows }))
+        $success = @($rows | Where-Object { $_.status -ceq 'success' }).Count
+        $skipped = @($rows | Where-Object { $_.status -ceq 'skipped' }).Count
+        $failed = @($rows | Where-Object { $_.status -ceq 'failed' }).Count
+        $window.FindName('SuspiciousSelectionHint').Text = "一次性结束结果：成功 $success，跳过 $skipped，失败 $failed。"
+        if ($probe.ExitCode -ne 0 -or $failed -gt 0) { throw "stop_process exited with code $($probe.ExitCode)." }
+        $null = Clear-GuiSuspiciousStopResources -RemoveTemp -ProcessExitConfirmed
+    } catch {
+        $detail = $_.Exception.Message + [Environment]::NewLine + 'Diagnostic subset: ' + $script:SuspiciousStopTempPath
+        $window.FindName('SuspiciousSelectionHint').Text = $detail
+        $null = Clear-GuiSuspiciousStopResources -ProcessExitConfirmed
+    }
+    return $true
+}
+
+function Start-GuiSuspiciousStop {
+    param($List = $window.FindName('SuspiciousList'))
+    if ($script:SuspiciousStopInProgress -or $script:ExecutionInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached')) { return $false }
+    $selectedViews = @($List.Items | Where-Object { $_.IsChecked -and $_.CanStop })
+    if ($selectedViews.Count -eq 0) { return $false }
+    $script:SuspiciousStopInProgress = $true
+    $script:SuspiciousStopLifecycle = 'starting'
+    Update-GuiStopProcessAvailability -List $List
+    try {
+        $payload = New-GuiSuspiciousSubsetPayload -Selected $selectedViews -SourcePending $script:ReviewedPendingSnapshot
+        $script:SuspiciousStopTempPath = Join-Path $env:TEMP ('shushu_suspicious_' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($script:SuspiciousStopTempPath, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($true))
+        $pendingSha256 = Get-GuiFileSha256 -Path $script:SuspiciousStopTempPath
+        $script:SuspiciousStopRows = @($payload.suspicious)
+        $script:SuspiciousStopProcess = Start-Process powershell -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','stop_process','-PendingFileArg',"`"$script:SuspiciousStopTempPath`"",'-PendingSha256Arg',$pendingSha256
+        if ($null -eq $script:SuspiciousStopProcess) { throw 'stop_process 未启动。' }
+        $script:SuspiciousStopLifecycle = 'running'
+        $script:SuspiciousStopTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:SuspiciousStopTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $script:SuspiciousStopTimer.Add_Tick({ $null = Complete-SuspiciousStopPoll })
+        $script:SuspiciousStopTimer.Start()
+        $window.FindName('SuspiciousSelectionHint').Text = '正在结束已选的这一次进程实例…'
+        return $true
+    } catch {
+        if ($null -ne $script:SuspiciousStopProcess) {
+            $script:SuspiciousStopLifecycle = 'detached'
+            $window.FindName('SuspiciousSelectionHint').Text = $_.Exception.Message + '；已保留诊断清单。'
+        } else {
+            $null = Clear-GuiSuspiciousStopResources -RemoveTemp
+            $window.FindName('SuspiciousSelectionHint').Text = $_.Exception.Message
+        }
+        return $false
+    }
+}
+
+$window.FindName('BtnStopProcesses').Add_Click({ Start-GuiSuspiciousStop })
 
 # ---------- 异步处理已选择项目 (review snapshot → 临时清单 → elevated clean) ----------
 function Remove-GuiExecutionTempFile {
@@ -1120,7 +1322,8 @@ function Clear-GuiExecutionResources {
 
 function Protect-GuiExecutionWindowClose {
     param([Parameter(Mandatory=$true)]$EventArgs)
-    if ($script:ExecutionInProgress -or $script:ExecutionLifecycle -cin @('starting','running','unknown')) {
+    if ($script:ExecutionInProgress -or $script:ExecutionLifecycle -cin @('starting','running','unknown') -or
+        $script:SuspiciousStopInProgress -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown')) {
         $EventArgs.Cancel = $true
         $window.FindName('StateSubtitle').Text = Get-Text 'ExecCloseBlocked'
         return $false
@@ -1372,7 +1575,7 @@ function Complete-ExecutionPoll {
 
 function Start-GuiExecution {
     param($List = $window.FindName('PendingList'))
-    if ($script:ExecutionInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached')) {
+    if ($script:ExecutionInProgress -or $script:SuspiciousStopInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached')) {
         return $false
     }
     $script:ExecutionInProgress = $true

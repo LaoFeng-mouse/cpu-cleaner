@@ -91,8 +91,8 @@ Describe 'GUI 壳 (无窗口)' {
             'ImgStage1','ImgStage2','ImgStage3','ImgStage4',
             'IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel',
             'ExecutingPanel','CompletedPanel','ErrorPanel',
-            'StateTitle','StateSubtitle','PendingList','ExecutionList',
-            'BtnStartScan','BtnOpenReview','BtnExecute','BtnRescan','BtnRetry','BtnRestore','BtnLang'
+            'StateTitle','StateSubtitle','PendingList','SuspiciousList','ExecutionList',
+            'BtnStartScan','BtnOpenReview','BtnExecute','BtnStopProcesses','BtnRescan','BtnRetry','BtnRestore','BtnLang'
         )) {
             $script:Win.FindName($name) | Should -Not -BeNullOrEmpty
         }
@@ -790,6 +790,96 @@ Describe '勾选视图 (v1.5.5)' {
         $script:ExecutionInProgress = $false
         $script:ExecutionLifecycle = 'idle'
         $script:ExecutionUnknownProbeCount = 0
+        if ($script:SuspiciousStopTempPath -and (Test-Path -LiteralPath $script:SuspiciousStopTempPath)) {
+            Remove-Item -LiteralPath $script:SuspiciousStopTempPath -Force -ErrorAction SilentlyContinue
+        }
+        $script:SuspiciousStopProcess = $null
+        $script:SuspiciousStopTimer = $null
+        $script:SuspiciousStopTempPath = $null
+        $script:SuspiciousStopRows = @()
+        $script:SuspiciousStopInProgress = $false
+        $script:SuspiciousStopLifecycle = 'idle'
+    }
+
+    It 'projects suspicious rows separately from reviewed OEM actions' {
+        $pending = New-GuiReviewPendingFixture
+        $pending.actions = @()
+        $pending.suspicious = @([pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        })
+        $rows = @(Get-GuiSuspiciousViewItems $pending)
+
+        $rows.Count | Should -Be 1
+        $rows[0].IsChecked | Should -BeFalse
+        $rows[0].CanStop | Should -BeTrue
+        $script:ReviewedPendingSnapshot = $pending
+        $emptyKeys = [System.Collections.Generic.List[string]]::new()
+        $script:ReviewedActionIdentityKeys = $emptyKeys.AsReadOnly()
+        $script:Win.FindName('PendingList').ItemsSource = @()
+        @(Resolve-GuiReviewedActions -List $script:Win.FindName('PendingList')).Count | Should -Be 0
+    }
+
+    It 'enables one-time stop only after an explicit stoppable selection' {
+        $list = $script:Win.FindName('SuspiciousList')
+        $row = [pscustomobject]@{ IsChecked=$false; CanStop=$true }
+        $list.ItemsSource = @($row)
+
+        Update-GuiStopProcessAvailability -List $list
+        $script:Win.FindName('BtnStopProcesses').IsEnabled | Should -BeFalse
+        $row.IsChecked = $true
+        Update-GuiStopProcessAvailability -List $list
+        $script:Win.FindName('BtnStopProcesses').IsEnabled | Should -BeTrue
+    }
+
+    It 'builds a suspicious-only subset envelope' {
+        $pending = New-GuiReviewPendingFixture
+        $row = [pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        }
+        $payload = New-GuiSuspiciousSubsetPayload -Selected @($row) -SourcePending $pending
+
+        @($payload.actions).Count | Should -Be 0
+        @($payload.observations).Count | Should -Be 0
+        @($payload.suspicious).Count | Should -Be 1
+        $payload.suspicious[0].PID | Should -Be 42
+    }
+
+    It 'uses a separate asynchronous non-elevated stop_process lifecycle' {
+        $source = Get-Content (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw
+        $start = $source.IndexOf('function Start-GuiSuspiciousStop')
+        $end = $source.IndexOf('$window.FindName(''BtnStopProcesses'')', $start)
+        $flow = $source.Substring($start, $end - $start)
+
+        $start | Should -BeGreaterOrEqual 0
+        $flow | Should -Match "'shushu_suspicious_'"
+        $flow | Should -Match "'-Mode','stop_process'"
+        $flow | Should -Match 'Complete-SuspiciousStopPoll'
+        $flow | Should -Not -Match 'RunAs'
+    }
+
+    It 'rejects suspicious stop results with identity drift or non-terminal status' {
+        $expected = [pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        }
+        $path = Join-Path $TestDrive 'stop-result.json'
+        $payload = New-GuiSuspiciousSubsetPayload -Selected @($expected) -SourcePending (New-GuiReviewPendingFixture)
+        $payload.suspicious[0].status = 'success'
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+        @(Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected)).Count | Should -Be 1
+
+        $payload.suspicious[0].Path = 'C:\Other\suspect.exe'
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+        { Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected) } | Should -Throw '*identity*'
+        $payload.suspicious[0].Path = $expected.Path
+        $payload.suspicious[0].status = 'pending'
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+        { Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected) } | Should -Throw '*terminal*'
     }
 
     It '动作中文标签映射' {
