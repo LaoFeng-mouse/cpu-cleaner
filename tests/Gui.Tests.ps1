@@ -2429,10 +2429,11 @@ Describe '勾选视图 (v1.5.5)' {
         Assert-MockCalled Show-GuiMessage -Times 1 -Exactly
     }
 
-    It '恢复进程启动后 ExitCode 读取异常显示状态未知且不重复启动' {
-        $process = [pscustomobject]@{}
+    It '恢复进程启动后 ExitCode 不可读显示状态未知且不重复启动' {
+        # Windows PowerShell 5.1 may surface a failing property getter as $null.
+        # Exercise the production fail-closed boundary using that observable result.
+        $process = [pscustomobject]@{ ExitCode=$null }
         $process | Add-Member ScriptMethod WaitForExit {}
-        $process | Add-Member ScriptProperty ExitCode { throw 'simulated exit code read failure' }
         Mock Start-Process {
             $script:Win.FindName('BtnRestore').IsEnabled | Should -BeFalse
             $process

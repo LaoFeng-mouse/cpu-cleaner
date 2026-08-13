@@ -1460,7 +1460,11 @@ function Invoke-GuiRestoreLatest {
         if ($null -eq $proc) { throw '管理员恢复进程未启动。' }
         $processStarted = $true
         $proc.WaitForExit()
-        $exitCode = [int]$proc.ExitCode
+        $rawExitCode = $proc.ExitCode
+        if ($null -eq $rawExitCode -or $rawExitCode -isnot [int]) {
+            throw '恢复进程退出码不可读或不是整数。'
+        }
+        $exitCode = [int]$rawExitCode
         if ($exitCode -eq 0) {
             Set-GuiCompletedSummary -Text (Get-Text 'RestoreOk')
             Set-GuiState completed -Force

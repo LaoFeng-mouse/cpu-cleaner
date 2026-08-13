@@ -283,7 +283,10 @@ function Add-BackupManifestEntryAtomic($BackupDir, $Entry) {
         throw '待持久化 manifest 条目缺少 entry_id'
     }
     $manifestFile = Join-Path $BackupDir 'manifest.json'
-    $entries = @(Read-BackupManifestEntries $manifestFile)
+    $entries = @()
+    if ([System.IO.File]::Exists($manifestFile)) {
+        $entries = @(Read-BackupManifestEntries $manifestFile)
+    }
     if (@($entries | Where-Object { $_.entry_id -ceq $Entry.entry_id }).Count -gt 0) { throw 'manifest entry_id 重复' }
     $entries += $Entry
     $null = Write-BackupManifestAtomic -BackupDir $BackupDir -Entries $entries
