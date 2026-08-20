@@ -9,6 +9,9 @@ Describe '扫描器与评分' {
         $defs = $defs.Replace('$script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path', '$script:Root = $projectRoot')
         Invoke-Expression $defs
         # Pester 5 固定版本 (5.9.0): 直接使用原生断言, 不做 3.4/5.x 兼容包装
+        $script:PendingFile = Join-Path $TestDrive 'pending_actions.json'
+        if ([System.IO.File]::Exists($script:PendingFile)) { [System.IO.File]::Delete($script:PendingFile) }
+        if ([System.IO.Directory]::Exists($script:PendingFile)) { [System.IO.Directory]::Delete($script:PendingFile, $true) }
     }
 
     It '风险分级: 70+ 高度建议处理' {
@@ -81,7 +84,7 @@ Describe '扫描器与评分' {
         $row.CanStop | Should -BeFalse
         $row.StopBlockReason | Should -Match '身份不完整'
     }
-    It 'CIM 服务采集被拒时完整 Get-Service fallback 保留匹配身份与可执行健康状态' {
+    It 'CIM 服务采集被拒时 Get-Service fallback 保留观察身份但标记降级' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
         Mock Get-Service {
             [pscustomobject]@{
@@ -99,10 +102,12 @@ Describe '扫描器与评分' {
         $services[0].DisplayName | Should -Be 'Lenovo Exact Service'
         $services[0].State | Should -Be 'Running'
         $services[0].StartMode | Should -Be 'Manual'
+        $services[0].PathName | Should -BeExactly ''
+        $services[0].ProcessId | Should -Be 0
         $services[0].TriggerHint | Should -BeFalse
         @($script:ScanWarnings).Count | Should -BeGreaterThan 0
         ($script:ScanWarnings -join "`n") | Should -Match 'CIM'
-        $script:ScanHealth.services | Should -BeExactly 'complete'
+        $script:ScanHealth.services | Should -BeExactly 'degraded'
     }
     It 'CIM 与 Get-Service 都失败时拒绝生成假干净服务列表' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
@@ -119,7 +124,7 @@ Describe '扫描器与评分' {
 
         $services.Count | Should -Be 1
         $services[0].Name | Should -Be 'FallbackService'
-        $script:ScanHealth.services | Should -BeExactly 'complete'
+        $script:ScanHealth.services | Should -BeExactly 'degraded'
     }
     It 'CIM 服务名称有效但显示名或状态字段为空时转入兼容采集' {
         Mock Get-CimInstance {
@@ -134,7 +139,7 @@ Describe '扫描器与评分' {
         $services.Count | Should -Be 1
         $services[0].Name | Should -Be 'FallbackService'
         $services[0].DisplayName | Should -Be 'Fallback Service'
-        $script:ScanHealth.services | Should -BeExactly 'complete'
+        $script:ScanHealth.services | Should -BeExactly 'degraded'
     }
     It 'Get-Service 兼容采集返回空身份时拒绝假报服务列表' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
@@ -162,7 +167,7 @@ Describe '扫描器与评分' {
             $script:ScanHealth.services | Should -Not -BeExactly 'complete'
         }
     }
-    It 'Get-Service 兼容采集接受可恢复 StartMode 且大小写不敏感' {
+    It 'Get-Service 兼容采集接受可恢复 StartMode 但始终保持降级' {
         foreach ($validStartMode in @('Automatic','manual','DISABLED','Boot','system')) {
             Reset-ScanDiagnostics
             Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
@@ -172,7 +177,7 @@ Describe '扫描器与评分' {
 
             $services = @(Get-ServicesInfo)
             $services.Count | Should -Be 1
-            $script:ScanHealth.services | Should -BeExactly 'complete'
+            $script:ScanHealth.services | Should -BeExactly 'degraded'
         }
     }
     It 'CIM 系统概况被拒时返回明确的兼容数据而不是空字段' {
@@ -231,12 +236,69 @@ Describe '扫描器与评分' {
         $script:ScanHealth.system_info | Should -Be 'degraded'
         ($script:ScanWarnings -join "`n") | Should -Match 'CPU 负载'
     }
-    It 'Get-ScheduledTask 被拒时从语言无关的任务对象恢复任务身份' {
+    It 'Get-ScheduledTask 主路径从真实 cmdlet 形状收集全部必需字段' {
+        Mock Get-ScheduledTask {
+            [pscustomobject]@{
+                TaskName='PrimaryTask'; TaskPath='\Vendor\'; State=[System.ServiceProcess.ServiceControllerStatus]::Running
+                Author='Vendor'; Description='Primary description'
+                Triggers=@([pscustomobject]@{ CimClass=[pscustomobject]@{ CimClassName='MSFT_TaskLogonTrigger' } })
+                Actions=@([pscustomobject]@{ CimClass=[pscustomobject]@{ CimClassName='MSFT_TaskExecAction' }; Execute='C:\Program Files\Vendor\task.exe'; Arguments='--run'; WorkingDirectory='C:\Program Files\Vendor' })
+            }
+        }
+
+        $tasks = @(Get-TasksInfo)
+
+        $tasks.Count | Should -Be 1
+        @($tasks[0].PSObject.Properties.Name) | Should -Contain 'Author'
+        @($tasks[0].PSObject.Properties.Name) | Should -Contain 'Description'
+        @($tasks[0].PSObject.Properties.Name) | Should -Contain 'Actions'
+        $tasks[0].Author | Should -BeExactly 'Vendor'
+        $tasks[0].Description | Should -BeExactly 'Primary description'
+        @($tasks[0].Actions) | Should -Be @('C:\Program Files\Vendor\task.exe --run')
+        $tasks[0].State -is [string] | Should -BeTrue
+        $tasks[0].State | Should -BeExactly 'Running'
+        $script:ScanHealth.tasks | Should -BeExactly 'complete'
+    }
+    It 'Task Scheduler COM query collects registration metadata and normalized actions from COM-shaped objects' {
+        $script:FakeComTask = [pscustomobject]@{
+            Path='\Vendor\ComTask'; State=3
+            Definition=[pscustomobject]@{
+                Triggers=@([pscustomobject]@{ Type=8 })
+                RegistrationInfo=[pscustomobject]@{ Author='Vendor'; Description='COM description' }
+                Actions=@([pscustomobject]@{ Type=0; Execute='C:\Vendor\com-task.exe'; Arguments='/quiet'; WorkingDirectory='C:\Vendor' })
+            }
+        }
+        $script:FakeTaskFolder = [pscustomobject]@{}
+        $script:FakeTaskFolder | Add-Member ScriptMethod GetTasks { param($Flags) return @($script:FakeComTask) }
+        $script:FakeTaskFolder | Add-Member ScriptMethod GetFolders { param($Flags) return @() }
+        $script:FakeScheduler = [pscustomobject]@{}
+        $script:FakeScheduler | Add-Member ScriptMethod Connect {}
+        $script:FakeScheduler | Add-Member ScriptMethod GetFolder { param($Path) return $script:FakeTaskFolder }
+        Mock New-Object { $script:FakeScheduler } -ParameterFilter { $ComObject -eq 'Schedule.Service' }
+
+        $records = @(Invoke-TaskSchedulerComQuery)
+
+        $records.Count | Should -Be 1
+        $records[0].Path | Should -BeExactly '\Vendor\ComTask'
+        $records[0].Author | Should -BeExactly 'Vendor'
+        $records[0].Description | Should -BeExactly 'COM description'
+        @($records[0].Actions) | Should -Be @('C:\Vendor\com-task.exe /quiet')
+    }
+    It 'Get-ScheduledTask 主路径拒绝缺失必需采集字段' {
+        Mock Get-ScheduledTask {
+            [pscustomobject]@{ TaskName='Missing'; TaskPath='\'; State='Ready'; Triggers=@(); Actions=@() }
+        }
+        function Invoke-TaskSchedulerComQuery { throw 'COM incomplete' }
+
+        { Get-TasksInfo } | Should -Throw '*无法读取计划任务*'
+        $script:ScanHealth.tasks | Should -Not -BeExactly 'complete'
+    }
+    It 'Get-ScheduledTask 被拒时从完整 COM 记录恢复全部必需字段' {
         Mock Get-ScheduledTask { throw [System.UnauthorizedAccessException]::new('scheduled task denied') }
         function Invoke-TaskSchedulerComQuery {
             @(
-                [pscustomobject]@{ Path='\Vendor\BootTask'; State=3; TriggerTypes=@(8) },
-                [pscustomobject]@{ Path='\Vendor\DailyTask'; State=3; TriggerTypes=@(2) }
+                [pscustomobject]@{ Path='\Vendor\BootTask'; State=3; TriggerTypes=@(8); Author='Vendor'; Description='Boot description'; Actions=@('C:\boot.exe --start') },
+                [pscustomobject]@{ Path='\Vendor\DailyTask'; State=3; TriggerTypes=@(2); Author='Vendor'; Description='Daily description'; Actions=@('C:\daily.exe') }
             )
         }
 
@@ -246,12 +308,15 @@ Describe '扫描器与评分' {
         $tasks[0].TaskPath | Should -Be '\Vendor\'
         $tasks[0].TaskName | Should -Be 'BootTask'
         $tasks[0].LoginTrigger | Should -BeTrue
+        $tasks[0].Author | Should -BeExactly 'Vendor'
+        $tasks[0].Description | Should -BeExactly 'Boot description'
+        @($tasks[0].Actions) | Should -Be @('C:\boot.exe --start')
         $tasks[1].LoginTrigger | Should -BeFalse
         @($script:ScanWarnings).Count | Should -BeGreaterThan 0
-        $script:ScanHealth.tasks | Should -Be 'degraded'
+        $script:ScanHealth.tasks | Should -Be 'complete'
     }
     It '数字触发器类型不受本地化文本影响' {
-        $task = Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Hersteller\Beim Systemstart'; State=3; TriggerTypes=@(8) })
+        $task = Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Hersteller\Beim Systemstart'; State=3; TriggerTypes=@(8); Author='Hersteller'; Description='Beschreibung'; Actions=@('C:\start.exe') })
 
         $task.LoginTrigger | Should -BeTrue
         $task.TaskName | Should -Be 'Beim Systemstart'
@@ -262,24 +327,24 @@ Describe '扫描器与评分' {
     }
     It 'COM 任务触发器枚举只接受 Windows 官方完整取值集合' {
         foreach ($value in @(0,1,2,3,4,5,6,7,8,9,11,12)) {
-            { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path="\Vendor\Valid$value"; State=3; TriggerTypes=@($value) }) } | Should -Not -Throw -Because "trigger type $value is defined by TASK_TRIGGER_TYPE2"
+            { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path="\Vendor\Valid$value"; State=3; TriggerTypes=@($value); Author='Vendor'; Description='Valid'; Actions=@('C:\task.exe') }) } | Should -Not -Throw -Because "trigger type $value is defined by TASK_TRIGGER_TYPE2"
         }
         foreach ($value in @(-1,10,13,99)) {
-            { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path="\Vendor\Invalid$value"; State=3; TriggerTypes=@($value) }) } | Should -Throw '*无效触发器类型*' -Because "trigger type $value is not defined by TASK_TRIGGER_TYPE2"
+            { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path="\Vendor\Invalid$value"; State=3; TriggerTypes=@($value); Author='Vendor'; Description='Invalid'; Actions=@('C:\task.exe') }) } | Should -Throw '*无效触发器类型*' -Because "trigger type $value is not defined by TASK_TRIGGER_TYPE2"
         }
-        { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\InvalidText'; State=3; TriggerTypes=@('x') }) } | Should -Throw '*无效触发器类型*'
+        { Convert-TaskSchedulerComRecord ([pscustomobject]@{ Path='\Vendor\InvalidText'; State=3; TriggerTypes=@('x'); Author='Vendor'; Description='Invalid'; Actions=@('C:\task.exe') }) } | Should -Throw '*无效触发器类型*'
     }
     It '主任务采集返回空列表时必须转入兼容采集' {
         Mock Get-ScheduledTask { @() }
         function Invoke-TaskSchedulerComQuery {
-            @([pscustomobject]@{ Path='\Vendor\FallbackTask'; State=3; TriggerTypes=@(9) })
+            @([pscustomobject]@{ Path='\Vendor\FallbackTask'; State=3; TriggerTypes=@(9); Author='Vendor'; Description='Fallback'; Actions=@('C:\fallback.exe') })
         }
 
         $tasks = @(Get-TasksInfo)
 
         $tasks.Count | Should -Be 1
         $tasks[0].TaskName | Should -Be 'FallbackTask'
-        $script:ScanHealth.tasks | Should -Be 'degraded'
+        $script:ScanHealth.tasks | Should -Be 'complete'
     }
     It '任务兼容采集返回空列表时拒绝假报无任务' {
         Mock Get-ScheduledTask { throw [System.UnauthorizedAccessException]::new('scheduled task denied') }
@@ -316,23 +381,237 @@ Describe '扫描器与评分' {
         $r = Get-ProcessRiskScore -proc $top[0] -ProfileHits @() -AutoStartNames @() -TopProcs $top
         ($r.Reasons -match '持续占用') | Should -Be $false
     }
-    It 'emits scan phases in the same order as the read-only pipeline' {
+    It '有效可信 inventory 为第三方手动运行服务派生内存 TriggerHint 且不扩展包对象' {
+        $service = [pscustomobject]@{ Name='TrustedSvc';DisplayName='Trusted Service';State='Running';StartMode='Manual';PathName='C:\Program Files\Vendor\trusted.exe';ProcessId=7 }
+        $task = [pscustomobject]@{ TaskName='TrustedTask';TaskPath='\Trusted\';State='Ready';Author='Vendor';Description='Trusted';Actions=[object[]]@('C:\trusted-task.exe') }
+        Mock Read-TrustedInventoryPackage {
+            [pscustomobject]@{ Package=[pscustomobject]@{ services=[object[]]@($service);tasks=[object[]]@($task);health=[pscustomobject]@{services='complete';tasks='complete'};warnings=[object[]]@() };Sha256=('a' * 64) }
+        }
+        Mock Get-ServicesInfo { throw 'normal service collector must be bypassed' }
+        Mock Get-TasksInfo { throw 'normal task collector must be bypassed' }
+
+        $result = Get-ScanServiceTaskInventory -InventoryNonce ('a' * 64)
+
+        $result.Services -is [System.Array] | Should -BeTrue
+        $result.Tasks -is [System.Array] | Should -BeTrue
+        $result.Services[0].TriggerHint | Should -BeTrue
+        $result.Services[0].Name | Should -BeExactly 'TrustedSvc'
+        $service.PSObject.Properties.Name | Should -Not -Contain 'TriggerHint'
+        [object]::ReferenceEquals($result.Services[0], $service) | Should -BeFalse
+        [object]::ReferenceEquals($result.Tasks[0], $task) | Should -BeTrue
+        $script:ScanHealth.services | Should -BeExactly 'complete'
+        $script:ScanHealth.tasks | Should -BeExactly 'complete'
+        Assert-MockCalled Read-TrustedInventoryPackage -Times 1 -Exactly -ParameterFilter { $Nonce -ceq ('a' * 64) }
+        Assert-MockCalled Get-ServicesInfo -Times 0 -Exactly
+        Assert-MockCalled Get-TasksInfo -Times 0 -Exactly
+    }
+    It '可信 inventory 读取失败时中止且不生成报告或 pending' {
+        Mock Get-SystemInfo { [pscustomobject]@{} }
+        Mock Get-TopProcesses { @() }
+        Mock Read-TrustedInventoryPackage { throw 'invalid trusted package' }
+        Mock Write-ScanReport {}
+        Mock Write-HtmlReport {}
+        Mock Save-PendingActions {}
+
+        { Invoke-ScanMode -InventoryNonce ('b' * 64) } | Should -Throw '*invalid trusted package*'
+
+        Assert-MockCalled Write-ScanReport -Times 0 -Exactly
+        Assert-MockCalled Write-HtmlReport -Times 0 -Exactly
+        Assert-MockCalled Save-PendingActions -Times 0 -Exactly
+    }
+    It 'pending 不存在时扫描前失效处理成功' {
+        { Remove-PendingForScan } | Should -Not -Throw
+        Test-Path -LiteralPath $script:PendingFile | Should -BeFalse
+    }
+    It '早期采集失败前先删除旧 pending' {
+        [System.IO.File]::WriteAllText($script:PendingFile, 'old pending')
+        Mock Get-SystemInfo { throw 'collector failed' }
+
+        { Invoke-ScanMode } | Should -Throw '*collector failed*'
+
+        Test-Path -LiteralPath $script:PendingFile | Should -BeFalse
+    }
+    It 'pending 失效失败时在任何采集器前中止' {
+        $null = [System.IO.Directory]::CreateDirectory($script:PendingFile)
+        Mock Get-SystemInfo { [pscustomobject]@{} }
+        Mock Get-TopProcesses { @() }
+        Mock Get-ScanServiceTaskInventory { [pscustomobject]@{ Services=@(); Tasks=@() } }
+        Mock Get-AutoStart { @() }
+        Mock Match-Profiles { @() }
+
+        { Invoke-ScanMode } | Should -Throw
+
+        Assert-MockCalled Get-SystemInfo -Times 0 -Exactly
+        Assert-MockCalled Get-TopProcesses -Times 0 -Exactly
+        Assert-MockCalled Get-ScanServiceTaskInventory -Times 0 -Exactly
+        Assert-MockCalled Get-AutoStart -Times 0 -Exactly
+        Assert-MockCalled Match-Profiles -Times 0 -Exactly
+    }
+    It 'HTML 生成失败时不创建 pending' {
+        Mock Get-SystemInfo { [pscustomobject]@{ Computer='PC' } }
+        Mock Get-TopProcesses { @() }
+        Mock Get-SuspiciousProcesses { @() }
+        Mock Get-ScanServiceTaskInventory { [pscustomobject]@{ Services=@(); Tasks=@() } }
+        Mock Get-AutoStart { @() }
+        Mock Match-Profiles { @() }
+        Mock Get-AutoStartProcessNames { @() }
+        Mock Write-ScanReport { 'text report' }
+        Mock Write-HtmlReport { throw 'html failed' }
+        Mock Save-PendingActions { [System.IO.File]::WriteAllText($script:PendingFile, 'new pending') }
+
+        { Invoke-ScanMode -ReportPath (Join-Path $TestDrive 'report.html') } | Should -Throw '*html failed*'
+
+        Test-Path -LiteralPath $script:PendingFile | Should -BeFalse
+        Assert-MockCalled Save-PendingActions -Times 0 -Exactly
+    }
+    It '文本与可选 HTML 完成后最后保存 pending' {
+        $script:scanEvents = [System.Collections.Generic.List[string]]::new()
+        Mock Get-SystemInfo { [pscustomobject]@{ Computer='PC' } }
+        Mock Get-TopProcesses { @() }
+        Mock Get-SuspiciousProcesses { @() }
+        Mock Get-ScanServiceTaskInventory { [pscustomobject]@{ Services=@(); Tasks=@() } }
+        Mock Get-AutoStart { @() }
+        Mock Match-Profiles { @() }
+        Mock Get-AutoStartProcessNames { @() }
+        Mock Write-ScanReport { $script:scanEvents.Add('text'); 'text report' }
+        Mock Write-HtmlReport { $script:scanEvents.Add('html'); 'html report' }
+        Mock Save-PendingActions { $script:scanEvents.Add('save') }
+
+        $result = Invoke-ScanMode -ReportPath (Join-Path $TestDrive 'report.html')
+
+        $result | Should -BeExactly 'text report'
+        @($script:scanEvents) -join ',' | Should -BeExactly 'text,html,save'
+        $scannerSource = Get-Content (Join-Path $projectRoot 'src\Core\Scanner.ps1') -Raw -Encoding UTF8
+        $scannerSource | Should -Match 'Save-PendingActions[^\r\n]*\r?\n\s*return \$report'
+    }
+    It 'pending 保存失败在报告完成后向上传播' {
+        $script:scanEvents = [System.Collections.Generic.List[string]]::new()
+        $reportPath = Join-Path $TestDrive 'report.html'
+        Mock Get-SystemInfo { [pscustomobject]@{ Computer='PC' } }
+        Mock Get-TopProcesses { @() }
+        Mock Get-SuspiciousProcesses { @() }
+        Mock Get-ScanServiceTaskInventory { [pscustomobject]@{ Services=@(); Tasks=@() } }
+        Mock Get-AutoStart { @() }
+        Mock Match-Profiles { @() }
+        Mock Get-AutoStartProcessNames { @() }
+        Mock Write-ScanReport { $script:scanEvents.Add('text'); 'text report' }
+        Mock Write-HtmlReport { $script:scanEvents.Add('html'); 'html report' }
+        Mock Save-PendingActions { $script:scanEvents.Add('save'); throw 'save failed' }
+
+        { Invoke-ScanMode -ReportPath $reportPath } | Should -Throw '*save failed*'
+
+        @($script:scanEvents) -join ',' | Should -BeExactly 'text,html,save'
+        Test-Path -LiteralPath $reportPath -PathType Leaf | Should -BeTrue
+    }
+    It '默认 scan 服务或任务不完整时全部尝试后失败关闭' {
+        Mock Get-ServicesInfo { Set-ScanHealthDegraded services; throw 'services unavailable' }
+        Mock Get-TasksInfo { Set-ScanHealthDegraded tasks; throw 'tasks unavailable' }
+
+        { Get-ScanServiceTaskInventory } | Should -Throw '*完整*'
+
+        $script:ScanHealth.services | Should -Not -BeExactly 'complete'
+        $script:ScanHealth.tasks | Should -Not -BeExactly 'complete'
+        Assert-MockCalled Get-ServicesInfo -Times 1 -Exactly
+        Assert-MockCalled Get-TasksInfo -Times 1 -Exactly
+    }
+    It '默认 scan 即使采集器返回数据也拒绝不完整健康状态' {
+        Mock Get-ServicesInfo {
+            Set-ScanHealthDegraded services
+            [pscustomobject]@{ Name='PartialSvc';DisplayName='Partial';State='Running';StartMode='Manual';PathName='';ProcessId=0;TriggerHint=$false }
+        }
+        Mock Get-TasksInfo {
+            [pscustomobject]@{ TaskName='Task';TaskPath='\';State='Ready';Author='';Description='';Actions=[object[]]@() }
+        }
+
+        { Get-ScanServiceTaskInventory } | Should -Throw '*完整*'
+    }
+    It '显式 limited 不尝试任务并将空任务标为 unavailable 且告警' {
+        Mock Get-ServicesInfo { [pscustomobject]@{ Name='Svc';DisplayName='Service';State='Running';StartMode='Auto';PathName='C:\svc.exe';ProcessId=1;TriggerHint=$false } }
+        Mock Get-TasksInfo { throw 'tasks must not be attempted in limited mode' }
+
+        $result = Get-ScanServiceTaskInventory -AllowLimited
+
+        $result.Tasks -is [System.Array] | Should -BeTrue
+        $result.Tasks.Count | Should -Be 0
+        $script:ScanHealth.tasks | Should -BeExactly 'unavailable'
+        @($script:ScanWarnings) -join "`n" | Should -Match '计划任务|scheduled tasks'
+        Assert-MockCalled Get-TasksInfo -Times 0 -Exactly
+    }
+    It '显式 limited 服务失败时以 degraded 空数组继续并告警' {
+        Mock Get-ServicesInfo { throw 'service access denied' }
+
+        $result = Get-ScanServiceTaskInventory -AllowLimited
+
+        $result.Services -is [System.Array] | Should -BeTrue
+        $result.Services.Count | Should -Be 0
+        $script:ScanHealth.services | Should -BeExactly 'degraded'
+        @($script:ScanWarnings) -join "`n" | Should -Match '服务|services'
+    }
+    It '显式 limited 保留服务兼容采集的安全部分并补充降级告警' {
+        Mock Get-ServicesInfo {
+            Set-ScanHealthDegraded services
+            [pscustomobject]@{ Name='PartialSvc';DisplayName='Partial';State='Running';StartMode='Manual';PathName='';ProcessId=0;TriggerHint=$false }
+        }
+
+        $result = Get-ScanServiceTaskInventory -AllowLimited
+
+        $result.Services.Count | Should -Be 1
+        $result.Services[0].Name | Should -BeExactly 'PartialSvc'
+        $script:ScanHealth.services | Should -BeExactly 'degraded'
+        @($script:ScanWarnings) -join "`n" | Should -Match '服务|services'
+    }
+    It '显式 limited 成功生成结果并把健康状态与警告传给报告和 pending' {
+        Mock Get-SystemInfo { [pscustomobject]@{ Computer='PC' } }
+        Mock Get-TopProcesses { @() }
+        Mock Get-SuspiciousProcesses { @() }
+        Mock Get-ServicesInfo { [pscustomobject]@{ Name='Svc';DisplayName='Service';State='Running';StartMode='Auto';PathName='C:\svc.exe';ProcessId=1;TriggerHint=$false } }
+        Mock Get-AutoStart { @() }
+        Mock Match-Profiles { @() }
+        Mock Get-AutoStartProcessNames { @() }
+        Mock Write-ScanReport { 'limited report' }
+        Mock Write-HtmlReport { 'limited html' }
+        Mock Save-PendingActions {}
+
+        $result = Invoke-ScanMode -AllowLimited
+
+        $result | Should -BeExactly 'limited report'
+        Assert-MockCalled Write-ScanReport -Times 1 -Exactly -ParameterFilter { $ScanHealth.tasks -ceq 'unavailable' -and @($ScanWarnings).Count -gt 0 }
+        Assert-MockCalled Save-PendingActions -Times 1 -Exactly -ParameterFilter { $ScanHealth.tasks -ceq 'unavailable' -and @($ScanWarnings).Count -gt 0 }
+    }
+    It '入口参数拒绝 nonce 与 limited 组合 limited 非 scan 及非法 nonce' {
+        $entry = Join-Path $projectRoot 'cpu-cleaner.ps1'
+        $cases = @(
+            @('-Mode','scan','-InventoryNonce',('a' * 64),'-AllowLimited'),
+            @('-Mode','clean','-AllowLimited'),
+            @('-Mode','scan','-InventoryNonce','not-a-valid-nonce')
+        )
+        foreach ($arguments in $cases) {
+            $null = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $entry @arguments 2>&1
+            $LASTEXITCODE | Should -Not -Be 0 -Because ($arguments -join ' ')
+        }
+    }
+    It '入口 scan 仅调度编排函数并由编排函数保持只读阶段顺序' {
         $source = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
+        $dispatchPattern = [regex]::Escape("'scan'") + '\s*\{\s*try\s*\{\s*\$null\s*=\s*Invoke-ScanMode\s+-InventoryNonce\s+\$InventoryNonce\s+-AllowLimited:\$AllowLimited\s+-ReportPath\s+\$ReportPath'
+        $source | Should -Match $dispatchPattern
+        [regex]::Matches($source, 'Get-ServicesInfo').Count | Should -Be 0
+        [regex]::Matches($source, 'Get-TasksInfo').Count | Should -Be 0
+
+        $scannerSource = Get-Content (Join-Path $projectRoot 'src\Core\Scanner.ps1') -Raw -Encoding UTF8
         $expected = @(
             @{ Marker='读取系统信息'; Operation='\$sys\s*=\s*Get-SystemInfo' },
             @{ Marker='检查高占用进程'; Operation='\$procs\s*=\s*Get-TopProcesses\s+12' },
-            @{ Marker='检查系统服务'; Operation='\$svcs\s*=\s*Get-ServicesInfo' },
+            @{ Marker='检查系统服务与计划任务'; Operation='\$inventory\s*=\s*Get-ScanServiceTaskInventory' },
             @{ Marker='检查启动项'; Operation='\$autos\s*=\s*Get-AutoStart' },
-            @{ Marker='检查计划任务'; Operation='\$tasks\s*=\s*Get-TasksInfo' },
             @{ Marker='匹配安全规则'; Operation='\$hits\s*=\s*Match-Profiles' },
             @{ Marker='生成扫描报告'; Operation='\$report\s*=\s*Write-ScanReport' }
         )
         $last = -1
         foreach ($phase in $expected) {
-            [regex]::Matches($source, [regex]::Escape($phase.Marker)).Count | Should -Be 1
+            [regex]::Matches($scannerSource, [regex]::Escape($phase.Marker)).Count | Should -Be 1
             $adjacent = "Write-Step\s+'{0}\.\.\.'(?:;|\r?\n)\s*{1}" -f [regex]::Escape($phase.Marker), $phase.Operation
-            $source | Should -Match $adjacent
-            $index = $source.IndexOf($phase.Marker, [System.StringComparison]::Ordinal)
+            $scannerSource | Should -Match $adjacent
+            $index = $scannerSource.IndexOf($phase.Marker, [System.StringComparison]::Ordinal)
             $index | Should -BeGreaterThan $last
             $last = $index
         }

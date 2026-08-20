@@ -23,7 +23,7 @@
 ```
 ├── gui-cleaner.ps1          鼠鼠风格图形界面（WPF，双击 bat 或命令行启动）
 ├── 鼠鼠版-图形界面.bat       图形界面入口（双击即用，不会命令行也能操作）
-├── cpu-cleaner.ps1        主程序（scan / clean / restore / update 四模式）
+├── cpu-cleaner.ps1        主程序（含 scan_inventory 管理员只读采集及 scan / clean / restore / update）
 ├── bloatware-profiles.json  预装软件特征库（Schema 3.0，可自行扩展）
 ├── 1-扫描.bat / 2-清理.bat / 3-恢复.bat   双击启动器（不会命令行的人用）
 ├── 零基础操作指南.md       给完全不会命令行的人的图文步骤
@@ -55,10 +55,14 @@
 图形界面的完整旅程是：
 
 ```text
-开始安全扫描（只读） → 扫描结论 → 处理建议复核 → 管理员重新验证并执行 → 逐项结果与恢复
+开始安全扫描 → UAC 管理员只读采集 → 普通权限验证并扫描 → 扫描结论 → 处理建议复核 → 管理员重新验证并执行 → 逐项结果与恢复
 ```
 
 扫描可以识别宽匹配，但执行必须保持窄匹配：实际命中 `contains` / `regex` 的项目只作为观察项展示，复核页中不能勾选。可执行项也不会直接相信普通权限扫描结果；进入管理员执行后，仍会用同一个 matcher、同一个字段和当前系统对象重新验证。
+
+GUI 进程始终以普通用户权限运行。点击扫描时出现的一次 UAC 只授权独立的 `scan_inventory` 子进程读取完整服务与计划任务清单；它只接收随机 nonce，不执行清理、不改任务文件 ACL，也不直接解析任务 XML。采集结果写入 `%ProgramData%\MouseCleaner\ScanResults` 的受保护目录，普通权限扫描会再次验证路径、ACL、当前用户 SID、时效、终态标记和内容哈希后才使用。
+
+如果用户取消这次 UAC，GUI 会明确进入 `AllowLimited` 降级扫描：计划任务标为 unavailable，服务信息可能 degraded，界面不会显示“电脑干净”，这些不完整分类也不能授权清理。清理权限没有因扫描提权而扩大；仍必须经过用户勾选、执行子集 SHA-256 绑定、管理员态同 matcher 重验、可信备份、执行后验证和可恢复流程。
 
 顶部四格“鼠鼠的幻想”漫画只负责解释当前旅程和状态，不参与风险判断，也不能决定某个项目是否安全或可执行。真正的安全边界由规则证据、实际命中的 matcher、pending 授权快照和管理员态重验共同决定。
 
@@ -92,19 +96,22 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 ---
 
-## 三模式说明
+## 模式说明
 
 | 模式 | 做什么 | 需要管理员 | 会修改系统吗 |
 |---|---|---|---|
-| scan | 收集系统概况、Top CPU 进程、未知高占用检测、开机自启、登录计划任务、特征库匹配、触发器提示，生成待办清单和报告 | 否 | **完全不改** |
+| scan_inventory | GUI 内部模式：按 nonce 采集完整服务与计划任务，写入 ACL 保护的短期结果包 | 是 | **完全不改** |
+| scan | 验证并消费受保护清单，或显式 `-AllowLimited` 降级；同时收集系统概况、进程、自启并生成待办清单和报告 | 否 | **完全不改** |
 | clean | 按清单逐条确认后执行（禁用服务/删自启/禁计划任务），结束后可显式输入 PID 结束可疑进程，**每个动作先备份** | 是 | 是（可恢复） |
 | restore | 从备份目录一键恢复上次处理 | 是 | 是（恢复原状） |
 | update | 从配置的 URL 更新特征库（自动备份旧版） | 否 | 是（只改特征库文件） |
 
-扫描采集采用失败关闭：CIM 系统概况/服务不可用时分别使用明确的兼容概况和 `Get-Service`，`Get-ScheduledTask` 不可用时使用只读 Task Scheduler COM 对象模型，并按数字触发器类型识别开机/登录任务，避免依赖系统语言或 CSV 列位置。空结果、畸形身份、主采集与兼容采集同时失败都会终止对应扫描；兼容采集会以 `scan_health` / `scan_warnings` 贯穿文本报告、HTML、待处理清单和 GUI，不再把“无法完整读取”显示成“这台机器比较干净”。
+扫描采集采用失败关闭：GUI 默认先通过管理员只读子进程获取完整服务和计划任务；命令行若没有可信 inventory nonce，必须显式使用 `-AllowLimited` 才能继续降级扫描。空结果、畸形身份、受保护包验证失败都会终止完整扫描；降级状态以 `scan_health` / `scan_warnings` 贯穿文本报告、HTML、待处理清单和 GUI，不再把“无法完整读取”显示成“这台机器比较干净”。
 
 **安全设计：**
 - 默认只读：scan 不修改任何设置
+- **权限隔离：GUI 不提权；UAC 只启动 `scan_inventory` 读取服务/任务。任务文件 ACL 永不修改，任务 XML 不直接解析**
+- **降级不授权：取消 UAC 后的 `AllowLimited` 结果明确不完整；unavailable/degraded 分类只能观察，不能生成相应清理授权**
 - 双重确认：clean 先显示完整清单（名字/动作/原因），输入编号或 all 才执行，可随时 q 退出
 - **safe 强制规则：特征库标 safe=false 的条目只报告、永不进入待办队列，即使 -YesToAll 也拒绝执行**
 - **逐命中授权：每个 scan hit 记录 `matched_pattern` / `matched_type` / `matched_field`；危险动作只由实际命中的 `exact` 或 `path` matcher 授权。`contains` / `regex`（以及 `publisher` / `sha256`）只调查，`execution.allow_auto=true` 不能绕过**

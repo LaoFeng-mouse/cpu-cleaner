@@ -32,6 +32,7 @@ $script:I18N = @{
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
         ScanPhaseInitial='正在检查服务、启动项、计划任务和进程'; ScanPhaseSystemInfo='读取系统信息'; ScanPhaseProcesses='检查高占用进程'; ScanPhaseServices='检查系统服务'; ScanPhaseAutoStart='检查启动项'; ScanPhaseTasks='检查计划任务'; ScanPhaseRules='匹配安全规则'; ScanPhaseReport='生成扫描报告'
         ScanResultSummary='{0} 项可以安全处理，{1} 项建议观察'; ScanErrorSummary='扫描失败：{0}'; ScanNoMutation='扫描阶段未修改任何系统设置。'; ScanStatusStart='启动'; ScanStatusOutput='输出读取'; ScanStatusResults='结果处理'; ScanStatusTimeout='超时'
+        ScanRequestingInventory='正在请求管理员只读授权'; ScanCollectingInventory='正在读取完整服务和计划任务'; ScanValidatingInventory='正在验证受保护扫描结果'; ScanLimitedWarning='计划任务和完整服务信息未检查，本次结果不能判断电脑是否干净。'; ScanInventoryReadonly='只读取服务和计划任务，不会修改系统设置。'; ScanInventoryFailed='管理员只读采集失败'; ScanInventoryTimeout='管理员只读采集超过 60 秒；进程状态确认前将保持安全锁定。'
         ReviewErrorSummary='待处理清单已过期，必须重新扫描。'; ReviewNoMutation='没有执行任何系统修改。'
         BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
         ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
@@ -61,6 +62,7 @@ $script:I18N = @{
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
         ScanPhaseInitial='Checking services, startup items, scheduled tasks, and processes'; ScanPhaseSystemInfo='Reading system information'; ScanPhaseProcesses='Checking high-usage processes'; ScanPhaseServices='Checking system services'; ScanPhaseAutoStart='Checking startup items'; ScanPhaseTasks='Checking scheduled tasks'; ScanPhaseRules='Matching safety rules'; ScanPhaseReport='Generating scan report'
         ScanResultSummary='{0} safe item(s), {1} observation(s)'; ScanErrorSummary='Scan failed: {0}'; ScanNoMutation='The scan did not change any system settings.'; ScanStatusStart='startup'; ScanStatusOutput='output read'; ScanStatusResults='result processing'; ScanStatusTimeout='timeout'
+        ScanRequestingInventory='Requesting administrator read-only access'; ScanCollectingInventory='Reading the complete service and scheduled-task inventory'; ScanValidatingInventory='Validating the protected scan result'; ScanLimitedWarning='Scheduled tasks and complete service information were not checked; this scan cannot declare the PC clean.'; ScanInventoryReadonly='This reads services and scheduled tasks only and changes no system settings.'; ScanInventoryFailed='Administrator read-only inventory failed'; ScanInventoryTimeout='Administrator read-only inventory exceeded 60 seconds; safety lock remains until process state is confirmed.'
         ReviewErrorSummary='The pending review is stale and must be rescanned.'; ReviewNoMutation='No system settings were changed.'
         BtnLoad='Load Pending Items'; PendingHint='Risk & evidence shown; check items to process (unverified = observe only, unchecked)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Check items, then go to tab 3.'
         ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
@@ -250,7 +252,31 @@ $script:SuspiciousStopRows = @()
 $script:SuspiciousStopInProgress = $false
 $script:SuspiciousStopLifecycle = 'idle'
 $script:SuspiciousStopUnknownProbeCount = 0
+$script:CoreScript = Join-Path $script:Root 'cpu-cleaner.ps1'
+$script:InventoryProcess = $null
+$script:InventoryTimer = $null
+$script:InventoryNonce = ''
+$script:InventoryDeadlineUtc = [DateTime]::MinValue
+$script:InventoryUnknownProbeCount = 0
+$script:InventoryInProgress = $false
+$script:InventoryLifecycle = 'idle'
+$script:InventoryTimeoutSeconds = 60
 $script:StatePanels = @('IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel','ExecutingPanel','CompletedPanel','ErrorPanel')
+
+function Test-GuiInventoryBusy {
+    if ($null -ne $script:InventoryProcess -and $script:InventoryLifecycle -cin @('unknown','timed_out','detached')) {
+        $staleProbe = Get-GuiExecutionProcessStatus -Process $script:InventoryProcess
+        if ($staleProbe.State -eq 'exited') {
+            $null = Clear-GuiInventoryResources -ProcessExitConfirmed
+            return $false
+        }
+    }
+    return ($script:InventoryInProgress -or $null -ne $script:InventoryProcess -or $script:InventoryLifecycle -cin @('starting','running','unknown','timed_out','detached'))
+}
+
+function Test-GuiNormalScanBusy {
+    return ($null -ne $script:ScanJob -or $null -ne $script:ScanTimer -or $null -ne $script:ScanCheckTimer)
+}
 
 function Update-GuiExecuteAvailability {
     param($List = $window.FindName('PendingList'))
@@ -259,7 +285,7 @@ function Update-GuiExecuteAvailability {
         ($_.IsChecked -is [bool]) -and $_.IsChecked
     })
     $restoreBusy = $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')
-    $window.FindName('BtnExecute').IsEnabled = ($selectedExecutable.Count -gt 0 -and -not $script:ExecutionInProgress -and -not $script:SuspiciousStopInProgress -and -not $restoreBusy)
+    $window.FindName('BtnExecute').IsEnabled = ($selectedExecutable.Count -gt 0 -and -not $script:ExecutionInProgress -and -not $script:SuspiciousStopInProgress -and -not $restoreBusy -and -not (Test-GuiInventoryBusy) -and -not (Test-GuiNormalScanBusy))
 }
 
 function Update-GuiStopProcessAvailability {
@@ -269,7 +295,7 @@ function Update-GuiStopProcessAvailability {
         ($_.IsChecked -is [bool]) -and $_.IsChecked
     })
     $restoreBusy = $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')
-    $window.FindName('BtnStopProcesses').IsEnabled = ($selected.Count -gt 0 -and -not $script:SuspiciousStopInProgress -and -not $script:ExecutionInProgress -and -not $restoreBusy)
+    $window.FindName('BtnStopProcesses').IsEnabled = ($selected.Count -gt 0 -and -not $script:SuspiciousStopInProgress -and -not $script:ExecutionInProgress -and -not $restoreBusy -and -not (Test-GuiInventoryBusy) -and -not (Test-GuiNormalScanBusy))
 }
 
 function Set-GuiState {
@@ -973,12 +999,10 @@ function Complete-ScanPoll {
             $items = @(Get-PendingViewItems -Pending $pending)
             $summary = Get-GuiItemSummary $items
             $evidence = @($items | ForEach-Object { '{0} — {1}' -f $_.name_cn, ($_.matcher_detail -replace "`r?`n", ' | ') })
-            $degraded = $false
-            if ($pending.PSObject.Properties.Name -contains 'scan_health' -and $null -ne $pending.scan_health) {
-                $degraded = @('system_info','services','tasks' | Where-Object { [string]$pending.scan_health.$_ -ne 'complete' }).Count -gt 0
-            }
             $warnings = if ($pending.PSObject.Properties.Name -contains 'scan_warnings') { @($pending.scan_warnings) } else { @() }
-            Set-GuiResultSummary -Executable $summary.executable -Observation $summary.observation -Evidence $evidence -Degraded $degraded -Warnings $warnings
+            $scanHealth = if ($pending.PSObject.Properties.Name -contains 'scan_health') { $pending.scan_health } else { $null }
+            $healthPresentation = Get-GuiScanHealthPresentation -ScanHealth $scanHealth -Warnings $warnings -Language $script:Lang
+            Set-GuiResultSummary -Executable $summary.executable -Observation $summary.observation -Evidence $evidence -Degraded $healthPresentation.Degraded -Warnings $healthPresentation.Warnings
             Set-GuiState results
         } else {
             $detail = [string]$result
@@ -1048,29 +1072,63 @@ $script:ScanJob = $null
 $script:ScanDeadlineUtc = $null
 $script:ScanTimeoutSeconds = 180
 $script:ScanJobScript = {
-    param($scriptPath)
+    param($scriptPath, [string]$inventoryNonce = '', [bool]$allowLimited = $false)
     $utf8 = [System.Text.UTF8Encoding]::new($false)
     [Console]::OutputEncoding = $utf8
     $OutputEncoding = $utf8
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode scan 2>&1
+    $scannerArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$scriptPath,'-Mode','scan')
+    if ($allowLimited) { $scannerArgs += '-AllowLimited' }
+    elseif (-not [string]::IsNullOrEmpty($inventoryNonce)) { $scannerArgs += @('-InventoryNonce',$inventoryNonce) }
+    & powershell.exe @scannerArgs 2>&1
     $nativeExitCode = $LASTEXITCODE
     if ($nativeExitCode -ne 0) { throw "Scanner process exited with code $nativeExitCode." }
 }
-function Start-GuiScan {
+
+function New-GuiInventoryNonce {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
+    return -join ($bytes | ForEach-Object { $_.ToString('x2') })
+}
+
+function Clear-GuiInventoryResources {
+    param([switch]$ProcessExitConfirmed)
+    if ($null -ne $script:InventoryProcess -and -not $ProcessExitConfirmed) { return $false }
+    Invoke-GuiTimerStop $script:InventoryTimer
+    if ($null -ne $script:InventoryProcess -and $script:InventoryProcess.PSObject.Methods['Dispose']) {
+        try { $script:InventoryProcess.Dispose() } catch { $null = $_ }
+    }
+    $script:InventoryProcess = $null
+    $script:InventoryTimer = $null
+    $script:InventoryNonce = ''
+    $script:InventoryDeadlineUtc = [DateTime]::MinValue
+    $script:InventoryUnknownProbeCount = 0
+    $script:InventoryInProgress = $false
+    $script:InventoryLifecycle = 'idle'
+    return $true
+}
+
+function Start-GuiNormalScanJob {
+    param([string]$InventoryNonce = '', [switch]$AllowLimited)
+    if ($null -ne $script:ScanJob) { return $false }
     $script:ScanJob = $null
     $script:ScanCheckTimer = $null
     $script:ScanTimer = $null
     try {
-        Set-GuiState scanning
+        if ($script:GuiState -ne 'scanning') { Set-GuiState scanning }
         $window.FindName('ScanProgress').IsIndeterminate = $true
-        $window.FindName('ScanPhaseText').Text = (Get-Text 'ScanPhaseInitial')
+        $script:CurrentScanPhaseTextKey = if ($AllowLimited) { 'ScanLimitedWarning' } elseif ($InventoryNonce) { 'ScanValidatingInventory' } else { 'ScanPhaseInitial' }
+        $window.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
         $window.FindName('ScanOutput').Text = (Get-Text 'Scanning')
         $window.FindName('BtnStartScan').IsEnabled = $false
         $script:ScanTranscript = ''
-        $script:CurrentScanPhaseTextKey = 'ScanPhaseInitial'
         $script:ScanDeadlineUtc = [datetime]::UtcNow.AddSeconds($script:ScanTimeoutSeconds)
 
-        $script:ScanJob = Start-Job -ScriptBlock $script:ScanJobScript -ArgumentList (Join-Path $script:Root 'cpu-cleaner.ps1')
+        $script:ScanJob = Start-Job -ScriptBlock $script:ScanJobScript -ArgumentList $script:CoreScript, $InventoryNonce, ([bool]$AllowLimited)
 
         $script:ScanTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(200)
@@ -1091,6 +1149,100 @@ function Start-GuiScan {
         Show-GuiScanError -Status (Get-Text 'ScanStatusStart') -Detail $_.Exception.ToString()
         return $false
     }
+}
+
+function Invoke-GuiInventoryPoll {
+    if ($null -eq $script:InventoryProcess) { return $false }
+    $probe = Get-GuiExecutionProcessStatus -Process $script:InventoryProcess
+    if ($probe.State -eq 'running') {
+        if ([datetime]::UtcNow -ge $script:InventoryDeadlineUtc) {
+            Invoke-GuiTimerStop $script:InventoryTimer
+            $script:InventoryLifecycle = 'timed_out'
+            $window.FindName('ScanProgress').IsIndeterminate = $false
+            Set-GuiError -Summary (Get-Text 'ScanInventoryFailed') -Mutation (Get-Text 'ScanNoMutation') -Detail (Get-Text 'ScanInventoryTimeout')
+            return $true
+        }
+        return $false
+    }
+    if ($probe.State -eq 'unknown') {
+        $script:InventoryLifecycle = 'unknown'
+        $script:InventoryUnknownProbeCount++
+        if ($script:InventoryUnknownProbeCount -ge $script:ExecutionUnknownProbeLimit) {
+            Invoke-GuiTimerStop $script:InventoryTimer
+            $script:InventoryLifecycle = 'detached'
+            Set-GuiError -Summary (Get-Text 'ScanInventoryFailed') -Mutation (Get-Text 'ScanNoMutation') -Detail $probe.Detail
+            return $true
+        }
+        return $false
+    }
+
+    $nonce = $script:InventoryNonce
+    $exitCode = $probe.ExitCode
+    $null = Clear-GuiInventoryResources -ProcessExitConfirmed
+    if ($exitCode -ne 0) {
+        Show-GuiScanError -Status (Get-Text 'ScanInventoryFailed') -Detail ("scan_inventory ExitCode={0}" -f $exitCode)
+        return $true
+    }
+    $script:CurrentScanPhaseTextKey = 'ScanValidatingInventory'
+    $window.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
+    return (Start-GuiNormalScanJob -InventoryNonce $nonce)
+}
+
+function Start-GuiInventoryCollection {
+    if ((Test-GuiInventoryBusy) -or $null -ne $script:ScanJob -or
+        $script:ExecutionInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:SuspiciousStopInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) { return $false }
+    $script:InventoryInProgress = $true
+    $script:InventoryLifecycle = 'starting'
+    $script:InventoryUnknownProbeCount = 0
+    $script:InventoryNonce = New-GuiInventoryNonce
+    try {
+        Set-GuiState scanning
+        $window.FindName('ScanProgress').IsIndeterminate = $true
+        $script:CurrentScanPhaseTextKey = 'ScanRequestingInventory'
+        $window.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
+        $window.FindName('ScanOutput').Text = Get-Text 'ScanInventoryReadonly'
+        $window.FindName('BtnStartScan').IsEnabled = $false
+        $script:InventoryProcess = Start-Process powershell.exe -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',("`"{0}`"" -f $script:CoreScript),'-Mode','scan_inventory','-InventoryNonce',$script:InventoryNonce
+        if ($null -eq $script:InventoryProcess) { throw 'scan_inventory process did not start.' }
+        $script:InventoryLifecycle = 'running'
+        $script:InventoryDeadlineUtc = [datetime]::UtcNow.AddSeconds($script:InventoryTimeoutSeconds)
+        $script:CurrentScanPhaseTextKey = 'ScanCollectingInventory'
+        $window.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
+        $script:InventoryTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:InventoryTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+        $script:InventoryTimer.Add_Tick({ $null = Invoke-GuiInventoryPoll })
+        $script:InventoryTimer.Start()
+        return $true
+    } catch [System.ComponentModel.Win32Exception] {
+        $cancelled = ($_.Exception.NativeErrorCode -eq 1223)
+        $processStarted = $null -ne $script:InventoryProcess
+        if ($processStarted) {
+            $script:InventoryLifecycle = 'detached'
+            Set-GuiError -Summary (Get-Text 'ScanInventoryFailed') -Mutation (Get-Text 'ScanNoMutation') -Detail $_.Exception.ToString()
+            return $false
+        }
+        $null = Clear-GuiInventoryResources
+        if ($cancelled) { return (Start-GuiNormalScanJob -AllowLimited) }
+        Show-GuiScanError -Status (Get-Text 'ScanInventoryFailed') -Detail $_.Exception.ToString()
+        return $false
+    } catch {
+        $processStarted = $null -ne $script:InventoryProcess
+        if ($processStarted) {
+            Invoke-GuiTimerStop $script:InventoryTimer
+            $script:InventoryLifecycle = 'detached'
+            Set-GuiError -Summary (Get-Text 'ScanInventoryFailed') -Mutation (Get-Text 'ScanNoMutation') -Detail $_.Exception.ToString()
+        } else {
+            $null = Clear-GuiInventoryResources
+            Show-GuiScanError -Status (Get-Text 'ScanInventoryFailed') -Detail $_.Exception.ToString()
+        }
+        return $false
+    }
+}
+
+function Start-GuiScan {
+    return (Start-GuiInventoryCollection)
 }
 
 $window.FindName('BtnStartScan').Add_Click({ Start-GuiScan })
@@ -1345,7 +1497,7 @@ function Complete-SuspiciousStopPoll {
 
 function Start-GuiSuspiciousStop {
     param($List = $window.FindName('SuspiciousList'))
-    if ($script:SuspiciousStopInProgress -or $script:ExecutionInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached') -or
+    if ((Test-GuiInventoryBusy) -or (Test-GuiNormalScanBusy) -or $script:SuspiciousStopInProgress -or $script:ExecutionInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached') -or
         $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) { return $false }
     $selectedRows = @(Resolve-GuiReviewedSuspiciousRows -List $List)
     if ($selectedRows.Count -eq 0) { return $false }
@@ -1425,7 +1577,7 @@ function Clear-GuiExecutionResources {
 
 function Protect-GuiExecutionWindowClose {
     param([Parameter(Mandatory=$true)]$EventArgs)
-    if ($script:ExecutionInProgress -or $script:ExecutionLifecycle -cin @('starting','running','unknown') -or
+    if ((Test-GuiInventoryBusy) -or (Test-GuiNormalScanBusy) -or $script:ExecutionInProgress -or $script:ExecutionLifecycle -cin @('starting','running','unknown') -or
         $script:SuspiciousStopInProgress -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown') -or
         $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) {
         $EventArgs.Cancel = $true
@@ -1679,7 +1831,7 @@ function Complete-ExecutionPoll {
 
 function Start-GuiExecution {
     param($List = $window.FindName('PendingList'))
-    if ($script:ExecutionInProgress -or $script:SuspiciousStopInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached') -or
+    if ((Test-GuiInventoryBusy) -or (Test-GuiNormalScanBusy) -or $script:ExecutionInProgress -or $script:SuspiciousStopInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached') -or
         $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) {
         return $false
     }
@@ -1756,7 +1908,7 @@ function Show-GuiMessage {
 }
 
 function Invoke-GuiRestoreLatest {
-    if ($script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached') -or
+    if ((Test-GuiInventoryBusy) -or (Test-GuiNormalScanBusy) -or $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached') -or
         $script:ExecutionInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached') -or
         $script:SuspiciousStopInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached')) { return $false }
     $script:RestoreInProgress = $true

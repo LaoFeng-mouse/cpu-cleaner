@@ -210,6 +210,15 @@ function Get-SuspiciousProcesses($TopProcs) {
 }
 
 # ---------- 4. 服务列表 ----------
+function Test-ServiceTriggerHint {
+    param([Parameter(Mandatory=$true)]$Service)
+
+    # PathName 缺失时无法可靠区分系统/第三方服务，保持 fail-closed，不给触发器提示。
+    $isThirdParty = -not [string]::IsNullOrWhiteSpace([string]$Service.PathName)
+    if ($Service.PathName -match 'C:\\Windows\\' -or $Service.DisplayName -match 'Microsoft|Windows') { $isThirdParty = $false }
+    return ($Service.StartMode -eq 'Manual' -and $Service.State -eq 'Running' -and $isThirdParty)
+}
+
 function Get-ServicesInfo {
     $svcs = @()
     try {
@@ -227,6 +236,7 @@ function Get-ServicesInfo {
         }
     } catch {
         $cimMessage = $_.Exception.Message
+        Set-ScanHealthDegraded services
         Add-ScanWarning ('CIM 服务信息不可用，已使用 Get-Service 兼容采集: ' + $cimMessage)
         try {
             $svcs = @(Get-Service -ErrorAction Stop | ForEach-Object {
@@ -250,7 +260,6 @@ function Get-ServicesInfo {
             if ($invalidFallbackServices.Count -gt 0) {
                 throw 'Get-Service 返回不完整的服务身份或状态。'
             }
-            $script:ScanHealth['services'] = 'complete'
         } catch {
             Set-ScanHealthDegraded services
             throw ('无法读取系统服务；CIM 失败: {0}; Get-Service 失败: {1}' -f $cimMessage, $_.Exception.Message)
@@ -259,11 +268,6 @@ function Get-ServicesInfo {
     # 触发器提示: Manual 却 Running = 可能被其他组件拉起 (B5)
     # 只对第三方服务标注 (系统服务太常见, 列出来是噪音)
     return @($svcs | ForEach-Object {
-        # PathName 缺失时无法可靠区分系统/第三方服务，保持 fail-closed，不给触发器提示。
-        $isThirdParty = -not [string]::IsNullOrWhiteSpace([string]$_.PathName)
-        if ($_.PathName -match 'C:\\Windows\\' -or $_.DisplayName -match 'Microsoft|Windows') { $isThirdParty = $false }
-        $triggerHint = $false
-        if ($_.StartMode -eq 'Manual' -and $_.State -eq 'Running' -and $isThirdParty) { $triggerHint = $true }
         [pscustomobject]@{
             Name        = $_.Name
             DisplayName = $_.DisplayName
@@ -271,7 +275,7 @@ function Get-ServicesInfo {
             StartMode   = $_.StartMode
             PathName    = $_.PathName
             ProcessId   = $_.ProcessId
-            TriggerHint = $triggerHint
+            TriggerHint = Test-ServiceTriggerHint $_
         }
     })
 }
@@ -307,6 +311,33 @@ function Get-AutoStart {
 }
 
 # ---------- 6. 计划任务 ----------
+function ConvertTo-ScheduledTaskActionString {
+    param([Parameter(Mandatory=$true)]$Action)
+    if ($Action -is [string]) {
+        if ([string]::IsNullOrWhiteSpace($Action)) { throw '计划任务动作不能为空。' }
+        return [string]$Action
+    }
+    if ($null -eq $Action) { throw '计划任务动作不能为空。' }
+    $propertyNames = @($Action.PSObject.Properties.Name)
+    if ($propertyNames -ccontains 'Execute') {
+        if ([string]::IsNullOrWhiteSpace([string]$Action.Execute)) { throw '计划任务执行动作缺少可执行文件。' }
+        if ($propertyNames -cnotcontains 'Arguments') { throw '计划任务执行动作缺少 Arguments 字段。' }
+        $arguments = [string]$Action.Arguments
+        if ([string]::IsNullOrWhiteSpace($arguments)) { return [string]$Action.Execute }
+        return ('{0} {1}' -f $Action.Execute, $arguments)
+    }
+
+    $stable = [ordered]@{}
+    foreach ($property in @($Action.PSObject.Properties | Sort-Object Name)) {
+        if ($property.Name -in @('CimClass','CimInstanceProperties','CimSystemProperties','PSComputerName','RunspaceId')) { continue }
+        if ($null -eq $property.Value -or $property.Value -is [string] -or $property.Value -is [ValueType]) {
+            $stable[$property.Name] = $property.Value
+        }
+    }
+    if ($stable.Count -eq 0) { throw '计划任务动作无法生成稳定表示。' }
+    return (ConvertTo-Json -InputObject $stable -Compress -Depth 4)
+}
+
 function Invoke-TaskSchedulerComQuery {
     $scheduler = New-Object -ComObject 'Schedule.Service'
     $scheduler.Connect()
@@ -318,10 +349,23 @@ function Invoke-TaskSchedulerComQuery {
         $folder = $stack.Pop()
         foreach ($task in @($folder.GetTasks(1))) {
             $triggerTypes = @($task.Definition.Triggers | ForEach-Object { [int]$_.Type })
+            $definition = $task.Definition
+            if ($null -eq $definition -or $null -eq $definition.RegistrationInfo -or $null -eq $definition.Actions) {
+                throw ('Task Scheduler COM 任务定义不完整: ' + [string]$task.Path)
+            }
+            $registration = $definition.RegistrationInfo
+            $registrationProperties = @($registration.PSObject.Properties.Name)
+            if ($registrationProperties -cnotcontains 'Author' -or $registrationProperties -cnotcontains 'Description') {
+                throw ('Task Scheduler COM 注册信息缺少 Author 或 Description: ' + [string]$task.Path)
+            }
+            $actions = @($definition.Actions | ForEach-Object { ConvertTo-ScheduledTaskActionString $_ })
             $records += [pscustomobject]@{
                 Path         = [string]$task.Path
                 State        = [int]$task.State
                 TriggerTypes = $triggerTypes
+                Author       = [string]$registration.Author
+                Description  = [string]$registration.Description
+                Actions      = [object[]]$actions
             }
         }
         foreach ($child in @($folder.GetFolders(0))) { $stack.Push($child) }
@@ -333,7 +377,7 @@ function Invoke-TaskSchedulerComQuery {
 function Convert-TaskSchedulerComRecord {
     param([Parameter(Mandatory=$true)]$Record)
     $propertyNames = @($Record.PSObject.Properties.Name)
-    $missingFields = @('Path','State','TriggerTypes' | Where-Object { $_ -notin $propertyNames })
+    $missingFields = @('Path','State','TriggerTypes','Author','Description','Actions' | Where-Object { $_ -notin $propertyNames })
     if ($missingFields.Count -gt 0) {
         throw ('Task Scheduler COM 记录缺少字段: {0}' -f ($missingFields -join ', '))
     }
@@ -360,11 +404,18 @@ function Convert-TaskSchedulerComRecord {
         }
         $triggerTypes += $triggerType
     }
+    if ($Record.Author -isnot [string]) { throw 'Task Scheduler COM 返回无效 Author 字段。' }
+    if ($Record.Description -isnot [string]) { throw 'Task Scheduler COM 返回无效 Description 字段。' }
+    if ($Record.Actions -isnot [System.Array]) { throw 'Task Scheduler COM 返回无效 Actions 字段。' }
+    $actions = @($Record.Actions | ForEach-Object { ConvertTo-ScheduledTaskActionString $_ })
     return [pscustomobject]@{
         TaskPath     = if ($separator -eq 0) { '\' } else { $fullName.Substring(0, $separator + 1) }
         TaskName     = $fullName.Substring($separator + 1)
         State        = $stateNames[$stateValue]
         LoginTrigger = (@($triggerTypes | Where-Object { $_ -in @(8, 9) }).Count -gt 0)
+        Author       = [string]$Record.Author
+        Description  = [string]$Record.Description
+        Actions      = [object[]]$actions
     }
 }
 
@@ -372,9 +423,17 @@ function Get-TasksInfo {
     $tasks = @()
     try {
         $tasks = @(Get-ScheduledTask -ErrorAction Stop | ForEach-Object {
+            $propertyNames = @($_.PSObject.Properties.Name)
+            $missingFields = @('TaskName','TaskPath','State','Author','Description','Actions','Triggers' | Where-Object { $_ -notin $propertyNames })
+            if ($missingFields.Count -gt 0) {
+                throw ('Get-ScheduledTask 记录缺少字段: {0}' -f ($missingFields -join ', '))
+            }
             if ([string]::IsNullOrWhiteSpace([string]$_.TaskName) -or
                 [string]::IsNullOrWhiteSpace([string]$_.TaskPath) -or
-                -not ([string]$_.TaskPath).StartsWith('\', [System.StringComparison]::Ordinal)) {
+                -not ([string]$_.TaskPath).StartsWith('\', [System.StringComparison]::Ordinal) -or
+                $_.State -is [System.Array] -or [string]::IsNullOrWhiteSpace([string]$_.State) -or
+                $_.Author -isnot [string] -or $_.Description -isnot [string] -or
+                $null -eq $_.Actions) {
                 throw 'Get-ScheduledTask 返回无效任务身份。'
             }
             $login = $false
@@ -384,8 +443,11 @@ function Get-TasksInfo {
             [pscustomobject]@{
                 TaskPath = $_.TaskPath
                 TaskName = $_.TaskName
-                State    = $_.State
+                State    = [string]$_.State
                 LoginTrigger = $login
+                Author = [string]$_.Author
+                Description = [string]$_.Description
+                Actions = [object[]]@($_.Actions | ForEach-Object { ConvertTo-ScheduledTaskActionString $_ })
             }
         })
         if ($tasks.Count -eq 0) { throw 'Get-ScheduledTask 返回空任务列表。' }
@@ -398,10 +460,145 @@ function Get-TasksInfo {
             if ($records.Count -eq 0) { throw 'Task Scheduler COM 返回空任务列表。' }
             $tasks = @($records | ForEach-Object { Convert-TaskSchedulerComRecord $_ })
             if ($tasks.Count -ne $records.Count) { throw 'Task Scheduler COM 任务转换数量不一致。' }
+            $script:ScanHealth['tasks'] = 'complete'
         } catch {
             throw ('无法读取计划任务；Get-ScheduledTask 失败: {0}; Task Scheduler COM 失败: {1}' -f $primaryMessage, $_.Exception.Message)
         }
     }
     return $tasks
+}
+
+function Get-ScanServiceTaskInventory {
+    param(
+        [string]$InventoryNonce = '',
+        [switch]$AllowLimited
+    )
+
+    if ($AllowLimited -and -not [string]::IsNullOrEmpty($InventoryNonce)) {
+        throw 'InventoryNonce and AllowLimited are mutually exclusive.'
+    }
+
+    if (-not [string]::IsNullOrEmpty($InventoryNonce)) {
+        if (-not (Test-InventoryNonce $InventoryNonce)) { throw 'Invalid inventory nonce.' }
+        $trusted = Read-TrustedInventoryPackage -Nonce $InventoryNonce
+        foreach ($warning in @($trusted.Package.warnings)) { Add-ScanWarning ([string]$warning) }
+        $script:ScanHealth['services'] = 'complete'
+        $script:ScanHealth['tasks'] = 'complete'
+        $trustedServices = @($trusted.Package.services | ForEach-Object {
+            [pscustomobject]@{
+                Name        = $_.Name
+                DisplayName = $_.DisplayName
+                State       = $_.State
+                StartMode   = $_.StartMode
+                PathName    = $_.PathName
+                ProcessId   = $_.ProcessId
+                TriggerHint = Test-ServiceTriggerHint $_
+            }
+        })
+        return [pscustomobject]@{
+            Services = [object[]]@($trustedServices)
+            Tasks    = [object[]]@($trusted.Package.tasks)
+        }
+    }
+
+    if ($AllowLimited) {
+        $services = @()
+        $script:ScanHealth['tasks'] = 'unavailable'
+        Add-ScanWarning '显式 limited 扫描不采集计划任务；计划任务状态不可用。'
+        try {
+            $services = @(Get-ServicesInfo)
+        } catch {
+            Set-ScanHealthDegraded services
+            Add-ScanWarning ('显式 limited 扫描无法读取系统服务，已使用安全空结果: ' + $_.Exception.Message)
+            $services = @()
+        }
+        if ([string]$script:ScanHealth.services -cne 'complete') {
+            Add-ScanWarning '显式 limited 扫描的系统服务采集不完整；仅保留安全的可用结果。'
+        }
+        return [pscustomobject]@{
+            Services = [object[]]$services
+            Tasks    = [object[]]@()
+        }
+    }
+
+    $services = @()
+    $tasks = @()
+    $collectionErrors = [System.Collections.Generic.List[string]]::new()
+    try {
+        $services = @(Get-ServicesInfo)
+    } catch {
+        $collectionErrors.Add(('services: ' + $_.Exception.Message))
+    }
+    try {
+        $tasks = @(Get-TasksInfo)
+    } catch {
+        $collectionErrors.Add(('tasks: ' + $_.Exception.Message))
+    }
+    if ($collectionErrors.Count -gt 0 -or
+        [string]$script:ScanHealth.services -cne 'complete' -or
+        [string]$script:ScanHealth.tasks -cne 'complete') {
+        $detail = if ($collectionErrors.Count -gt 0) { ': ' + ($collectionErrors -join '; ') } else { '' }
+        throw ('系统服务或计划任务采集不完整' + $detail)
+    }
+    return [pscustomobject]@{
+        Services = [object[]]$services
+        Tasks    = [object[]]$tasks
+    }
+}
+
+function Remove-PendingForScan {
+    $path = $script:PendingFile
+    if ($path -isnot [string] -or [string]::IsNullOrWhiteSpace($path)) {
+        throw 'pending 文件路径无效，拒绝开始扫描。'
+    }
+
+    try {
+        $attributes = [System.IO.File]::GetAttributes($path)
+    } catch [System.IO.FileNotFoundException] {
+        return
+    } catch [System.IO.DirectoryNotFoundException] {
+        return
+    }
+
+    if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+        throw 'pending 文件路径不能是目录，拒绝开始扫描。'
+    }
+    if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'pending 文件路径不能是 reparse point，拒绝开始扫描。'
+    }
+    Assert-PendingPathIsNotReparsePoint $path
+    [System.IO.File]::Delete($path)
+}
+
+function Invoke-ScanMode {
+    param(
+        [string]$InventoryNonce = '',
+        [switch]$AllowLimited,
+        [string]$ReportPath = ''
+    )
+
+    Remove-PendingForScan
+    Reset-ScanDiagnostics
+    Write-Step '读取系统信息...';             $sys = Get-SystemInfo
+    Write-Step '检查高占用进程...';           $procs = Get-TopProcesses 12
+    $susp = Get-SuspiciousProcesses $procs
+    Write-Step '检查系统服务与计划任务...';   $inventory = Get-ScanServiceTaskInventory -InventoryNonce $InventoryNonce -AllowLimited:$AllowLimited
+    $svcs = [object[]]@($inventory.Services)
+    $tasks = [object[]]@($inventory.Tasks)
+    Write-Step '检查启动项...';               $autos = Get-AutoStart
+    Write-Step '匹配安全规则...';             $hits = Match-Profiles -Services $svcs -AutoStarts $autos -Tasks $tasks -TopProcs $procs
+    $autoStartNames = Get-AutoStartProcessNames $autos
+
+    Write-Step '生成扫描报告...'
+    $report = Write-ScanReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -Services $svcs -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames -ScanHealth $script:ScanHealth -ScanWarnings $script:ScanWarnings
+    Write-Host $report
+
+    if ($ReportPath) {
+        $html = Write-HtmlReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames -ScanHealth $script:ScanHealth -ScanWarnings $script:ScanWarnings
+        [System.IO.File]::WriteAllText($ReportPath, $html, [System.Text.Encoding]::UTF8)
+        Write-Host "报告已保存: $ReportPath" -ForegroundColor Green
+    }
+    Save-PendingActions -Hits $hits -Suspicious $susp -ScanHealth $script:ScanHealth -ScanWarnings $script:ScanWarnings
+    return $report
 }
 

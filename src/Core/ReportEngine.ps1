@@ -1,5 +1,37 @@
 ﻿# 报告输出 (v1.7.0 拆分): 文本报告 + HTML 报告
 # ---------- 8. 报告输出 ----------
+function Get-TaskReportView {
+    param($Tasks, $ScanHealth)
+
+    $items = [object[]]@($Tasks)
+    $emptyMessage = if ([string]$ScanHealth.tasks -ceq 'complete') { '无' } else { '任务信息不可用，不能断言无任务' }
+    if ($items.Count -eq 0) {
+        return [pscustomobject]@{
+            Title = '登录/开机触发的计划任务'
+            Items = [object[]]@()
+            EmptyMessage = $emptyMessage
+        }
+    }
+
+    $withLoginTrigger = @($items | Where-Object { $null -ne $_.PSObject.Properties['LoginTrigger'] })
+    if ($withLoginTrigger.Count -eq 0) {
+        return [pscustomobject]@{
+            Title = '完整计划任务清单（管理员只读采集）'
+            Items = $items
+            EmptyMessage = $emptyMessage
+        }
+    }
+    if ($withLoginTrigger.Count -ne $items.Count -or @($items | Where-Object { $_.LoginTrigger -isnot [bool] }).Count -gt 0) {
+        throw '计划任务 LoginTrigger 契约不一致，拒绝生成可能误导的报告。'
+    }
+
+    return [pscustomobject]@{
+        Title = '登录/开机触发的计划任务'
+        Items = [object[]]@($items | Where-Object { $_.LoginTrigger })
+        EmptyMessage = $emptyMessage
+    }
+}
+
 function Write-ScanReport {
     param($SysInfo, $TopProcs, $Suspicious, $Services, $AutoStarts, $Tasks, $Hits, $AutoStartNames, $ScanHealth = $script:ScanHealth, $ScanWarnings = $script:ScanWarnings)
 
@@ -68,10 +100,10 @@ function Write-ScanReport {
     }
     $lines += ''
 
-    $lines += '【6. 登录/开机触发的计划任务】'
-    $loginTasks = @($Tasks | Where-Object { $_.LoginTrigger })
-    if ($loginTasks.Count -eq 0) { $lines += '  (无)' }
-    foreach ($t in $loginTasks) {
+    $taskView = Get-TaskReportView -Tasks $Tasks -ScanHealth $ScanHealth
+    $lines += ('【6. {0}】' -f $taskView.Title)
+    if ($taskView.Items.Count -eq 0) { $lines += ('  ({0})' -f $taskView.EmptyMessage) }
+    foreach ($t in $taskView.Items) {
         $lines += ('  {0}{1} | {2}' -f $t.TaskPath, $t.TaskName, $t.State)
     }
     $lines += ''
@@ -113,7 +145,7 @@ function Write-ScanReport {
     $notes = (Load-Profiles).keep_notes_cn
     foreach ($n in $notes) { $lines += ('  - ' + $n) }
     $lines += ''
-    $lines += ('待处理清单已保存: {0}' -f $script:PendingFile)
+    $lines += '扫描全部成功后才生成待处理清单。'
     $lines += '确认无误后, 用管理员身份运行: cpu-cleaner.ps1 -Mode clean'
     $lines += ''
 
@@ -171,12 +203,12 @@ function Write-HtmlReport {
     foreach ($a in $AutoStarts) { $sec5 += "<tr><td>$(& $esc $a.Source)</td><td>$(& $esc $a.Name)</td><td>$(& $esc $a.Value)</td></tr>" }
     $sec5 += '</table>'
 
-    $sec6 = '<h2>6. 登录/开机触发的计划任务</h2>'
-    $loginTasks = @($Tasks | Where-Object { $_.LoginTrigger })
-    if ($loginTasks.Count -eq 0) { $sec6 += '<p>无</p>' }
+    $taskView = Get-TaskReportView -Tasks $Tasks -ScanHealth $ScanHealth
+    $sec6 = '<h2>6. ' + $taskView.Title + '</h2>'
+    if ($taskView.Items.Count -eq 0) { $sec6 += '<p>' + $taskView.EmptyMessage + '</p>' }
     else {
         $sec6 += '<table><tr><th>路径</th><th>名称</th><th>状态</th></tr>'
-        foreach ($t in $loginTasks) { $sec6 += "<tr><td>$(& $esc $t.TaskPath)</td><td>$(& $esc $t.TaskName)</td><td>$($t.State)</td></tr>" }
+        foreach ($t in $taskView.Items) { $sec6 += "<tr><td>$(& $esc $t.TaskPath)</td><td>$(& $esc $t.TaskName)</td><td>$($t.State)</td></tr>" }
         $sec6 += '</table>'
     }
 

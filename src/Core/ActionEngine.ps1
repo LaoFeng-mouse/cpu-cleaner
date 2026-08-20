@@ -775,6 +775,102 @@ function Write-PendingToLockedStream {
     $Stream.Flush($true)
 }
 
+function ConvertTo-PendingUtf8BomBytes($Pending) {
+    $json = ConvertTo-Json -InputObject $Pending -Depth 100
+    $encoding = New-Object System.Text.UTF8Encoding($true, $true)
+    $preamble = $encoding.GetPreamble()
+    $content = $encoding.GetBytes($json)
+    $bytes = New-Object byte[] ($preamble.Length + $content.Length)
+    [System.Buffer]::BlockCopy($preamble, 0, $bytes, 0, $preamble.Length)
+    [System.Buffer]::BlockCopy($content, 0, $bytes, $preamble.Length, $content.Length)
+    return $bytes
+}
+
+function Assert-PendingAtomicWriteTarget($Path) {
+    if ($Path -isnot [string] -or [string]::IsNullOrWhiteSpace($Path)) { throw 'pending 文件路径无效' }
+    try { $fullPath = [System.IO.Path]::GetFullPath($Path) } catch { throw 'pending 文件路径无效' }
+    $leaf = [System.IO.Path]::GetFileName($fullPath)
+    $parent = [System.IO.Path]::GetDirectoryName($fullPath)
+    if ([string]::IsNullOrWhiteSpace($leaf) -or [string]::IsNullOrWhiteSpace($parent) -or [System.IO.Directory]::Exists($fullPath)) {
+        throw 'pending 目标必须是文件路径'
+    }
+    if (-not [System.IO.Directory]::Exists($parent)) { throw 'pending 文件父目录不存在' }
+    $parentAttributes = [System.IO.File]::GetAttributes($parent)
+    if (($parentAttributes -band [System.IO.FileAttributes]::Directory) -eq 0) { throw 'pending 文件父目录无效' }
+    Assert-PendingPathIsNotReparsePoint $parent
+    if ([System.IO.File]::Exists($fullPath)) { Assert-PendingPathIsNotReparsePoint $fullPath }
+    return [pscustomobject]@{ FullPath=$fullPath; Parent=$parent; Leaf=$leaf; Exists=[System.IO.File]::Exists($fullPath) }
+}
+
+function New-PendingAtomicWriteStream($Path) {
+    return [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+}
+
+function Invoke-PendingAtomicWrite($Stream, [byte[]]$Bytes) {
+    $Stream.Write($Bytes, 0, $Bytes.Length)
+}
+
+function Invoke-PendingAtomicFlush($Stream) {
+    $Stream.Flush($true)
+}
+
+function Invoke-PendingAtomicMove($Source, $Destination) {
+    [System.IO.File]::Move($Source, $Destination)
+}
+
+function Invoke-PendingAtomicReplace($Source, $Destination, $Backup) {
+    [System.IO.File]::Replace($Source, $Destination, $Backup)
+}
+
+function Remove-PendingAtomicFile($Path) {
+    [System.IO.File]::Delete($Path)
+}
+
+function Write-PendingFileAtomic($Path, $Pending) {
+    $target = Assert-PendingAtomicWriteTarget $Path
+    $bytes = ConvertTo-PendingUtf8BomBytes $Pending
+    $tempPath = [System.IO.Path]::Combine($target.Parent, ($target.Leaf + '.' + [guid]::NewGuid().ToString('N') + '.tmp'))
+    $backupPath = [System.IO.Path]::Combine($target.Parent, ($target.Leaf + '.' + [guid]::NewGuid().ToString('N') + '.bak'))
+    $stream = $null
+    try {
+        $stream = New-PendingAtomicWriteStream $tempPath
+        Assert-PendingPathIsNotReparsePoint $tempPath
+        Invoke-PendingAtomicWrite -Stream $stream -Bytes $bytes
+        Invoke-PendingAtomicFlush -Stream $stream
+        $stream.Dispose()
+        $stream = $null
+
+        Assert-PendingPathIsNotReparsePoint $target.Parent
+        Assert-PendingPathIsNotReparsePoint $tempPath
+        if ($target.Exists) {
+            if (-not [System.IO.File]::Exists($target.FullPath) -or [System.IO.Directory]::Exists($target.FullPath)) {
+                throw 'pending 目标在原子替换前发生变化'
+            }
+            Assert-PendingPathIsNotReparsePoint $target.FullPath
+            Invoke-PendingAtomicReplace -Source $tempPath -Destination $target.FullPath -Backup $backupPath
+            try {
+                if ([System.IO.File]::Exists($backupPath)) {
+                    Assert-PendingPathIsNotReparsePoint $backupPath
+                    Remove-PendingAtomicFile $backupPath
+                }
+            } catch {}
+        } else {
+            if ([System.IO.File]::Exists($target.FullPath) -or [System.IO.Directory]::Exists($target.FullPath)) {
+                throw 'pending 目标在首次发布前并发出现，拒绝覆盖'
+            }
+            Invoke-PendingAtomicMove -Source $tempPath -Destination $target.FullPath
+        }
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+        if ([System.IO.File]::Exists($tempPath)) { Remove-PendingAtomicFile $tempPath }
+    }
+}
+
 function Get-CurrentPendingMatchValue($Pending) {
     $hitType = Get-StrictNonBlankStringProperty $Pending 'hit_type'
     $matchedField = Get-StrictNonBlankStringProperty $Pending 'matched_field'
@@ -1026,8 +1122,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
         scan_warnings = @($ScanWarnings)
     }
     # 用 -InputObject 强制序列化, 避免管道展开导致空数组写空文件
-    $json = ConvertTo-Json -InputObject $payload -Depth 100
-    [System.IO.File]::WriteAllText($script:PendingFile, $json, (New-Object System.Text.UTF8Encoding($true)))
+    Write-PendingFileAtomic -Path $script:PendingFile -Pending $payload
 }
 
 # ---------- 10. clean 模式 ----------
@@ -1565,7 +1660,9 @@ function Invoke-RestorePlanAction($Plan) {
             } catch { return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason=('DelayedAutostart 写入失败: ' + $_.Exception.Message)} }
             if ($Plan.ExpectedStatus -ceq 'Running') {
                 $startExit = Invoke-ServiceControlCommand -Arguments @('start', $Plan.Name)
-                if ($startExit -ne 0) { return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason="sc start 失败 (exit=$startExit)"} }
+                if ($startExit -notin @(0, 1056)) {
+                    return [pscustomobject]@{success=$false;type='service';name=$Plan.Name;reason="sc start 失败 (exit=$startExit)"}
+                }
             }
 
             $after = Get-Service -Name $Plan.Name -ErrorAction SilentlyContinue

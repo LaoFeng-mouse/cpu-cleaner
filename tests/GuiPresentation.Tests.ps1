@@ -133,4 +133,32 @@ Describe 'GUI presentation model' {
         $rows[1].StateLabel | Should -Be '执行中'
         $rows[2].StateLabel | Should -Be '等待执行'
     }
+
+    It 'presents limited scan health as a warning and never as a clean empty state' {
+        $presentation = Get-GuiScanHealthPresentation -ScanHealth ([pscustomobject]@{
+            system_info='complete'
+            services='degraded'
+            tasks='unavailable'
+        }) -Warnings @() -Language zh
+
+        $presentation.Degraded | Should -BeTrue
+        $presentation.CanDeclareClean | Should -BeFalse
+        $presentation.StatusKey | Should -Be 'ResultStatusDegraded'
+        $presentation.EmptyHeadlineKey | Should -Be 'ResultHeadlineDegraded'
+        ($presentation.Warnings -join "`n") | Should -Match '不能判断电脑是否干净'
+        $presentation.EmptyHeadlineKey | Should -Not -Be 'ResultHeadlineEmpty'
+    }
+
+    It 'fails closed when scan health is missing null or not a structured object' -ForEach @(
+        @{ Health=$null; Name='null' }
+        @{ Health='complete'; Name='scalar string' }
+        @{ Health=@('complete'); Name='array' }
+        @{ Health=[pscustomobject]@{system_info='complete';services='complete'}; Name='missing category' }
+    ) {
+        $presentation = Get-GuiScanHealthPresentation -ScanHealth $Health -Warnings @() -Language en
+
+        $presentation.Degraded | Should -BeTrue -Because $Name
+        $presentation.CanDeclareClean | Should -BeFalse -Because $Name
+        $presentation.EmptyHeadlineKey | Should -Be 'ResultHeadlineDegraded' -Because $Name
+    }
 }

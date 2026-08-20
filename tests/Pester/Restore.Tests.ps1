@@ -385,6 +385,20 @@ Invoke-Restore
         Should -Invoke Invoke-RestorePlanAction -Times 0 -Exactly
     }
 
+    It '服务已被其他组件启动且 sc start 返回 1056 时继续最终回读' {
+        $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ExpectedStatus='Running';ShouldStart=$true;HasDelayed=$false;DelayedAutoStart=0}
+        Mock Invoke-ServiceControlCommand {
+            if ($Arguments[0] -eq 'start') { return 1056 }
+            return 0
+        }
+        Mock Get-Service { [pscustomobject]@{StartType='Automatic';Status='Running'} }
+
+        $result = Invoke-RestorePlanAction -Plan $plan
+
+        $result.success | Should -BeTrue
+        $result.reason | Should -Match '回读一致'
+    }
+
     It '服务原状态 Running 时 sc start 非零不得报告 success' {
         $plan = [pscustomobject]@{Type='service';Name='ExactSvc';StartType='auto';ExpectedStatus='Running';ShouldStart=$true;HasDelayed=$false;DelayedAutoStart=0}
         Mock Invoke-ServiceControlCommand {

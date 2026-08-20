@@ -20,6 +20,30 @@ Describe 'GUI 壳 (无窗口)' {
             return $t
         }
 
+        function Reset-GuiInventoryTestState {
+            $script:InventoryProcess = $null
+            $script:InventoryTimer = $null
+            $script:InventoryNonce = ''
+            $script:InventoryDeadlineUtc = [DateTime]::MinValue
+            $script:InventoryUnknownProbeCount = 0
+            $script:InventoryInProgress = $false
+            $script:InventoryLifecycle = 'idle'
+            $script:ScanJob = $null
+            $script:ScanTimer = $null
+            $script:ScanCheckTimer = $null
+            $script:ScanDeadlineUtc = $null
+            $script:ExecutionInProgress = $false
+            $script:ExecutionProcess = $null
+            $script:ExecutionLifecycle = 'idle'
+            $script:SuspiciousStopInProgress = $false
+            $script:SuspiciousStopProcess = $null
+            $script:SuspiciousStopLifecycle = 'idle'
+            $script:RestoreInProgress = $false
+            $script:RestoreProcess = $null
+            $script:RestoreLifecycle = 'idle'
+            Set-GuiState idle -Force
+        }
+
         function Get-GuiRenderSnapshot {
             $panels = [ordered]@{}
             foreach ($name in $script:StatePanels) {
@@ -82,6 +106,12 @@ Describe 'GUI 壳 (无窗口)' {
             }
             return $control
         }
+    }
+
+    AfterEach {
+        Reset-GuiInventoryTestState
+        $script:Lang = 'zh'
+        Apply-Language
     }
 
     It 'loads the single-page fantasy comic shell' {
@@ -352,13 +382,267 @@ Describe 'GUI 壳 (无窗口)' {
     It 'starts a direct streaming scan job without fake numeric progress' {
         $source = Get-Content (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw -Encoding UTF8
         $source | Should -Match 'function Start-GuiScan'
-        $source | Should -Match '& powershell\.exe -NoProfile -ExecutionPolicy Bypass -File \$scriptPath -Mode scan 2>&1'
+        $source | Should -Match '& powershell\.exe @scannerArgs 2>&1'
         $source | Should -Match '\$script:ScanTranscript'
         $source | Should -Match '\$script:ScanJob = Start-Job'
         $source | Should -Match 'Invoke-GuiScanPoll -job \$script:ScanJob'
         $source | Should -Not -Match 'Get-Random'
         $source | Should -Not -Match 'Value\s*\+='
         $source | Should -Not -Match 'cmd\s+/c'
+    }
+
+    It 'generates a cryptographic 64-lowercase-hex inventory nonce' {
+        $values = @(1..8 | ForEach-Object { New-GuiInventoryNonce })
+        $values | ForEach-Object { $_ | Should -Match '^[0-9a-f]{64}$' }
+        @($values | Select-Object -Unique).Count | Should -Be $values.Count
+    }
+
+    It 'keeps privileged inventory lifecycle state independent from the normal scan job' {
+        $script:InventoryProcess | Should -BeNullOrEmpty
+        $script:InventoryTimer | Should -BeNullOrEmpty
+        $script:InventoryNonce | Should -BeOfType [string]
+        $script:InventoryInProgress | Should -BeOfType [bool]
+        $script:InventoryTimeoutSeconds | Should -Be 60
+        $script:ScanTimeoutSeconds | Should -Be 180
+    }
+
+    It 'starts scan_inventory with RunAs and passes only the protected nonce contract' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $process = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+        $script:CapturedInventoryArguments = $null
+        Mock Start-Process {
+            param($FilePath, $Verb, $PassThru, $ArgumentList)
+            $script:CapturedInventoryArguments = @($ArgumentList)
+            return $process
+        }
+        Mock New-Object { $timer } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+        Start-GuiInventoryCollection | Should -BeTrue
+
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'powershell.exe' -and $Verb -eq 'RunAs' -and $PassThru }
+        $modeIndex = [array]::IndexOf($script:CapturedInventoryArguments, '-Mode')
+        $nonceIndex = [array]::IndexOf($script:CapturedInventoryArguments, '-InventoryNonce')
+        $script:CapturedInventoryArguments[$modeIndex + 1] | Should -Be 'scan_inventory'
+        $script:CapturedInventoryArguments[$nonceIndex + 1] | Should -Be $script:InventoryNonce
+        $script:CapturedInventoryArguments | Should -Not -Contain '-AllowLimited'
+        $script:CapturedInventoryArguments | Should -Not -Contain '-YesToAll'
+        $timer.Started | Should -BeTrue
+        $timer.Interval.TotalMilliseconds | Should -Be 250
+    }
+
+    It 'starts the normal scan with InventoryNonce only after confirmed collector exit zero' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $script:InventoryProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('a' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        Set-GuiState scanning -Force
+        Mock Start-GuiNormalScanJob { return $true }
+
+        Invoke-GuiInventoryPoll | Should -BeTrue
+
+        Should -Invoke Start-GuiNormalScanJob -Times 1 -Exactly -ParameterFilter { $InventoryNonce -eq ('a' * 64) -and -not $AllowLimited }
+        $timer.Stopped | Should -BeTrue
+        $script:InventoryProcess | Should -BeNullOrEmpty
+        $script:InventoryInProgress | Should -BeFalse
+    }
+
+    It 'starts AllowLimited after Win32 error 1223 cancels UAC' {
+        Reset-GuiInventoryTestState
+        Mock Start-Process { throw [System.ComponentModel.Win32Exception]::new(1223) }
+        Mock Start-GuiNormalScanJob { return $true }
+
+        Start-GuiInventoryCollection | Should -BeTrue
+
+        Should -Invoke Start-GuiNormalScanJob -Times 1 -Exactly -ParameterFilter { $AllowLimited -and [string]::IsNullOrEmpty($InventoryNonce) }
+        $script:InventoryProcess | Should -BeNullOrEmpty
+        $script:InventoryInProgress | Should -BeFalse
+    }
+
+    It 'does not downgrade a nonzero collector exit to a normal scan' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $script:InventoryProcess = [pscustomobject]@{ HasExited=$true; ExitCode=7 }
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('b' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        Set-GuiState scanning -Force
+        Mock Start-GuiNormalScanJob { throw 'normal scan must not start' }
+
+        Invoke-GuiInventoryPoll | Should -BeTrue
+
+        Should -Invoke Start-GuiNormalScanJob -Times 0 -Exactly
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorDetailText').Text | Should -Match 'ExitCode=7'
+    }
+
+    It 'times collector out at 60 seconds and retains the mutation latch' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $process = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+        $script:InventoryProcess = $process
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('c' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        $script:InventoryDeadlineUtc = [datetime]::UtcNow.AddSeconds(-1)
+        Set-GuiState scanning -Force
+
+        Invoke-GuiInventoryPoll | Should -BeTrue
+
+        $timer.Stopped | Should -BeTrue
+        $script:InventoryLifecycle | Should -Be 'timed_out'
+        $script:InventoryProcess | Should -Be $process
+        Test-GuiInventoryBusy | Should -BeTrue
+        $script:GuiState | Should -Be 'error'
+    }
+
+    It 'never consumes inventory while collector process status is unknown' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $script:InventoryProcess = [pscustomobject]@{ HasExited='unreadable'; ExitCode=0 }
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('d' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        Set-GuiState scanning -Force
+        Mock Start-GuiNormalScanJob { throw 'normal scan must not start' }
+
+        Invoke-GuiInventoryPoll | Should -BeFalse
+
+        Should -Invoke Start-GuiNormalScanJob -Times 0 -Exactly
+        $script:InventoryLifecycle | Should -Be 'unknown'
+        $timer.Stopped | Should -BeFalse
+    }
+
+    It 'passes InventoryNonce and AllowLimited to normal scan jobs as mutually exclusive contracts' {
+        Reset-GuiInventoryTestState
+        Set-GuiState scanning -Force
+        $timer1 = New-FakeTimer
+        $timer2 = New-FakeTimer
+        $script:NormalTimerCount = 0
+        $script:CapturedNormalArguments = $null
+        Mock Start-Job {
+            param($ScriptBlock, $ArgumentList)
+            $script:CapturedNormalArguments = @($ArgumentList)
+            return [pscustomobject]@{ State='Running' }
+        }
+        Mock New-Object {
+            $script:NormalTimerCount++
+            if ($script:NormalTimerCount -eq 1) { return $timer1 }
+            return $timer2
+        } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+        Start-GuiNormalScanJob -InventoryNonce ('e' * 64) | Should -BeTrue
+        $script:CapturedNormalArguments[1] | Should -Be ('e' * 64)
+        $script:CapturedNormalArguments[2] | Should -BeFalse
+    }
+
+    It 'retains the collector process and latch when timer setup fails after UAC launch' {
+        Reset-GuiInventoryTestState
+        $process = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+        Mock Start-Process { return $process }
+        Mock New-Object { throw 'inventory timer setup failed' } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+        Start-GuiInventoryCollection | Should -BeFalse
+
+        $script:InventoryProcess | Should -Be $process
+        $script:InventoryLifecycle | Should -Be 'detached'
+        $script:InventoryInProgress | Should -BeTrue
+        $script:GuiState | Should -Be 'error'
+    }
+
+    It 'retains the collector process and stops the timer when timer start fails' {
+        Reset-GuiInventoryTestState
+        $process = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+        $timer = New-FakeTimer
+        $timer | Add-Member -MemberType ScriptMethod -Name Start -Value { throw 'inventory timer start failed' } -Force
+        Mock Start-Process { return $process }
+        Mock New-Object { return $timer } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+        Start-GuiInventoryCollection | Should -BeFalse
+
+        $timer.Stopped | Should -BeTrue
+        $script:InventoryProcess | Should -Be $process
+        $script:InventoryLifecycle | Should -Be 'detached'
+        $script:InventoryInProgress | Should -BeTrue
+    }
+
+    It 'blocks duplicate scan clean restore stop-process and window close while inventory is latched' {
+        Reset-GuiInventoryTestState
+        $script:InventoryProcess = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        Mock Start-Process { throw 'no competing process may start' }
+        $eventArgs = [pscustomobject]@{ Cancel=$false }
+
+        Start-GuiInventoryCollection | Should -BeFalse
+        Start-GuiExecution | Should -BeFalse
+        Start-GuiSuspiciousStop | Should -BeFalse
+        Invoke-GuiRestoreLatest | Should -BeFalse
+        Protect-GuiExecutionWindowClose -EventArgs $eventArgs | Should -BeFalse
+
+        Should -Invoke Start-Process -Times 0 -Exactly
+        $eventArgs.Cancel | Should -BeTrue
+    }
+
+    It 'blocks clean restore stop-process and window close while the normal scan job is running' {
+        Reset-GuiInventoryTestState
+        $script:ScanJob = [pscustomobject]@{ State='Running' }
+        Set-GuiState scanning -Force
+        Mock Start-Process { throw 'no competing process may start' }
+        $eventArgs = [pscustomobject]@{ Cancel=$false }
+
+        Start-GuiExecution | Should -BeFalse
+        Start-GuiSuspiciousStop | Should -BeFalse
+        Invoke-GuiRestoreLatest | Should -BeFalse
+        Protect-GuiExecutionWindowClose -EventArgs $eventArgs | Should -BeFalse
+
+        Should -Invoke Start-Process -Times 0 -Exactly
+        $eventArgs.Cancel | Should -BeTrue
+    }
+
+    It 'releases an expired latch only after later process exit confirmation without consuming inventory' {
+        Reset-GuiInventoryTestState
+        $process = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
+        $timer = New-FakeTimer
+        $script:InventoryProcess = $process
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('f' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'timed_out'
+        Mock Start-GuiNormalScanJob { throw 'expired inventory must not be consumed' }
+
+        Test-GuiInventoryBusy | Should -BeFalse
+
+        Should -Invoke Start-GuiNormalScanJob -Times 0 -Exactly
+        $timer.Stopped | Should -BeTrue
+        $script:InventoryProcess | Should -BeNullOrEmpty
+        $script:InventoryNonce | Should -Be ''
+    }
+
+    It 'stops polling and retains resources after repeated unknown collector status' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $process = [pscustomobject]@{ HasExited='unreadable'; ExitCode=0 }
+        $script:InventoryProcess = $process
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('1' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        Set-GuiState scanning -Force
+        Mock Start-GuiNormalScanJob { throw 'normal scan must not start' }
+
+        1..$script:ExecutionUnknownProbeLimit | ForEach-Object { $null = Invoke-GuiInventoryPoll }
+
+        $timer.Stopped | Should -BeTrue
+        $script:InventoryLifecycle | Should -Be 'detached'
+        $script:InventoryProcess | Should -Be $process
+        Should -Invoke Start-GuiNormalScanJob -Times 0 -Exactly
     }
 
     It 'preserves UTF-8 Chinese scanner output across the real background job boundary' {
@@ -414,7 +698,7 @@ exit 0
         Mock Invoke-GuiBackgroundJobStop {}
         Mock Invoke-GuiBackgroundJobRemoval {}
         Set-GuiState idle -Force
-        Start-GuiScan | Should -BeFalse
+        Start-GuiNormalScanJob | Should -BeFalse
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('BtnStartScan').IsEnabled | Should -BeTrue
         $script:Win.FindName('ScanProgress').IsIndeterminate | Should -BeFalse
@@ -430,7 +714,7 @@ exit 0
         $window = New-GuiWindowProxy -RealWindow $realWindow -ReplacementName 'ScanningPanel' -Replacement $failingScanningPanel
         Mock Start-Job { throw 'job must not start' }
         try {
-            Start-GuiScan | Should -BeFalse
+            Start-GuiNormalScanJob | Should -BeFalse
             $script:GuiState | Should -Be 'error'
             $realWindow.FindName('BtnStartScan').IsEnabled | Should -BeTrue
             $realWindow.FindName('ScanProgress').IsIndeterminate | Should -BeFalse
@@ -453,7 +737,7 @@ exit 0
         Mock Invoke-GuiBackgroundJobStop {}
         Mock Invoke-GuiBackgroundJobRemoval {}
         Set-GuiState idle -Force
-        Start-GuiScan | Should -BeFalse
+        Start-GuiNormalScanJob | Should -BeFalse
         $firstTimer.Stopped | Should -BeTrue
         Should -Invoke Invoke-GuiBackgroundJobStop -Times 1 -Exactly
         Should -Invoke Invoke-GuiBackgroundJobRemoval -Times 1 -Exactly
@@ -569,7 +853,11 @@ exit 0
             $script:Lang = 'en'
             Mock Read-GuiBackgroundJob { 'scan complete' }
             Mock Invoke-GuiBackgroundJobRemoval {}
-            Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); observations=@()} }
+            Mock Read-GuiPendingFile { [pscustomobject]@{
+                actions=@(); observations=@()
+                scan_health=[pscustomobject]@{system_info='complete';services='complete';tasks='complete'}
+                scan_warnings=@()
+            } }
             Mock Get-PendingViewItems {
                 @([pscustomobject]@{CanExecute=$true},[pscustomobject]@{CanExecute=$false})
             }

@@ -19,6 +19,14 @@ Describe '报告输出' {
         ($report -match '风险分级汇总') | Should -Be $true
         ($report -match '正常') | Should -Be $true
     }
+    It 'scan 报告如实说明 pending 仅在全部报告成功后生成' {
+        $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores=4; Threads=8; RAM_GB=16; CPU_Load=5; BootTime='2026-01-01 00:00:00'; Uptime='1天 0小时' }
+
+        $report = Write-ScanReport -SysInfo $sys -TopProcs @() -Suspicious @() -Services @() -AutoStarts @() -Tasks @() -Hits @() -AutoStartNames @()
+
+        $report | Should -Not -Match '待处理清单已保存'
+        $report | Should -Match '扫描全部成功后才生成待处理清单'
+    }
     It '降级扫描即使零命中也不得宣称机器干净' {
         $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores=4; Threads=8; RAM_GB='未知'; CPU_Load='未知'; BootTime='N/A'; Uptime='N/A' }
         $health = [pscustomobject]@{ system_info='degraded'; services='complete'; tasks='complete' }
@@ -69,6 +77,62 @@ Describe '报告输出' {
         ($report -match '峰值%') | Should -Be $true
         ($report -match '持续') | Should -Be $true
         ($report -match '子进程') | Should -Be $true
+    }
+    It '可信 inventory 任务在文本和 HTML 中完整显示且不冒充登录触发任务' {
+        $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores=4; Threads=8; RAM_GB=16; CPU_Load=5; BootTime='2026-01-01 00:00:00'; Uptime='1天 0小时' }
+        $tasks = @(
+            [pscustomobject]@{ TaskName='TrustedTaskA';TaskPath='\Trusted\';State='Ready';Author='Vendor';Description='A';Actions=[object[]]@('C:\a.exe') },
+            [pscustomobject]@{ TaskName='TrustedTaskB';TaskPath='\Trusted\';State='Disabled';Author='Vendor';Description='B';Actions=[object[]]@('C:\b.exe') }
+        )
+
+        $report = Write-ScanReport -SysInfo $sys -TopProcs @() -Suspicious @() -Services @() -AutoStarts @() -Tasks $tasks -Hits @() -AutoStartNames @()
+        $html = Write-HtmlReport -SysInfo $sys -TopProcs @() -Suspicious @() -AutoStarts @() -Tasks $tasks -Hits @() -AutoStartNames @()
+
+        $report | Should -Match '完整计划任务清单（管理员只读采集）'
+        $report | Should -Match 'TrustedTaskA'
+        $report | Should -Match 'TrustedTaskB'
+        $report | Should -Not -Match '登录/开机触发的计划任务'
+        $html | Should -Match '完整计划任务清单（管理员只读采集）'
+        $html | Should -Match 'TrustedTaskA'
+        $html | Should -Match 'TrustedTaskB'
+        $html | Should -Not -Match '登录/开机触发的计划任务'
+    }
+    It '直接采集任务在文本和 HTML 中保留登录触发筛选' {
+        $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores=4; Threads=8; RAM_GB=16; CPU_Load=5; BootTime='2026-01-01 00:00:00'; Uptime='1天 0小时' }
+        $tasks = @(
+            [pscustomobject]@{ TaskName='LoginTask';TaskPath='\Direct\';State='Ready';LoginTrigger=$true },
+            [pscustomobject]@{ TaskName='MaintenanceTask';TaskPath='\Direct\';State='Ready';LoginTrigger=$false }
+        )
+
+        $report = Write-ScanReport -SysInfo $sys -TopProcs @() -Suspicious @() -Services @() -AutoStarts @() -Tasks $tasks -Hits @() -AutoStartNames @()
+        $html = Write-HtmlReport -SysInfo $sys -TopProcs @() -Suspicious @() -AutoStarts @() -Tasks $tasks -Hits @() -AutoStartNames @()
+
+        $report | Should -Match '登录/开机触发的计划任务'
+        $report | Should -Match 'LoginTask'
+        $report | Should -Not -Match 'MaintenanceTask'
+        $html | Should -Match '登录/开机触发的计划任务'
+        $html | Should -Match 'LoginTask'
+        $html | Should -Not -Match 'MaintenanceTask'
+    }
+    It '混合 LoginTrigger 契约的任务集合在文本和 HTML 中失败关闭' {
+        $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores=4; Threads=8; RAM_GB=16; CPU_Load=5; BootTime='2026-01-01 00:00:00'; Uptime='1天 0小时' }
+        $tasks = @(
+            [pscustomobject]@{ TaskName='DirectTask';TaskPath='\Direct\';State='Ready';LoginTrigger=$true },
+            [pscustomobject]@{ TaskName='TrustedTask';TaskPath='\Trusted\';State='Ready' }
+        )
+
+        { Write-ScanReport -SysInfo $sys -TopProcs @() -Suspicious @() -Services @() -AutoStarts @() -Tasks $tasks -Hits @() -AutoStartNames @() } | Should -Throw '*LoginTrigger*'
+        { Write-HtmlReport -SysInfo $sys -TopProcs @() -Suspicious @() -AutoStarts @() -Tasks $tasks -Hits @() -AutoStartNames @() } | Should -Throw '*LoginTrigger*'
+    }
+    It '任务采集不完整且结果为空时文本和 HTML 不宣称无任务' {
+        $sys = [pscustomobject]@{ Computer='PC'; Model='Test'; CPU='CPU'; Cores=4; Threads=8; RAM_GB=16; CPU_Load=5; BootTime='2026-01-01 00:00:00'; Uptime='1天 0小时' }
+        $health = [pscustomobject]@{ system_info='complete'; services='complete'; tasks='unavailable' }
+
+        $report = Write-ScanReport -SysInfo $sys -TopProcs @() -Suspicious @() -Services @() -AutoStarts @() -Tasks @() -Hits @() -AutoStartNames @() -ScanHealth $health
+        $html = Write-HtmlReport -SysInfo $sys -TopProcs @() -Suspicious @() -AutoStarts @() -Tasks @() -Hits @() -AutoStartNames @() -ScanHealth $health
+
+        $report | Should -Match '任务信息不可用，不能断言无任务'
+        $html | Should -Match '任务信息不可用，不能断言无任务'
     }
     It 'UTF-8 中文特征库原因可读' {
         $profiles = Load-Profiles
