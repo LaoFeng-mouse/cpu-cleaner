@@ -12,6 +12,17 @@ BeforeAll {
     foreach ($f in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
         . (Join-Path $projectRoot ('src\Core\' + $f + '.ps1'))
     }
+    if (-not ('CpuCleaner.Tests.ThrowingPublisherValue' -as [type])) {
+        Add-Type -TypeDefinition @'
+namespace CpuCleaner.Tests {
+    public sealed class ThrowingPublisherValue {
+        private readonly string message;
+        public ThrowingPublisherValue(string message) { this.message = message; }
+        public override string ToString() { throw new System.ArgumentException(message); }
+    }
+}
+'@
+    }
 }
 
 Describe 'Test-DetectMatch (match_type 分发)' {
@@ -37,6 +48,26 @@ Describe 'Test-DetectMatch (match_type 分发)' {
     }
     It 'regex 非法表达式不抛错返回 false' {
         Test-DetectMatch 'abc' @{ match = '['; type = 'regex' } | Should -BeFalse
+    }
+    It 'publisher 非法表达式不抛错返回 false' {
+        $context = [pscustomobject]@{
+            Signature = [pscustomobject]@{ SignerCertificate = [pscustomobject]@{ Subject = 'CN=Trusted Publisher' } }
+        }
+        $result = [pscustomobject]@{ Value = $true }
+
+        { $result.Value = Test-DetectMatch 'C:\Trusted\ExactSvc.exe' @{ match = '['; type = 'publisher' } -Context $context } | Should -Not -Throw
+        $result.Value | Should -BeFalse
+    }
+    It 'publisher 不吞掉 Subject 字符串转换 ArgumentException' {
+        $throwingSubject = New-Object CpuCleaner.Tests.ThrowingPublisherValue -ArgumentList 'subject conversion boom'
+        $context = [pscustomobject]@{
+            Signature = [pscustomobject]@{
+                SignerCertificate = [pscustomobject]@{ Subject = $throwingSubject }
+            }
+        }
+
+        { Test-DetectMatch 'C:\Trusted\ExactSvc.exe' @{ match = 'Trusted'; type = 'publisher' } -Context $context } |
+            Should -Throw
     }
     It 'path 前缀匹配' {
         Test-DetectMatch 'C:\Program Files\Lenovo\ImController\Lenovo.Modern.ImController.exe' @{ match = 'C:\Program Files\Lenovo'; type = 'path' } | Should -BeTrue
@@ -272,6 +303,80 @@ Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
 }
 
 Describe 'Schema 3.0 命中证据与逐命中执行闸门' {
+    It 'keeps an earlier exact match when a later publisher expression is invalid' {
+        $context = [pscustomobject]@{
+            Path = 'C:\Trusted\ExactSvc.exe'
+            Signature = [pscustomobject]@{ SignerCertificate = [pscustomobject]@{ Subject = 'CN=Trusted Publisher' } }
+        }
+        $patterns = @(
+            [pscustomobject]@{ match='ExactSvc'; type='exact' },
+            [pscustomobject]@{ match='['; type='publisher' }
+        )
+        $candidates = @(
+            [pscustomobject]@{ field='service_name'; value='ExactSvc'; context=$context },
+            [pscustomobject]@{ field='service_path'; value='C:\Trusted\ExactSvc.exe'; context=$context }
+        )
+        $result = [pscustomobject]@{ Evidence = $null }
+
+        { $result.Evidence = Find-DetectMatch $patterns $candidates } | Should -Not -Throw
+        $result.Evidence.matched_pattern | Should -BeExactly 'ExactSvc'
+        $result.Evidence.matched_type | Should -BeExactly 'exact'
+        $result.Evidence.matched_field | Should -BeExactly 'service_name'
+    }
+
+    It 'assigns deterministic strengths to matcher types' {
+        @(
+            [pscustomobject]@{ Type='exact'; Expected=0 },
+            [pscustomobject]@{ Type='path'; Expected=1 },
+            [pscustomobject]@{ Type='contains'; Expected=2 },
+            [pscustomobject]@{ Type='regex'; Expected=3 },
+            [pscustomobject]@{ Type='publisher'; Expected=4 }
+        ) | ForEach-Object {
+            Get-DetectMatchStrength $_.Type | Should -Be $_.Expected
+        }
+    }
+
+    It 'prefers an actually matched exact rule even when contains is declared first' {
+        $patterns = @(
+            [pscustomobject]@{ match='Lenovo'; type='contains' },
+            [pscustomobject]@{ match='LenovoExactService'; type='exact' }
+        )
+        $evidence = Find-DetectMatch $patterns @(
+            [pscustomobject]@{ field='service_name'; value='LenovoExactService'; context=$null }
+        )
+
+        $evidence.matched_pattern | Should -BeExactly 'LenovoExactService'
+        $evidence.matched_type | Should -BeExactly 'exact'
+        $evidence.matched_field | Should -BeExactly 'service_name'
+    }
+
+    It 'does not borrow an exact matcher that did not match the current object' {
+        $patterns = @(
+            [pscustomobject]@{ match='Lenovo'; type='contains' },
+            [pscustomobject]@{ match='LenovoExactService'; type='exact' }
+        )
+        $evidence = Find-DetectMatch $patterns @(
+            [pscustomobject]@{ field='service_name'; value='LenovoOtherService'; context=$null }
+        )
+
+        $evidence.matched_pattern | Should -BeExactly 'Lenovo'
+        $evidence.matched_type | Should -BeExactly 'contains'
+    }
+
+    It 'keeps declaration and candidate order stable among equally strong matches' {
+        $patterns = @(
+            [pscustomobject]@{ match='Lenovo'; type='contains' },
+            [pscustomobject]@{ match='Service'; type='contains' }
+        )
+        $evidence = Find-DetectMatch $patterns @(
+            [pscustomobject]@{ field='service_display_name'; value='Lenovo Service'; context=$null },
+            [pscustomobject]@{ field='service_name'; value='LenovoService'; context=$null }
+        )
+
+        $evidence.matched_pattern | Should -BeExactly 'Lenovo'
+        $evidence.matched_field | Should -BeExactly 'service_display_name'
+    }
+
     It '混合规则按实际命中证据决定动作并保留规则顺序' {
         $tmp = Join-Path $TestDrive 's3_hit_mixed.json'
         $originalProfileFile = $script:ProfileFile
@@ -535,15 +640,48 @@ Describe 'Schema 3.0 格式校验' {
 }
 
 Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
-    It 'detect 对象化后服务命中正常 (contains, 真实 lenovo-serviceas 规则)' {
-        $svc = [pscustomobject]@{ Name = 'LenovoServiceAS'; DisplayName = '联想服务'; State = 'Running'; StartMode = 'Automatic' }
-        $hits = Match-Profiles -Services @($svc) -AutoStarts @() -Tasks @() -TopProcs @()
-        $hit = @($hits | Where-Object { $_.hit_type -eq 'service' -and $_.id -eq 'lenovo-serviceas' }) | Select-Object -First 1
-        $hit | Should -Not -BeNullOrEmpty
-        $hit.action | Should -Be 'investigate'
-        $hit.matched_pattern | Should -Be 'LenovoServiceAS'
-        $hit.matched_type | Should -Be 'contains'
-        $hit.matched_field | Should -Be 'service_name'
+    It '七个已验证 Lenovo 清理规则使用 exact 内部服务名且 evidence.tested=true' {
+        $profiles = Load-Profiles -Path $script:ProfileFile
+        $expected = @{
+            'lenovo-lemcpmanager' = 'LeMCPManagerService'
+            'lenovo-xlsmart' = 'XLSmartService'
+            'lenovo-lisf' = 'LISFService'
+            'lenovo-serviceas' = 'LenovoServiceAS'
+            'lenovo-gaserivce' = 'GAService'
+            'lenovo-smartconnect' = 'SmartConnect'
+            'lenovo-lnvvcam' = 'LnvVCamInstaller'
+        }
+
+        foreach ($id in $expected.Keys) {
+            $profile = @($profiles.profiles | Where-Object { $_.id -eq $id }) | Select-Object -First 1
+            $matcher = @($profile.detect.services | Where-Object { $_.match -ceq $expected[$id] }) | Select-Object -First 1
+
+            $profile | Should -Not -BeNullOrEmpty
+            $matcher | Should -Not -BeNullOrEmpty
+            $matcher.type | Should -BeExactly 'exact'
+            $profile.evidence.tested | Should -BeTrue
+        }
+    }
+    It '真实 LeMCPManager 服务可执行但后缀伪装仅由备用 broad matcher 调查' {
+        $services = @(
+            [pscustomobject]@{ Name = 'LeMCPManagerService'; DisplayName = 'Real'; State = 'Running'; StartMode = 'Automatic' },
+            [pscustomobject]@{ Name = 'LeMCPManagerServiceFake'; DisplayName = 'Fake'; State = 'Running'; StartMode = 'Automatic' }
+        )
+        $hits = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @())
+        $real = @($hits | Where-Object { $_.id -eq 'lenovo-lemcpmanager' -and $_.service_name -eq 'LeMCPManagerService' }) | Select-Object -First 1
+        $fake = @($hits | Where-Object { $_.id -eq 'lenovo-lemcpmanager' -and $_.service_name -eq 'LeMCPManagerServiceFake' }) | Select-Object -First 1
+
+        $real | Should -Not -BeNullOrEmpty
+        $real.action | Should -BeExactly 'disable_service'
+        $real.matched_pattern | Should -BeExactly 'LeMCPManagerService'
+        $real.matched_type | Should -BeExactly 'exact'
+        $real.matched_field | Should -BeExactly 'service_name'
+
+        $fake | Should -Not -BeNullOrEmpty
+        $fake.action | Should -BeExactly 'investigate'
+        $fake.matched_pattern | Should -BeExactly 'LeMcpManager'
+        $fake.matched_type | Should -BeExactly 'contains'
+        $fake.matched_field | Should -BeExactly 'service_name'
     }
     It '授权验证 target 检查兼容对象化 detect' {
         $profiles = Load-Profiles

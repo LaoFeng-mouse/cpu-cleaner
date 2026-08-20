@@ -13,7 +13,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "LeMCPManagerService",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          },
                                                          {
                                                              "match":  "LeMcpManager",
@@ -77,7 +77,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "XLSmartService",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -133,7 +133,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "LISFService",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -177,7 +177,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "LenovoServiceAS",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -229,7 +229,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "GAService",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -269,7 +269,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "SmartConnect",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -317,7 +317,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "LnvVCamInstaller",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [

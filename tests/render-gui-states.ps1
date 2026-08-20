@@ -35,6 +35,10 @@ $executionRows = @(
     [pscustomobject]@{ Name='Scheduled task'; State='failed'; StateLabel='failed - Scheduled task' },
     [pscustomobject]@{ Name='Startup item'; State='skipped'; StateLabel='skipped - Startup item' }
 )
+$suspiciousRows = @(
+    [pscustomobject]@{ IsChecked=$false; CanStop=$true; Name='fixture-helper'; PidLabel='PID 4242'; Reason='Unsigned high-usage process in a temporary directory'; StopBlockReason='' },
+    [pscustomobject]@{ IsChecked=$false; CanStop=$false; Name='identity-incomplete'; PidLabel='PID 5252'; Reason='Incomplete process identity'; StopBlockReason='Executable path is unavailable; safe stop is blocked' }
+)
 
 function Save-WindowPng {
     param([Parameter(Mandatory=$true)][string]$Path)
@@ -63,6 +67,7 @@ foreach ($state in Get-GuiStateNames) {
     $window.FindName('ScanOutput').Text = "system information`r`nprocess scan`r`nservice scan"
     Set-GuiResultSummary -Executable 2 -Observation 4 -Evidence @('Exact safe service | exact | ExactService', 'Broad-match observation | contains | Lenovo')
     $window.FindName('PendingList').ItemsSource = $reviewRows
+    $window.FindName('SuspiciousList').ItemsSource = $suspiciousRows
     $window.FindName('ExecutionList').ItemsSource = $executionRows
     $window.FindName('CompletedList').ItemsSource = $executionRows
     Set-GuiCompletedSummary -Success 1 -Failed 1 -Skipped 1 -Manual 0

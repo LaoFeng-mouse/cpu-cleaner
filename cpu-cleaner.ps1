@@ -7,17 +7,20 @@
 #    powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode scan -ReportPath D:\报告.html
 #    (管理员) powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode clean
 #    (管理员) powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode restore -BackupDir D:\CPU后台整理工具\backups\20260809_120000
+#    powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode stop_process -PendingFileArg <subset.json> -PendingSha256Arg <sha256>
 #    powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update    (需先配置 ProfileUrl)
 #
 #  安全设计:
 #    - scan 完全只读
-#    - clean 必须先 scan, 逐条确认后才执行; 结束进程必须显式输入 PID, 绝不自动杀
+#    - clean 必须先 scan, 逐条确认后才执行; 结束进程使用独立哈希绑定清单并重验完整进程身份
 #    - 每个处理动作自动备份到 backups\, restore 一键恢复
 # ============================================================
 
 param(
-    [ValidateSet('scan','clean','restore','update')]
+    [ValidateSet('scan','scan_inventory','clean','restore','update','stop_process')]
     [string]$Mode = 'scan',
+    [string]$InventoryNonce = '',
+    [switch]$AllowLimited,
     [string]$ReportPath = '',
     [string]$BackupDir = '',
     [switch]$YesToAll,
@@ -54,34 +57,50 @@ function Is-Admin {
 
 
 # ---------- v1.7.0 模块化: 按域拆分到 src/Core/ (dot-source 保持 $script: 作用域共享) ----------
-foreach ($f in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
+foreach ($f in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager','InventoryManager')) {
     . (Join-Path $script:Root ('src\Core\' + $f + '.ps1'))
 }
 
 # ---------- 主流程 ----------
+try {
+    if ($PSBoundParameters.ContainsKey('AllowLimited') -and $Mode -cne 'scan') {
+        throw 'AllowLimited is valid only with Mode scan.'
+    }
+    if ($PSBoundParameters.ContainsKey('InventoryNonce') -and $Mode -cnotin @('scan','scan_inventory')) {
+        throw 'InventoryNonce is valid only with Mode scan or internal scan_inventory.'
+    }
+    if ($AllowLimited -and $PSBoundParameters.ContainsKey('InventoryNonce')) {
+        throw 'InventoryNonce and AllowLimited are mutually exclusive.'
+    }
+    if ($PSBoundParameters.ContainsKey('InventoryNonce') -and -not (Test-InventoryNonce $InventoryNonce)) {
+        throw 'Invalid inventory nonce.'
+    }
+} catch {
+    Write-Error ('Invalid arguments: ' + $_.Exception.Message)
+    exit 1
+}
+
 switch ($Mode) {
+    'scan_inventory' {
+        try {
+            $unrelatedInventoryArguments = @($PSBoundParameters.Keys | Where-Object { $_ -cnotin @('Mode','InventoryNonce') })
+            if ($unrelatedInventoryArguments.Count -gt 0) {
+                throw ('scan_inventory accepts only InventoryNonce; rejected: ' + ($unrelatedInventoryArguments -join ', '))
+            }
+            $null = Invoke-ScanInventory -Nonce $InventoryNonce
+            exit 0
+        } catch {
+            Write-Error ('scan_inventory failed: ' + $_.Exception.Message)
+            exit 1
+        }
+    }
     'scan' {
-        Reset-ScanDiagnostics
-        Write-Step '读取系统信息...';       $sys = Get-SystemInfo
-        Write-Step '检查高占用进程...';     $procs = Get-TopProcesses 12
-        $susp = Get-SuspiciousProcesses $procs
-        Write-Step '检查系统服务...';       $svcs = Get-ServicesInfo
-        Write-Step '检查启动项...';         $autos = Get-AutoStart
-        Write-Step '检查计划任务...';       $tasks = Get-TasksInfo
-        Write-Step '匹配安全规则...';       $hits = Match-Profiles -Services $svcs -AutoStarts $autos -Tasks $tasks -TopProcs $procs
-        $autoStartNames = Get-AutoStartProcessNames $autos
-
-        Write-Step '生成扫描报告...'
-        $report = Write-ScanReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -Services $svcs -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames -ScanHealth $script:ScanHealth -ScanWarnings $script:ScanWarnings
-        Write-Host $report
-
-        Save-PendingActions -Hits $hits -Suspicious $susp -ScanHealth $script:ScanHealth -ScanWarnings $script:ScanWarnings
-
-        if ($ReportPath) {
-            # HTML 报告 (v1.5.2: 统一到 Write-HtmlReport, 与文本报告同源)
-            $html = Write-HtmlReport -SysInfo $sys -TopProcs $procs -Suspicious $susp -AutoStarts $autos -Tasks $tasks -Hits $hits -AutoStartNames $autoStartNames -ScanHealth $script:ScanHealth -ScanWarnings $script:ScanWarnings
-            [System.IO.File]::WriteAllText($ReportPath, $html, [System.Text.Encoding]::UTF8)
-            Write-Host "报告已保存: $ReportPath" -ForegroundColor Green
+        try {
+            $null = Invoke-ScanMode -InventoryNonce $InventoryNonce -AllowLimited:$AllowLimited -ReportPath $ReportPath
+            exit 0
+        } catch {
+            Write-Error ('scan failed: ' + $_.Exception.Message)
+            exit 1
         }
     }
     'clean' {
@@ -93,5 +112,12 @@ switch ($Mode) {
         Invoke-Clean
     }
     'restore' { Invoke-Restore }
+    'stop_process' {
+        $result = Invoke-StopProcessPending -Path $PendingFileArg -ExpectedSha256 $PendingSha256Arg
+        foreach ($row in @($result.Results)) {
+            Write-Host ("PID {0} {1}: {2}" -f $row.PID, $row.status, $row.result_reason)
+        }
+        exit ([int]$result.ExitCode)
+    }
     'update' { Update-Profiles }
 }

@@ -43,6 +43,39 @@ function Get-GuiItemSummary {
     }
 }
 
+function Get-GuiScanHealthPresentation {
+    param(
+        $ScanHealth = $null,
+        [string[]]$Warnings = @(),
+        [ValidateSet('zh','en')][string]$Language = 'zh'
+    )
+    $degraded = $true
+    if ($null -ne $ScanHealth) {
+        $degraded = $false
+        foreach ($category in @('system_info','services','tasks')) {
+            if ($ScanHealth.PSObject.Properties.Name -notcontains $category -or [string]$ScanHealth.$category -cne 'complete') {
+                $degraded = $true
+                break
+            }
+        }
+    }
+    $effectiveWarnings = @($Warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($degraded -and $effectiveWarnings.Count -eq 0) {
+        $effectiveWarnings = @($(if ($Language -eq 'zh') {
+            '计划任务和完整服务信息未检查，本次结果不能判断电脑是否干净。'
+        } else {
+            'Scheduled tasks and complete service information were not checked; this scan cannot declare the PC clean.'
+        }))
+    }
+    return [pscustomobject]@{
+        Degraded = $degraded
+        CanDeclareClean = -not $degraded
+        StatusKey = if ($degraded) { 'ResultStatusDegraded' } else { 'ResultStatusEmpty' }
+        EmptyHeadlineKey = if ($degraded) { 'ResultHeadlineDegraded' } else { 'ResultHeadlineEmpty' }
+        Warnings = @($effectiveWarnings)
+    }
+}
+
 function Format-GuiMatcherDetail {
     param($Raw)
     if (-not $Raw) { return '' }

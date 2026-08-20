@@ -20,6 +20,30 @@ Describe 'GUI 壳 (无窗口)' {
             return $t
         }
 
+        function Reset-GuiInventoryTestState {
+            $script:InventoryProcess = $null
+            $script:InventoryTimer = $null
+            $script:InventoryNonce = ''
+            $script:InventoryDeadlineUtc = [DateTime]::MinValue
+            $script:InventoryUnknownProbeCount = 0
+            $script:InventoryInProgress = $false
+            $script:InventoryLifecycle = 'idle'
+            $script:ScanJob = $null
+            $script:ScanTimer = $null
+            $script:ScanCheckTimer = $null
+            $script:ScanDeadlineUtc = $null
+            $script:ExecutionInProgress = $false
+            $script:ExecutionProcess = $null
+            $script:ExecutionLifecycle = 'idle'
+            $script:SuspiciousStopInProgress = $false
+            $script:SuspiciousStopProcess = $null
+            $script:SuspiciousStopLifecycle = 'idle'
+            $script:RestoreInProgress = $false
+            $script:RestoreProcess = $null
+            $script:RestoreLifecycle = 'idle'
+            Set-GuiState idle -Force
+        }
+
         function Get-GuiRenderSnapshot {
             $panels = [ordered]@{}
             foreach ($name in $script:StatePanels) {
@@ -84,6 +108,12 @@ Describe 'GUI 壳 (无窗口)' {
         }
     }
 
+    AfterEach {
+        Reset-GuiInventoryTestState
+        $script:Lang = 'zh'
+        Apply-Language
+    }
+
     It 'loads the single-page fantasy comic shell' {
         $script:Win | Should -Not -BeNullOrEmpty
         foreach ($name in @(
@@ -91,8 +121,8 @@ Describe 'GUI 壳 (无窗口)' {
             'ImgStage1','ImgStage2','ImgStage3','ImgStage4',
             'IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel',
             'ExecutingPanel','CompletedPanel','ErrorPanel',
-            'StateTitle','StateSubtitle','PendingList','ExecutionList',
-            'BtnStartScan','BtnOpenReview','BtnExecute','BtnRescan','BtnRetry','BtnRestore','BtnLang'
+            'StateTitle','StateSubtitle','PendingList','SuspiciousList','ExecutionList',
+            'BtnStartScan','BtnOpenReview','BtnExecute','BtnStopProcesses','BtnRescan','BtnRetry','BtnRestore','BtnLang'
         )) {
             $script:Win.FindName($name) | Should -Not -BeNullOrEmpty
         }
@@ -352,13 +382,298 @@ Describe 'GUI 壳 (无窗口)' {
     It 'starts a direct streaming scan job without fake numeric progress' {
         $source = Get-Content (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw -Encoding UTF8
         $source | Should -Match 'function Start-GuiScan'
-        $source | Should -Match '& powershell\.exe -NoProfile -ExecutionPolicy Bypass -File \$scriptPath -Mode scan 2>&1'
+        $source | Should -Match '& powershell\.exe @scannerArgs 2>&1'
         $source | Should -Match '\$script:ScanTranscript'
         $source | Should -Match '\$script:ScanJob = Start-Job'
         $source | Should -Match 'Invoke-GuiScanPoll -job \$script:ScanJob'
         $source | Should -Not -Match 'Get-Random'
         $source | Should -Not -Match 'Value\s*\+='
         $source | Should -Not -Match 'cmd\s+/c'
+    }
+
+    It 'routes the beginner scan launcher through the GUI UAC inventory flow' {
+        $launcher = Get-Content (Join-Path $script:GuiRoot '1-扫描.bat') -Raw -Encoding UTF8
+
+        $launcher | Should -Match 'gui-cleaner\.ps1'
+        $launcher | Should -Not -Match 'cpu-cleaner\.ps1[^\r\n]*-Mode\s+scan'
+        $launcher | Should -Not -Match 'Scan finished'
+    }
+
+    It 'generates a cryptographic 64-lowercase-hex inventory nonce' {
+        $values = @(1..8 | ForEach-Object { New-GuiInventoryNonce })
+        $values | ForEach-Object { $_ | Should -Match '^[0-9a-f]{64}$' }
+        @($values | Select-Object -Unique).Count | Should -Be $values.Count
+    }
+
+    It 'keeps privileged inventory lifecycle state independent from the normal scan job' {
+        $script:InventoryProcess | Should -BeNullOrEmpty
+        $script:InventoryTimer | Should -BeNullOrEmpty
+        $script:InventoryNonce | Should -BeOfType [string]
+        $script:InventoryInProgress | Should -BeOfType [bool]
+        $script:InventoryTimeoutSeconds | Should -Be 60
+        $script:ScanTimeoutSeconds | Should -Be 180
+    }
+
+    It 'starts scan_inventory with RunAs and passes only the protected nonce contract' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $process = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+        $script:CapturedInventoryArguments = $null
+        Mock Start-Process {
+            param($FilePath, $Verb, $PassThru, $ArgumentList)
+            $script:CapturedInventoryArguments = @($ArgumentList)
+            return $process
+        }
+        Mock New-Object { $timer } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+        Start-GuiInventoryCollection | Should -BeTrue
+
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter { $FilePath -eq 'powershell.exe' -and $Verb -eq 'RunAs' -and $PassThru }
+        $modeIndex = [array]::IndexOf($script:CapturedInventoryArguments, '-Mode')
+        $nonceIndex = [array]::IndexOf($script:CapturedInventoryArguments, '-InventoryNonce')
+        $script:CapturedInventoryArguments[$modeIndex + 1] | Should -Be 'scan_inventory'
+        $script:CapturedInventoryArguments[$nonceIndex + 1] | Should -Be $script:InventoryNonce
+        $script:CapturedInventoryArguments | Should -Not -Contain '-AllowLimited'
+        $script:CapturedInventoryArguments | Should -Not -Contain '-YesToAll'
+        $timer.Started | Should -BeTrue
+        $timer.Interval.TotalMilliseconds | Should -Be 250
+    }
+
+    It 'starts the normal scan with InventoryNonce only after confirmed collector exit zero' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $script:InventoryProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('a' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        Set-GuiState scanning -Force
+        Mock Start-GuiNormalScanJob { return $true }
+
+        Invoke-GuiInventoryPoll | Should -BeTrue
+
+        Should -Invoke Start-GuiNormalScanJob -Times 1 -Exactly -ParameterFilter { $InventoryNonce -eq ('a' * 64) -and -not $AllowLimited }
+        $timer.Stopped | Should -BeTrue
+        $script:InventoryProcess | Should -BeNullOrEmpty
+        $script:InventoryInProgress | Should -BeFalse
+    }
+
+    It 'starts AllowLimited after Win32 error 1223 cancels UAC' {
+        Reset-GuiInventoryTestState
+        Mock Start-Process { throw [System.ComponentModel.Win32Exception]::new(1223) }
+        Mock Start-GuiNormalScanJob { return $true }
+
+        Start-GuiInventoryCollection | Should -BeTrue
+
+        Should -Invoke Start-GuiNormalScanJob -Times 1 -Exactly -ParameterFilter { $AllowLimited -and [string]::IsNullOrEmpty($InventoryNonce) }
+        $script:InventoryProcess | Should -BeNullOrEmpty
+        $script:InventoryInProgress | Should -BeFalse
+    }
+
+    It 'does not downgrade a nonzero collector exit to a normal scan' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $script:InventoryProcess = [pscustomobject]@{ HasExited=$true; ExitCode=7 }
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('b' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        Set-GuiState scanning -Force
+        Mock Start-GuiNormalScanJob { throw 'normal scan must not start' }
+
+        Invoke-GuiInventoryPoll | Should -BeTrue
+
+        Should -Invoke Start-GuiNormalScanJob -Times 0 -Exactly
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorDetailText').Text | Should -Match 'ExitCode=7'
+    }
+
+    It 'times collector out at 60 seconds and retains the mutation latch' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $process = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+        $script:InventoryProcess = $process
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('c' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        $script:InventoryDeadlineUtc = [datetime]::UtcNow.AddSeconds(-1)
+        Set-GuiState scanning -Force
+
+        Invoke-GuiInventoryPoll | Should -BeTrue
+
+        $timer.Stopped | Should -BeTrue
+        $script:InventoryLifecycle | Should -Be 'timed_out'
+        $script:InventoryProcess | Should -Be $process
+        Test-GuiInventoryBusy | Should -BeTrue
+        $script:GuiState | Should -Be 'error'
+    }
+
+    It 'never consumes inventory while collector process status is unknown' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $script:InventoryProcess = [pscustomobject]@{ HasExited='unreadable'; ExitCode=0 }
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('d' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        Set-GuiState scanning -Force
+        Mock Start-GuiNormalScanJob { throw 'normal scan must not start' }
+
+        Invoke-GuiInventoryPoll | Should -BeFalse
+
+        Should -Invoke Start-GuiNormalScanJob -Times 0 -Exactly
+        $script:InventoryLifecycle | Should -Be 'unknown'
+        $timer.Stopped | Should -BeFalse
+    }
+
+    It 'passes InventoryNonce and AllowLimited to normal scan jobs as mutually exclusive contracts' {
+        Reset-GuiInventoryTestState
+        Set-GuiState scanning -Force
+        $timer1 = New-FakeTimer
+        $timer2 = New-FakeTimer
+        $script:NormalTimerCount = 0
+        $script:CapturedNormalArguments = $null
+        Mock Start-Job {
+            param($ScriptBlock, $ArgumentList)
+            $script:CapturedNormalArguments = @($ArgumentList)
+            return [pscustomobject]@{ State='Running' }
+        }
+        Mock New-Object {
+            $script:NormalTimerCount++
+            if ($script:NormalTimerCount -eq 1) { return $timer1 }
+            return $timer2
+        } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+        Start-GuiNormalScanJob -InventoryNonce ('e' * 64) | Should -BeTrue
+        $script:CapturedNormalArguments[1] | Should -Be ('e' * 64)
+        $script:CapturedNormalArguments[2] | Should -BeFalse
+    }
+
+    It 'retains the collector process and latch when timer setup fails after UAC launch' {
+        Reset-GuiInventoryTestState
+        $process = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+        Mock Start-Process { return $process }
+        Mock New-Object { throw 'inventory timer setup failed' } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+        Start-GuiInventoryCollection | Should -BeFalse
+
+        $script:InventoryProcess | Should -Be $process
+        $script:InventoryLifecycle | Should -Be 'detached'
+        $script:InventoryInProgress | Should -BeTrue
+        $script:GuiState | Should -Be 'error'
+    }
+
+    It 'retains the collector process and stops the timer when timer start fails' {
+        Reset-GuiInventoryTestState
+        $process = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+        $timer = New-FakeTimer
+        $timer | Add-Member -MemberType ScriptMethod -Name Start -Value { throw 'inventory timer start failed' } -Force
+        Mock Start-Process { return $process }
+        Mock New-Object { return $timer } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+        Start-GuiInventoryCollection | Should -BeFalse
+
+        $timer.Stopped | Should -BeTrue
+        $script:InventoryProcess | Should -Be $process
+        $script:InventoryLifecycle | Should -Be 'detached'
+        $script:InventoryInProgress | Should -BeTrue
+    }
+
+    It 'blocks duplicate scan clean restore stop-process and window close while inventory is latched' {
+        Reset-GuiInventoryTestState
+        $script:InventoryProcess = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        Mock Start-Process { throw 'no competing process may start' }
+        $eventArgs = [pscustomobject]@{ Cancel=$false }
+
+        Start-GuiInventoryCollection | Should -BeFalse
+        Start-GuiExecution | Should -BeFalse
+        Start-GuiSuspiciousStop | Should -BeFalse
+        Invoke-GuiRestoreLatest | Should -BeFalse
+        Protect-GuiExecutionWindowClose -EventArgs $eventArgs | Should -BeFalse
+
+        Should -Invoke Start-Process -Times 0 -Exactly
+        $eventArgs.Cancel | Should -BeTrue
+    }
+
+    It 'blocks clean restore stop-process and window close while the normal scan job is running' {
+        Reset-GuiInventoryTestState
+        $script:ScanJob = [pscustomobject]@{ State='Running' }
+        Set-GuiState scanning -Force
+        Mock Start-Process { throw 'no competing process may start' }
+        $eventArgs = [pscustomobject]@{ Cancel=$false }
+
+        Start-GuiExecution | Should -BeFalse
+        Start-GuiSuspiciousStop | Should -BeFalse
+        Invoke-GuiRestoreLatest | Should -BeFalse
+        Protect-GuiExecutionWindowClose -EventArgs $eventArgs | Should -BeFalse
+
+        Should -Invoke Start-Process -Times 0 -Exactly
+        $eventArgs.Cancel | Should -BeTrue
+    }
+
+    It 'releases an expired latch only after later process exit confirmation without consuming inventory' {
+        Reset-GuiInventoryTestState
+        $process = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
+        $timer = New-FakeTimer
+        $script:InventoryProcess = $process
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('f' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'timed_out'
+        Mock Start-GuiNormalScanJob { throw 'expired inventory must not be consumed' }
+
+        Test-GuiInventoryBusy | Should -BeFalse
+
+        Should -Invoke Start-GuiNormalScanJob -Times 0 -Exactly
+        $timer.Stopped | Should -BeTrue
+        $script:InventoryProcess | Should -BeNullOrEmpty
+        $script:InventoryNonce | Should -Be ''
+    }
+
+    It 'stops polling and retains resources after repeated unknown collector status' {
+        Reset-GuiInventoryTestState
+        $timer = New-FakeTimer
+        $process = [pscustomobject]@{ HasExited='unreadable'; ExitCode=0 }
+        $script:InventoryProcess = $process
+        $script:InventoryTimer = $timer
+        $script:InventoryNonce = ('1' * 64)
+        $script:InventoryInProgress = $true
+        $script:InventoryLifecycle = 'running'
+        Set-GuiState scanning -Force
+        Mock Start-GuiNormalScanJob { throw 'normal scan must not start' }
+
+        1..$script:ExecutionUnknownProbeLimit | ForEach-Object { $null = Invoke-GuiInventoryPoll }
+
+        $timer.Stopped | Should -BeTrue
+        $script:InventoryLifecycle | Should -Be 'detached'
+        $script:InventoryProcess | Should -Be $process
+        Should -Invoke Start-GuiNormalScanJob -Times 0 -Exactly
+    }
+
+    It 'preserves UTF-8 Chinese scanner output across the real background job boundary' {
+        $childScript = Join-Path $env:TEMP ('shushu_scan_utf8_' + [guid]::NewGuid().ToString('N') + '.ps1')
+        $childSource = @'
+param([string]$Mode)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+Write-Output '==> 读取系统信息...'
+exit 0
+'@
+        [System.IO.File]::WriteAllText($childScript, $childSource, [System.Text.UTF8Encoding]::new($true))
+        $job = $null
+        try {
+            $job = Start-Job -ScriptBlock $script:ScanJobScript -ArgumentList $childScript
+            Wait-Job $job | Out-Null
+            $job.State | Should -Be 'Completed'
+            $received = @($job | Receive-Job) -join "`r`n"
+            $received | Should -Match ([regex]::Escape('==> 读取系统信息...'))
+            $received | Should -Not -Match ([regex]::Escape('==> 璇诲彇绯荤粺淇℃伅...'))
+        } finally {
+            if ($job -and (Get-Job -Id $job.Id -ErrorAction SilentlyContinue)) { Remove-Job $job -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $childScript -Force -ErrorAction SilentlyContinue
+        }
     }
 
     It 'native scanner exit 7 fails the job, enters error, and never loads stale pending' {
@@ -391,7 +706,7 @@ Describe 'GUI 壳 (无窗口)' {
         Mock Invoke-GuiBackgroundJobStop {}
         Mock Invoke-GuiBackgroundJobRemoval {}
         Set-GuiState idle -Force
-        Start-GuiScan | Should -BeFalse
+        Start-GuiNormalScanJob | Should -BeFalse
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('BtnStartScan').IsEnabled | Should -BeTrue
         $script:Win.FindName('ScanProgress').IsIndeterminate | Should -BeFalse
@@ -407,7 +722,7 @@ Describe 'GUI 壳 (无窗口)' {
         $window = New-GuiWindowProxy -RealWindow $realWindow -ReplacementName 'ScanningPanel' -Replacement $failingScanningPanel
         Mock Start-Job { throw 'job must not start' }
         try {
-            Start-GuiScan | Should -BeFalse
+            Start-GuiNormalScanJob | Should -BeFalse
             $script:GuiState | Should -Be 'error'
             $realWindow.FindName('BtnStartScan').IsEnabled | Should -BeTrue
             $realWindow.FindName('ScanProgress').IsIndeterminate | Should -BeFalse
@@ -430,7 +745,7 @@ Describe 'GUI 壳 (无窗口)' {
         Mock Invoke-GuiBackgroundJobStop {}
         Mock Invoke-GuiBackgroundJobRemoval {}
         Set-GuiState idle -Force
-        Start-GuiScan | Should -BeFalse
+        Start-GuiNormalScanJob | Should -BeFalse
         $firstTimer.Stopped | Should -BeTrue
         Should -Invoke Invoke-GuiBackgroundJobStop -Times 1 -Exactly
         Should -Invoke Invoke-GuiBackgroundJobRemoval -Times 1 -Exactly
@@ -457,6 +772,23 @@ Describe 'GUI 壳 (无窗口)' {
         Should -Invoke Invoke-GuiBackgroundJobRemoval -Times 1 -Exactly
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('ErrorDetailText').Text | Should -Match 'drain failed'
+    }
+
+    It 'stops and removes a scan job after the explicit deadline instead of polling forever' {
+        $job = [pscustomobject]@{ State='Running' }
+        $checkTimer = New-FakeTimer
+        $scanTimer = New-FakeTimer
+        $script:ScanDeadlineUtc = [datetime]::UtcNow.AddSeconds(-1)
+        Mock Read-GuiBackgroundJob { @() }
+        Mock Invoke-GuiBackgroundJobStop {}
+        Mock Invoke-GuiBackgroundJobRemoval {}
+        Set-GuiState scanning -Force
+
+        Invoke-GuiScanPoll -job $job -checkTimer $checkTimer -scanTimer $scanTimer | Should -BeTrue
+        Should -Invoke Invoke-GuiBackgroundJobStop -Times 1 -Exactly
+        Should -Invoke Invoke-GuiBackgroundJobRemoval -Times 1 -Exactly
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorDetailText').Text | Should -Match '180|timeout|超时'
     }
 
     It 'pending load failure cleans up and enters recoverable error' {
@@ -529,7 +861,11 @@ Describe 'GUI 壳 (无窗口)' {
             $script:Lang = 'en'
             Mock Read-GuiBackgroundJob { 'scan complete' }
             Mock Invoke-GuiBackgroundJobRemoval {}
-            Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); observations=@()} }
+            Mock Read-GuiPendingFile { [pscustomobject]@{
+                actions=@(); observations=@()
+                scan_health=[pscustomobject]@{system_info='complete';services='complete';tasks='complete'}
+                scan_warnings=@()
+            } }
             Mock Get-PendingViewItems {
                 @([pscustomobject]@{CanExecute=$true},[pscustomobject]@{CanExecute=$false})
             }
@@ -767,6 +1103,154 @@ Describe '勾选视图 (v1.5.5)' {
         $script:ExecutionInProgress = $false
         $script:ExecutionLifecycle = 'idle'
         $script:ExecutionUnknownProbeCount = 0
+        if ($script:SuspiciousStopTempPath -and (Test-Path -LiteralPath $script:SuspiciousStopTempPath)) {
+            Remove-Item -LiteralPath $script:SuspiciousStopTempPath -Force -ErrorAction SilentlyContinue
+        }
+        $script:SuspiciousStopProcess = $null
+        $script:SuspiciousStopTimer = $null
+        $script:SuspiciousStopTempPath = $null
+        $script:SuspiciousStopRows = @()
+        $script:SuspiciousStopInProgress = $false
+        $script:SuspiciousStopLifecycle = 'idle'
+        $script:RestoreProcess = $null
+        $script:RestoreTimer = $null
+        $script:RestoreInProgress = $false
+        $script:RestoreLifecycle = 'idle'
+        $script:RestoreUnknownProbeCount = 0
+        $script:Win.FindName('BtnRestore').IsEnabled = $true
+    }
+
+    It 'projects suspicious rows separately from reviewed OEM actions' {
+        $pending = New-GuiReviewPendingFixture
+        $pending.actions = @()
+        $pending.suspicious = @([pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        })
+        $rows = @(Get-GuiSuspiciousViewItems $pending)
+
+        $rows.Count | Should -Be 1
+        $rows[0].IsChecked | Should -BeFalse
+        $rows[0].CanStop | Should -BeTrue
+        $script:ReviewedPendingSnapshot = $pending
+        $emptyKeys = [System.Collections.Generic.List[string]]::new()
+        $script:ReviewedActionIdentityKeys = $emptyKeys.AsReadOnly()
+        $script:Win.FindName('PendingList').ItemsSource = @()
+        @(Resolve-GuiReviewedActions -List $script:Win.FindName('PendingList')).Count | Should -Be 0
+    }
+
+    It 'resolves suspicious selection only from its reviewed identity allowlist' {
+        $pending = New-GuiReviewPendingFixture
+        $pending.suspicious = @([pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        })
+        $script:ReviewedPendingSnapshot = $pending
+        $keys = [System.Collections.Generic.List[string]]::new()
+        $keys.Add((Get-GuiSuspiciousIdentityKey $pending.suspicious[0]))
+        $script:ReviewedSuspiciousIdentityKeys = $keys.AsReadOnly()
+        $list = $script:Win.FindName('SuspiciousList')
+        $valid = @(Get-GuiSuspiciousViewItems $pending); $valid[0].IsChecked = $true
+        $list.ItemsSource = $valid
+        @(Resolve-GuiReviewedSuspiciousRows -List $list).Count | Should -Be 1
+
+        $forgedRaw = $pending.suspicious[0].PSObject.Copy(); $forgedRaw.Path = 'C:\Other\forged.exe'
+        $forged = [pscustomobject]@{ IsChecked=$true; CanStop=$true; _raw=$forgedRaw }
+        $list.ItemsSource = @($forged)
+        { Resolve-GuiReviewedSuspiciousRows -List $list } | Should -Throw '*allowlist*'
+    }
+
+    It 'enables one-time stop only after an explicit stoppable selection' {
+        $list = $script:Win.FindName('SuspiciousList')
+        $row = [pscustomobject]@{ IsChecked=$false; CanStop=$true }
+        $list.ItemsSource = @($row)
+
+        Update-GuiStopProcessAvailability -List $list
+        $script:Win.FindName('BtnStopProcesses').IsEnabled | Should -BeFalse
+        $row.IsChecked = $true
+        Update-GuiStopProcessAvailability -List $list
+        $script:Win.FindName('BtnStopProcesses').IsEnabled | Should -BeTrue
+    }
+
+    It 'builds a suspicious-only subset envelope' {
+        $pending = New-GuiReviewPendingFixture
+        $row = [pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        }
+        $payload = New-GuiSuspiciousSubsetPayload -Selected @($row) -SourcePending $pending
+
+        @($payload.actions).Count | Should -Be 0
+        @($payload.observations).Count | Should -Be 0
+        @($payload.suspicious).Count | Should -Be 1
+        $payload.suspicious[0].PID | Should -Be 42
+    }
+
+    It 'uses a separate asynchronous non-elevated stop_process lifecycle' {
+        $source = Get-Content (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw
+        $start = $source.IndexOf('function Start-GuiSuspiciousStop')
+        $end = $source.IndexOf('$window.FindName(''BtnStopProcesses'')', $start)
+        $flow = $source.Substring($start, $end - $start)
+
+        $start | Should -BeGreaterOrEqual 0
+        $flow | Should -Match "'shushu_suspicious_'"
+        $flow | Should -Match "'-Mode','stop_process'"
+        $flow | Should -Match 'Complete-SuspiciousStopPoll'
+        $flow | Should -Not -Match 'RunAs'
+    }
+
+    It 'rejects suspicious stop results with identity drift or non-terminal status' {
+        $expected = [pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        }
+        $path = Join-Path $TestDrive 'stop-result.json'
+        $payload = New-GuiSuspiciousSubsetPayload -Selected @($expected) -SourcePending (New-GuiReviewPendingFixture)
+        $payload.suspicious[0].status = 'success'
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+        @(Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected)).Count | Should -Be 1
+
+        $payload.suspicious[0].Path = 'C:\Other\suspect.exe'
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+        { Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected) } | Should -Throw '*identity*'
+        $payload.suspicious[0].Path = $expected.Path
+        $payload.suspicious[0].status = 'pending'
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+        { Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected) } | Should -Throw '*terminal*'
+    }
+
+    It 'rejects a forged success result while the exact reviewed process instance is still alive' {
+        $expected = [pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        }
+        $path = Join-Path $TestDrive 'forged-stop-success.json'
+        $payload = New-GuiSuspiciousSubsetPayload -Selected @($expected) -SourcePending (New-GuiReviewPendingFixture)
+        $payload.suspicious[0].status = 'success'
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+        Mock Get-GuiProcessIdentityProbe { [pscustomobject]@{ State='present'; Identity=$expected; Detail='' } }
+
+        { Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected) } | Should -Throw '*still running*'
+    }
+
+    It 'fails closed when a success result cannot be independently verified' {
+        $expected = [pscustomobject]@{
+            PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            CanStop=$true; StopBlockReason=''; status='pending'
+        }
+        $path = Join-Path $TestDrive 'unverifiable-stop-success.json'
+        $payload = New-GuiSuspiciousSubsetPayload -Selected @($expected) -SourcePending (New-GuiReviewPendingFixture)
+        $payload.suspicious[0].status = 'success'
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
+        Mock Get-GuiProcessIdentityProbe { [pscustomobject]@{ State='unknown'; Identity=$null; Detail='access denied' } }
+
+        { Read-GuiStrictSuspiciousStopResult -Path $path -ExpectedRows @($expected) } | Should -Throw '*cannot be verified*'
     }
 
     It '动作中文标签映射' {
@@ -1211,6 +1695,64 @@ Describe '勾选视图 (v1.5.5)' {
         # 清空: 全部取消
         Set-AllChecked $list $false
         $items[0].IsChecked | Should -Be $false
+    }
+
+    It '没有已选择的可执行项时禁用执行按钮' {
+        $list = $script:Win.FindName('PendingList')
+        $list.ItemsSource = @([pscustomobject]@{CanExecute=$false;IsChecked=$false})
+        $script:ExecutionInProgress = $false
+
+        Update-GuiExecuteAvailability -List $list
+
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+    }
+
+    It '执行按钮跟随可执行项选择并在执行中保持禁用' {
+        $list = $script:Win.FindName('PendingList')
+        $row = [pscustomobject]@{CanExecute=$true;IsChecked=$false}
+        $list.ItemsSource = @($row)
+        $script:ExecutionInProgress = $false
+        Update-GuiExecuteAvailability -List $list
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+
+        $row.IsChecked = $true
+        Update-GuiExecuteAvailability -List $list
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeTrue
+
+        $script:ExecutionInProgress = $true
+        Update-GuiExecuteAvailability -List $list
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+
+        $script:ExecutionInProgress = $false
+        Set-AllChecked $list $false
+        Update-GuiExecuteAvailability -List $list
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+    }
+
+    It '执行按钮拒绝字符串 true 和其他非布尔选择状态' {
+        $list = $script:Win.FindName('PendingList')
+        $list.ItemsSource = @([pscustomobject]@{CanExecute='true';IsChecked='true'})
+        $script:ExecutionInProgress = $false
+
+        Update-GuiExecuteAvailability -List $list
+
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+    }
+
+    It '单项 checkbox 点击通过列表路由事件立即重算执行按钮' {
+        $list = $script:Win.FindName('PendingList')
+        $row = [pscustomobject]@{CanExecute=$true;IsChecked=$false}
+        $list.ItemsSource = @($row)
+        $script:ExecutionInProgress = $false
+        Update-GuiExecuteAvailability -List $list
+
+        $row.IsChecked = $true
+        $list.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeTrue
+
+        $row.IsChecked = $false
+        $list.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
     }
 
     It 'Get-CleanResultSummary 支持自定义路径 (-Path)' {
@@ -2245,22 +2787,32 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $mainBytes
     }
 
-    It '恢复 exit 0 在单页 completed 状态展示成功且不弹成功模态框' {
-        $tmpRoot = Join-Path $TestDrive ('restore-ok-' + [guid]::NewGuid().ToString('N'))
-        $backup = Join-Path $tmpRoot 'backups\20260811_010101'
-        [void][System.IO.Directory]::CreateDirectory($backup)
-        [System.IO.File]::WriteAllText((Join-Path $backup 'manifest.json'), '[{"type":"service","name":"DemoService","verified":true}]', [System.Text.UTF8Encoding]::new($false))
+    It '恢复只把固定 latest 哨兵交给管理员核心且不读取旧 backups 或 manifest' {
         $process = [pscustomobject]@{ ExitCode=0; Waited=$false }
-        $process | Add-Member ScriptMethod WaitForExit { $this.Waited=$true }
-        Mock Start-Process { $process }
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds); $this.Waited=$true; return $true }
+        Mock Start-Process {
+            $ArgumentList | Should -Contain '-BackupDir'
+            $ArgumentList | Should -Contain 'latest'
+            ($ArgumentList -join ' ') | Should -Not -Match '\\backups\\|manifest\.json'
+            $process
+        }
         Mock Show-GuiMessage {}
-        $oldRoot=$script:Root; $script:Root=$tmpRoot
-        try { Invoke-GuiRestoreLatest | Should -BeTrue } finally { $script:Root=$oldRoot }
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeTrue
 
         $process.Waited | Should -BeTrue
         $script:GuiState | Should -Be 'completed'
         $script:Win.FindName('CompletedSummaryText').Text | Should -Match '已恢复'
+        $script:Win.FindName('CompletedList').ItemsSource | Should -BeNullOrEmpty
         Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
+
+        $source = Get-Content -LiteralPath (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw -Encoding UTF8
+        $restoreStart = $source.IndexOf('function Invoke-GuiRestoreLatest')
+        $restoreEnd = $source.IndexOf('# ---------- 恢复最近一次处理', $restoreStart)
+        $restoreBody = $source.Substring($restoreStart, $restoreEnd - $restoreStart)
+        $restoreBody | Should -Not -Match 'Join-Path \$script:Root ''backups''|Get-ChildItem|Get-Content|manifest\.json'
+        $restoreBody | Should -Not -Match '\.WaitForExit\(\)'
+        $restoreBody | Should -Match 'DispatcherTimer'
     }
 
     It 'completed 摘要在存在失败项时使用危险色强调' {
@@ -2271,34 +2823,41 @@ Describe '勾选视图 (v1.5.5)' {
         $summary.Foreground.ToString() | Should -Be $script:Win.Resources['Danger'].ToString()
     }
 
-    It '恢复 exit 2 在单页 completed 状态如实展示部分失败与 manifest 明细' {
-        $tmpRoot = Join-Path $TestDrive ('restore-partial-' + [guid]::NewGuid().ToString('N'))
-        $backup = Join-Path $tmpRoot 'backups\20260811_020202'
-        [void][System.IO.Directory]::CreateDirectory($backup)
-        [System.IO.File]::WriteAllText((Join-Path $backup 'manifest.json'), '[{"type":"service","name":"GoodService","verified":true},{"type":"task","name":"FailedTask","verified":false}]', [System.Text.UTF8Encoding]::new($false))
+    It '恢复 exit 2 只展示脱敏的部分失败状态且不伪报成功' {
         $process = [pscustomobject]@{ ExitCode=2 }
-        $process | Add-Member ScriptMethod WaitForExit {}
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds); return $true }
         Mock Start-Process { $process }
         Mock Show-GuiMessage {}
-        $oldRoot=$script:Root; $script:Root=$tmpRoot
-        try { Invoke-GuiRestoreLatest | Should -BeTrue } finally { $script:Root=$oldRoot }
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeTrue
 
         $script:GuiState | Should -Be 'completed'
         $script:Win.FindName('CompletedSummaryText').Text | Should -Match '部分'
-        @($script:Win.FindName('CompletedList').ItemsSource | Where-Object { $_.State -eq 'failed' -and $_.Name -eq 'FailedTask' }).Count | Should -Be 1
+        $script:Win.FindName('CompletedList').ItemsSource | Should -BeNullOrEmpty
         Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
     }
 
-    It '恢复非零错误进入 error 且只显示警告模态框' {
-        $tmpRoot = Join-Path $TestDrive ('restore-error-' + [guid]::NewGuid().ToString('N'))
-        $backup = Join-Path $tmpRoot 'backups\20260811_030303'
-        [void][System.IO.Directory]::CreateDirectory($backup)
-        $process = [pscustomobject]@{ ExitCode=7 }
-        $process | Add-Member ScriptMethod WaitForExit {}
+    It '恢复 exit 3 如实显示无可信备份且失败关闭' {
+        $process = [pscustomobject]@{ ExitCode=3 }
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds); return $true }
         Mock Start-Process { $process }
         Mock Show-GuiMessage {}
-        $oldRoot=$script:Root; $script:Root=$tmpRoot
-        try { Invoke-GuiRestoreLatest | Should -BeFalse } finally { $script:Root=$oldRoot }
+
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeTrue
+
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorSummaryText').Text | Should -Match '备份|backup'
+        $script:Win.FindName('CompletedSummaryText').Text | Should -Not -Match '已恢复|Restored'
+    }
+
+    It '恢复非零错误进入 error 且只显示警告模态框' {
+        $process = [pscustomobject]@{ ExitCode=7 }
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds); return $true }
+        Mock Start-Process { $process }
+        Mock Show-GuiMessage {}
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeTrue
 
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '7'
@@ -2306,17 +2865,102 @@ Describe '勾选视图 (v1.5.5)' {
     }
 
     It '恢复 UAC 取消进入 error 且不宣称恢复成功' {
-        $tmpRoot = Join-Path $TestDrive ('restore-uac-' + [guid]::NewGuid().ToString('N'))
-        $backup = Join-Path $tmpRoot 'backups\20260811_040404'
-        [void][System.IO.Directory]::CreateDirectory($backup)
         Mock Start-Process { throw 'simulated UAC cancellation' }
         Mock Show-GuiMessage {}
-        $oldRoot=$script:Root; $script:Root=$tmpRoot
-        try { Invoke-GuiRestoreLatest | Should -BeFalse } finally { $script:Root=$oldRoot }
+        Invoke-GuiRestoreLatest | Should -BeFalse
 
         $script:GuiState | Should -Be 'error'
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '恢复|Restore'
         $script:Win.FindName('CompletedSummaryText').Text | Should -Not -Match '已恢复|Restored'
         Assert-MockCalled Show-GuiMessage -Times 1 -Exactly
+    }
+
+    It '恢复进程状态连续不可读时安全脱离且不阻塞 UI' {
+        $process = [pscustomobject]@{}
+        $process | Add-Member ScriptMethod WaitForExit { throw 'simulated wait failure' }
+        Mock Start-Process {
+            $script:Win.FindName('BtnRestore').IsEnabled | Should -BeFalse
+            $process
+        }
+        Mock Show-GuiMessage {}
+
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeFalse
+        Complete-GuiRestorePoll | Should -BeFalse
+        Complete-GuiRestorePoll | Should -BeTrue
+
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '已启动|started'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '状态未知|unknown'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分修改|partial'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Not -Match '没有开始|did not start'
+        $script:Win.FindName('BtnRestore').IsEnabled | Should -BeFalse
+        Assert-MockCalled Start-Process -Times 1 -Exactly
+        Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
+    }
+
+    It '恢复进程启动后 ExitCode 不可读显示状态未知且不重复启动' {
+        # Windows PowerShell 5.1 may surface a failing property getter as $null.
+        # Exercise the production fail-closed boundary using that observable result.
+        $process = [pscustomobject]@{ ExitCode=$null }
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds); return $true }
+        Mock Start-Process {
+            $script:Win.FindName('BtnRestore').IsEnabled | Should -BeFalse
+            $process
+        }
+        Mock Show-GuiMessage {}
+
+        Invoke-GuiRestoreLatest | Should -BeTrue
+        Complete-GuiRestorePoll | Should -BeFalse
+        Complete-GuiRestorePoll | Should -BeFalse
+        Complete-GuiRestorePoll | Should -BeTrue
+
+        $script:GuiState | Should -Be 'error'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '已启动|started'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '状态未知|unknown'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分修改|partial'
+        $script:Win.FindName('ErrorMutationText').Text | Should -Not -Match '没有开始|did not start'
+        $script:Win.FindName('BtnRestore').IsEnabled | Should -BeFalse
+        Assert-MockCalled Start-Process -Times 1 -Exactly
+        Assert-MockCalled Show-GuiMessage -Times 0 -Exactly
+    }
+
+    It '恢复门闩已占用时拒绝再次启动管理员恢复进程' {
+        $oldRestoreInProgress = $script:RestoreInProgress
+        $script:RestoreInProgress = $true
+        Mock Start-Process { throw 'must not start a second restore process' }
+        try {
+            Invoke-GuiRestoreLatest | Should -BeFalse
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+        } finally {
+            $script:RestoreInProgress = $oldRestoreInProgress
+        }
+    }
+
+    It '恢复 detached 时阻止所有其他变更入口和窗口关闭' {
+        $script:RestoreProcess = [pscustomobject]@{}
+        $script:RestoreLifecycle = 'detached'
+        $script:RestoreInProgress = $false
+        Mock Start-Process { throw 'must not start a competing mutation' }
+        $eventArgs = [pscustomobject]@{ Cancel=$false }
+
+        Start-GuiExecution | Should -BeFalse
+        Start-GuiSuspiciousStop | Should -BeFalse
+        Protect-GuiExecutionWindowClose -EventArgs $eventArgs | Should -BeFalse
+        $eventArgs.Cancel | Should -BeTrue
+        Assert-MockCalled Start-Process -Times 0 -Exactly
+    }
+
+    It '已有 detached 清理或进程停止时拒绝启动恢复' {
+        Mock Start-Process { throw 'must not start restore during another mutation' }
+        $script:ExecutionProcess = [pscustomobject]@{}
+        $script:ExecutionLifecycle = 'detached'
+        Invoke-GuiRestoreLatest | Should -BeFalse
+        $script:ExecutionProcess = $null
+        $script:ExecutionLifecycle = 'idle'
+        $script:SuspiciousStopProcess = [pscustomobject]@{}
+        $script:SuspiciousStopLifecycle = 'detached'
+        Invoke-GuiRestoreLatest | Should -BeFalse
+        Assert-MockCalled Start-Process -Times 0 -Exactly
     }
 }

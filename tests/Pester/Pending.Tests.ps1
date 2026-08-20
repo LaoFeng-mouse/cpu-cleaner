@@ -19,6 +19,140 @@ Describe '待办清单规则' {
         Mock Get-ScheduledTask { [pscustomobject]@{ TaskName='T1'; TaskPath='\X\'; State='Running' } } -ParameterFilter { $TaskName -eq 'T1' -and $TaskPath -eq '\X\' }
         Mock Get-ItemProperty { throw "Unexpected Get-ItemProperty read: $Path" }
         Mock Get-ItemProperty { [pscustomobject]@{ X = 'C:\fake\X.exe' } } -ParameterFilter { $Path -eq 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' }
+
+        # Fault-injection seams are declared here until production provides them. This keeps
+        # the RED failures focused on Save-PendingActions not using the atomic publish path.
+        if (-not (Get-Command Invoke-PendingAtomicWrite -ErrorAction SilentlyContinue)) {
+            function Invoke-PendingAtomicWrite($Stream, [byte[]]$Bytes) { $Stream.Write($Bytes, 0, $Bytes.Length) }
+        }
+        if (-not (Get-Command Invoke-PendingAtomicFlush -ErrorAction SilentlyContinue)) {
+            function Invoke-PendingAtomicFlush($Stream) { $Stream.Flush($true) }
+        }
+        if (-not (Get-Command Invoke-PendingAtomicMove -ErrorAction SilentlyContinue)) {
+            function Invoke-PendingAtomicMove($Source, $Destination) { [System.IO.File]::Move($Source, $Destination) }
+        }
+        if (-not (Get-Command Invoke-PendingAtomicReplace -ErrorAction SilentlyContinue)) {
+            function Invoke-PendingAtomicReplace($Source, $Destination, $Backup) { [System.IO.File]::Replace($Source, $Destination, $Backup) }
+        }
+    }
+
+    It '空数组以 schema v2 和 UTF-8 BOM 原子保存' {
+        Save-PendingActions -Hits @() -Suspicious @()
+
+        $bytes = [System.IO.File]::ReadAllBytes($script:PendingFile)
+        $bytes.Length | Should -BeGreaterThan 3
+        @($bytes[0], $bytes[1], $bytes[2]) | Should -Be @(0xEF, 0xBB, 0xBF)
+        $pending = Get-Content -LiteralPath $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $pending.pending_schema_version | Should -Be 2
+        @($pending.actions).Count | Should -Be 0
+        @($pending.observations).Count | Should -Be 0
+        @($pending.suspicious).Count | Should -Be 0
+    }
+
+    It '写入失败保留旧文件并清理唯一同目录临时文件' {
+        $oldBytes = [System.Text.UTF8Encoding]::new($true).GetBytes('{"old":"valid"}')
+        [System.IO.File]::WriteAllBytes($script:PendingFile, $oldBytes)
+        Mock Invoke-PendingAtomicWrite { throw 'injected write failure' }
+
+        { Save-PendingActions -Hits @() -Suspicious @() } | Should -Throw '*injected write failure*'
+
+        [System.IO.File]::ReadAllBytes($script:PendingFile) | Should -Be $oldBytes
+        @(Get-ChildItem -LiteralPath (Split-Path $script:PendingFile -Parent) -Filter ((Split-Path $script:PendingFile -Leaf) + '.*.tmp')) | Should -HaveCount 0
+    }
+
+    It '持久化刷新失败不创建 final 并清理唯一同目录临时文件' {
+        Mock Invoke-PendingAtomicFlush { throw 'injected flush failure' }
+
+        { Save-PendingActions -Hits @() -Suspicious @() } | Should -Throw '*injected flush failure*'
+
+        Test-Path -LiteralPath $script:PendingFile | Should -BeFalse
+        @(Get-ChildItem -LiteralPath (Split-Path $script:PendingFile -Parent) -Filter ((Split-Path $script:PendingFile -Leaf) + '.*.tmp')) | Should -HaveCount 0
+    }
+
+    It '首次发布 move 失败不创建 final 并清理临时文件' {
+        Mock Invoke-PendingAtomicMove { throw 'injected move failure' }
+
+        { Save-PendingActions -Hits @() -Suspicious @() } | Should -Throw '*injected move failure*'
+
+        Test-Path -LiteralPath $script:PendingFile | Should -BeFalse
+        @(Get-ChildItem -LiteralPath (Split-Path $script:PendingFile -Parent) -Filter ((Split-Path $script:PendingFile -Leaf) + '.*.tmp')) | Should -HaveCount 0
+    }
+
+    It '替换失败保留旧文件并清理临时及备份文件' {
+        $oldBytes = [System.Text.UTF8Encoding]::new($true).GetBytes('{"old":"valid"}')
+        [System.IO.File]::WriteAllBytes($script:PendingFile, $oldBytes)
+        Mock Invoke-PendingAtomicReplace { throw 'injected replace failure' }
+
+        { Save-PendingActions -Hits @() -Suspicious @() } | Should -Throw '*injected replace failure*'
+
+        [System.IO.File]::ReadAllBytes($script:PendingFile) | Should -Be $oldBytes
+        $parent = Split-Path $script:PendingFile -Parent
+        $leaf = Split-Path $script:PendingFile -Leaf
+        @(Get-ChildItem -LiteralPath $parent -Filter ($leaf + '.*.tmp')) | Should -HaveCount 0
+        @(Get-ChildItem -LiteralPath $parent -Filter ($leaf + '.*.bak')) | Should -HaveCount 0
+    }
+
+    It '替换成功后备份删除失败仍返回成功并保留新 final' {
+        $oldBytes = [System.Text.UTF8Encoding]::new($true).GetBytes('{"old":"valid"}')
+        [System.IO.File]::WriteAllBytes($script:PendingFile, $oldBytes)
+        Mock Remove-PendingAtomicFile { throw 'injected backup cleanup failure' } -ParameterFilter { $Path -like '*.bak' }
+
+        { Save-PendingActions -Hits @() -Suspicious @() } | Should -Not -Throw
+
+        $pending = ConvertFrom-StrictPendingJson (Get-Content -LiteralPath $script:PendingFile -Raw -Encoding UTF8)
+        $pending.pending_schema_version | Should -Be 2
+        @($pending.actions).Count | Should -Be 0
+        @($pending.observations).Count | Should -Be 0
+        @($pending.suspicious).Count | Should -Be 0
+        $parent = Split-Path $script:PendingFile -Parent
+        $leaf = Split-Path $script:PendingFile -Leaf
+        @(Get-ChildItem -LiteralPath $parent -Filter ($leaf + '.*.bak')) | Should -HaveCount 1
+        @(Get-ChildItem -LiteralPath $parent -Filter ($leaf + '.*.tmp')) | Should -HaveCount 0
+        Assert-MockCalled Remove-PendingAtomicFile -Times 1 -Exactly -ParameterFilter { $Path -like '*.bak' }
+    }
+
+    It '首次发布前并发出现 final 时拒绝覆盖并保留并发文件' {
+        $concurrentBytes = [System.Text.UTF8Encoding]::new($true).GetBytes('{"concurrent":"winner"}')
+        Mock Invoke-PendingAtomicMove {
+            [System.IO.File]::WriteAllBytes($Destination, $concurrentBytes)
+            [System.IO.File]::Move($Source, $Destination)
+        }
+
+        { Save-PendingActions -Hits @() -Suspicious @() } | Should -Throw
+
+        [System.IO.File]::ReadAllBytes($script:PendingFile) | Should -Be $concurrentBytes
+        @(Get-ChildItem -LiteralPath (Split-Path $script:PendingFile -Parent) -Filter ((Split-Path $script:PendingFile -Leaf) + '.*.tmp')) | Should -HaveCount 0
+    }
+
+    It '拒绝目录目标和不存在的父目录' {
+        $script:PendingFile = $TestDrive
+        { Save-PendingActions -Hits @() -Suspicious @() } | Should -Throw '*文件路径*'
+
+        $script:PendingFile = Join-Path (Join-Path $TestDrive 'missing-parent') 'pending.json'
+        { Save-PendingActions -Hits @() -Suspicious @() } | Should -Throw '*父目录*'
+    }
+
+    It '目标文件被判定为 reparse point 时保留旧文件' {
+        $oldBytes = [System.Text.UTF8Encoding]::new($true).GetBytes('{"old":"valid"}')
+        [System.IO.File]::WriteAllBytes($script:PendingFile, $oldBytes)
+        Mock Assert-PendingPathIsNotReparsePoint {
+            if ([string]::Equals([System.IO.Path]::GetFullPath($Path), [System.IO.Path]::GetFullPath($script:PendingFile), [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw 'injected target reparse point'
+            }
+        }
+
+        { Save-PendingActions -Hits @() -Suspicious @() } | Should -Throw '*target reparse point*'
+        [System.IO.File]::ReadAllBytes($script:PendingFile) | Should -Be $oldBytes
+    }
+
+    It '临时文件被判定为 reparse point 时不发布并清理临时文件' {
+        Mock Assert-PendingPathIsNotReparsePoint {
+            if ($Path -like '*.tmp') { throw 'injected temp reparse point' }
+        }
+
+        { Save-PendingActions -Hits @() -Suspicious @() } | Should -Throw '*temp reparse point*'
+        Test-Path -LiteralPath $script:PendingFile | Should -BeFalse
+        @(Get-ChildItem -LiteralPath (Split-Path $script:PendingFile -Parent) -Filter ((Split-Path $script:PendingFile -Leaf) + '.*.tmp')) | Should -HaveCount 0
     }
 
     It '仅接受 Int32 pending schema v2' {
@@ -425,6 +559,7 @@ Invoke-Clean
     }
     It '数组、非字符串、null 或空 hit_type 不能进入执行队列' {
         $cases = @(
+            [pscustomobject]@{ label='unknown string'; hit_type='bogus' },
             [pscustomobject]@{ label='array bypass'; hit_type=@('bogus','service') },
             [pscustomobject]@{ label='number'; hit_type=1 },
             [pscustomobject]@{ label='null'; hit_type=$null },
@@ -496,6 +631,158 @@ Invoke-Clean
         $p.scan_health.system_info | Should -Be 'degraded'
         @($p.scan_warnings).Count | Should -Be 1
     }
+    It '服务采集降级时精确危险动作只进入观察' {
+        $hit = [pscustomobject]@{
+            id='health-service'; vendor='T'; name_cn='Service'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'
+            service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
+            safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'
+        }
+        $health = [pscustomobject]@{ system_info='complete'; services='degraded'; tasks='complete' }
+
+        Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth $health -ScanWarnings @('service incomplete')
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].action | Should -BeExactly 'disable_service'
+        $p.observations[0].obs_reason | Should -Match '扫描信息不完整'
+    }
+    It '任务采集不是 complete 时精确危险动作只进入观察' {
+        $hit = [pscustomobject]@{
+            id='health-task'; vendor='T'; name_cn='Task'; action='disable_task'; hit_type='task'; detail='\X\T1'; reason_cn='r'
+            service_name=''; autostart_source=''; autostart_name=''; task_path='\X\T1'; process_name=''; process_id=0; process_path=''
+            safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='\X\T1'; matched_type='exact'; matched_field='task_path'
+        }
+        $health = [pscustomobject]@{ system_info='complete'; services='complete'; tasks='unknown' }
+
+        Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth $health -ScanWarnings @('task incomplete')
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].obs_reason | Should -Match '扫描信息不完整'
+    }
+    It 'limited 跨类别仅降级 service task 且保留健康自启与身份绑定进程' {
+        $hits = @(
+            [pscustomobject]@{ id='limited-service';vendor='T';name_cn='Service';action='disable_service';hit_type='service';detail='S1';reason_cn='r';service_name='S1';autostart_source='';autostart_name='';autostart_value='';task_path='';process_name='';process_id=0;process_path='';safe=$true;evidence=[pscustomobject]@{tested=$true};matched_pattern='S1';matched_type='exact';matched_field='service_name' },
+            [pscustomobject]@{ id='limited-task';vendor='T';name_cn='Task';action='disable_task';hit_type='task';detail='\X\T1';reason_cn='r';service_name='';autostart_source='';autostart_name='';autostart_value='';task_path='\X\T1';process_name='';process_id=0;process_path='';safe=$true;evidence=[pscustomobject]@{tested=$true};matched_pattern='\X\T1';matched_type='exact';matched_field='task_path' },
+            [pscustomobject]@{ id='limited-autostart';vendor='T';name_cn='Auto';action='remove_autostart';hit_type='autostart';detail='X';reason_cn='r';service_name='';autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run';autostart_name='X';autostart_value='C:\fake\X.exe';task_path='';process_name='';process_id=0;process_path='';safe=$true;evidence=[pscustomobject]@{tested=$true};matched_pattern='X';matched_type='exact';matched_field='autostart_name' }
+        )
+        $suspicious = [pscustomobject]@{ PID=42;Name='once';'CPU%'=8;MemMB=50;Path='C:\Temp\once.exe';Reason='temp';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;StopBlockReason='' }
+        $health = [pscustomobject]@{ system_info='complete';services='degraded';tasks='unavailable' }
+
+        Save-PendingActions -Hits $hits -Suspicious @($suspicious) -ScanHealth $health -ScanWarnings @('limited')
+        $p = ConvertFrom-StrictPendingJson (Get-Content $script:PendingFile -Raw -Encoding UTF8)
+
+        @($p.actions).Count | Should -Be 1
+        $autostartAction = @($p.actions | Where-Object { $_.id -ceq 'limited-autostart' })
+        $autostartAction.Count | Should -Be 1
+        $autostartAction[0].action | Should -BeExactly 'remove_autostart'
+        $autostartAction[0].hit_type | Should -BeExactly 'autostart'
+        $autostartAction[0].matched_type | Should -BeExactly 'exact'
+        $autostartAction[0].matched_field | Should -BeExactly 'autostart_name'
+        $autostartAction[0].status | Should -BeExactly 'pending'
+
+        @($p.observations).Count | Should -Be 2
+        $serviceObservation = @($p.observations | Where-Object { $_.id -ceq 'limited-service' })
+        $serviceObservation.Count | Should -Be 1
+        $serviceObservation[0].hit_type | Should -BeExactly 'service'
+        $serviceObservation[0].matched_type | Should -BeExactly 'exact'
+        $serviceObservation[0].obs_reason | Should -Match '扫描信息不完整'
+        $taskObservation = @($p.observations | Where-Object { $_.id -ceq 'limited-task' })
+        $taskObservation.Count | Should -Be 1
+        $taskObservation[0].hit_type | Should -BeExactly 'task'
+        $taskObservation[0].matched_type | Should -BeExactly 'exact'
+        $taskObservation[0].obs_reason | Should -Match '扫描信息不完整'
+
+        @($p.suspicious).Count | Should -Be 1
+        $savedSuspicious = @($p.suspicious | Where-Object { $_.PID -eq 42 })
+        $savedSuspicious.Count | Should -Be 1
+        $savedSuspicious[0].Name | Should -BeExactly 'once'
+        $savedSuspicious[0].Path | Should -BeExactly 'C:\Temp\once.exe'
+        $savedSuspicious[0].StartTimeUtc | Should -BeExactly '2026-08-11T00:00:00.0000000Z'
+        $savedSuspicious[0].CanStop | Should -BeTrue
+        $savedSuspicious[0].status | Should -BeExactly 'pending'
+
+        $p.scan_health.services | Should -BeExactly 'degraded'
+        $p.scan_health.tasks | Should -BeExactly 'unavailable'
+        @($p.scan_warnings) | Should -Contain 'limited'
+    }
+    It 'system_info 降级不阻止健康 services 类别的精确动作' {
+        $hit = [pscustomobject]@{
+            id='health-independent'; vendor='T'; name_cn='Service'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'
+            service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
+            safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'
+        }
+        $health = [pscustomobject]@{ system_info='degraded'; services='complete'; tasks='complete' }
+
+        Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth $health -ScanWarnings @('system info incomplete')
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 1
+        @($p.observations).Count | Should -Be 0
+    }
+    It '动作与命中类型不匹配时不能绕过类别健康闸门进入 actions' {
+        $hit = [pscustomobject]@{
+            id='mismatched-process-service'; vendor='T'; name_cn='Mismatch'; action='disable_service'; hit_type='process'; detail='P1 PID=101'; reason_cn='r'
+            service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name='P1'; process_id=101; process_path='C:\Apps\P1.exe'
+            safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='P1'; matched_type='exact'; matched_field='process_name'
+        }
+        $health = [pscustomobject]@{ system_info='complete'; services='degraded'; tasks='complete' }
+
+        Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth $health -ScanWarnings @('service incomplete')
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].obs_reason | Should -Match '动作.*命中类型.*不匹配'
+    }
+    It '所有已知危险动作使用错误 hit_type 时一律只进入观察' {
+        $cases = @(
+            [pscustomobject]@{ action='disable_service'; hit_type='task'; pattern='\X\T1'; field='task_path'; service=''; task='\X\T1'; autoSource=''; autoName=''; process=''; pid=0; path='' },
+            [pscustomobject]@{ action='disable_task'; hit_type='service'; pattern='S1'; field='service_name'; service='S1'; task=''; autoSource=''; autoName=''; process=''; pid=0; path='' },
+            [pscustomobject]@{ action='remove_autostart'; hit_type='process'; pattern='P1'; field='process_name'; service=''; task=''; autoSource=''; autoName=''; process='P1'; pid=101; path='C:\Apps\P1.exe' }
+        )
+        foreach ($case in $cases) {
+            $hit = [pscustomobject]@{
+                id=('mismatch-' + $case.action); vendor='T'; name_cn='Mismatch'; action=$case.action; hit_type=$case.hit_type; detail='target'; reason_cn='r'
+                service_name=$case.service; autostart_source=$case.autoSource; autostart_name=$case.autoName; task_path=$case.task
+                process_name=$case.process; process_id=$case.pid; process_path=$case.path
+                safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern=$case.pattern; matched_type='exact'; matched_field=$case.field
+            }
+
+            Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth ([pscustomobject]@{ system_info='complete'; services='complete'; tasks='complete' }) -ScanWarnings @()
+            $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+            @($p.actions).Count | Should -Be 0 -Because "$($case.action) cannot target $($case.hit_type)"
+            @($p.observations).Count | Should -Be 1 -Because "$($case.action) cannot target $($case.hit_type)"
+            $p.observations[0].obs_reason | Should -Match '动作.*命中类型.*不匹配'
+        }
+    }
+    It 'uninstall 保持 service process autostart task 四类 profile 契约' {
+        $cases = @(
+            [pscustomobject]@{ hit_type='service'; pattern='S1'; field='service_name'; service='S1'; task=''; autoSource=''; autoName=''; process=''; pid=0; path='' },
+            [pscustomobject]@{ hit_type='process'; pattern='P1'; field='process_name'; service=''; task=''; autoSource=''; autoName=''; process='P1'; pid=101; path='C:\Apps\P1.exe' },
+            [pscustomobject]@{ hit_type='autostart'; pattern='X'; field='autostart_name'; service=''; task=''; autoSource='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autoName='X'; process=''; pid=0; path='' },
+            [pscustomobject]@{ hit_type='task'; pattern='\X\T1'; field='task_path'; service=''; task='\X\T1'; autoSource=''; autoName=''; process=''; pid=0; path='' }
+        )
+        foreach ($case in $cases) {
+            $hit = [pscustomobject]@{
+                id=('uninstall-' + $case.hit_type); vendor='T'; name_cn='Uninstall'; action='uninstall'; hit_type=$case.hit_type; detail='target'; reason_cn='r'
+                service_name=$case.service; autostart_source=$case.autoSource; autostart_name=$case.autoName; task_path=$case.task
+                process_name=$case.process; process_id=$case.pid; process_path=$case.path
+                safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern=$case.pattern; matched_type='exact'; matched_field=$case.field
+            }
+
+            Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth ([pscustomobject]@{ system_info='complete'; services='complete'; tasks='complete' }) -ScanWarnings @()
+            $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+            @($p.actions).Count | Should -Be 1 -Because "uninstall is valid for $($case.hit_type)"
+            @($p.observations).Count | Should -Be 0 -Because "uninstall is valid for $($case.hit_type)"
+            $p.actions[0].action | Should -BeExactly 'uninstall'
+            $p.actions[0].hit_type | Should -BeExactly $case.hit_type
+        }
+    }
     It '服务已禁用且停止时不写入 action 或 observation' {
         Mock Get-Service { [pscustomobject]@{ Name='S1'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'S1' }
         $hit = [pscustomobject]@{ id='already'; vendor='T'; name_cn='Already'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }
@@ -509,5 +796,35 @@ Invoke-Clean
         ('failed') -in @('pending','failed') | Should -Be $true
         ('success') -in @('pending','failed') | Should -Be $false
         ('manual_required') -in @('pending','failed') | Should -Be $false
+    }
+    It 'pending 序列化完整可疑进程身份并设置 pending 状态' {
+        $s = [pscustomobject]@{
+            PID=42; Name='suspect'; 'CPU%'=8; MemMB=50; Path='C:\Temp\suspect.exe'; Reason='temp'
+            StartTimeUtc='2026-08-11T00:00:00.0000000Z'; CanStop=$true; StopBlockReason=''
+        }
+
+        Save-PendingActions -Hits @() -Suspicious @($s)
+        $pending = ConvertFrom-StrictPendingJson (Get-Content $script:PendingFile -Raw -Encoding UTF8)
+
+        $pending.suspicious[0].status | Should -BeExactly 'pending'
+        $pending.suspicious[0].StartTimeUtc | Should -BeExactly $s.StartTimeUtc
+        $pending.suspicious[0].CanStop | Should -BeTrue
+    }
+    It '选择的可疑进程拒绝数组 PID 和缺失身份字段' {
+        $arrayPid = [pscustomobject]@{PID=@(42);Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;status='pending'}
+        $missingPath = [pscustomobject]@{PID=42;Name='suspect';Path='';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;status='pending'}
+
+        { Assert-SuspiciousPendingRow $arrayPid -RequireStoppable } | Should -Throw '*PID*'
+        { Assert-SuspiciousPendingRow $missingPath -RequireStoppable } | Should -Throw '*Path*'
+    }
+    It '可疑停止子集保持与 OEM actions observations 完全分离' {
+        $row = [pscustomobject]@{PID=42;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;StopBlockReason='';status='pending';Reason='temp';'CPU%'=8;MemMB=50}
+
+        $subset = Build-SuspiciousSubsetPayload @($row)
+
+        @($subset.actions).Count | Should -Be 0
+        @($subset.observations).Count | Should -Be 0
+        @($subset.suspicious).Count | Should -Be 1
+        $subset.suspicious[0].PID | Should -Be 42
     }
 }

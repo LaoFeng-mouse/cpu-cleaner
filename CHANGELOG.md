@@ -4,7 +4,13 @@
 
 ## [Unreleased]
 
+### 新增
+- GUI 扫描增加独立异步 UAC 只读采集：普通权限 GUI 生成加密随机 nonce，管理员 `scan_inventory` 只读取完整服务和计划任务并写入 ACL 保护、哈希绑定的短期结果包；确认 exit 0 后才由普通权限扫描验证消费
+- 用户取消 UAC 时显式进入 `AllowLimited`：计划任务不可用、服务可降级，结果页显示不完整警告且不能宣称电脑干净；管理员采集 60 秒超时，普通扫描仍保持 180 秒上限
+
 ### 安全
+- 管理员只读采集与 clean/restore 使用独立生命周期和互斥闩锁；启动、运行、超时或状态未知期间禁止重复扫描、清理、恢复、结束进程和关闭窗口。任务文件 ACL 不修改，任务 XML 不直接解析
+- 完整扫描结果按 nonce、固定根目录、最终路径、reparse/hardlink、ACL、当前用户 SID、时效、严格 schema、终态标记和 SHA-256 单快照验证；任何验证失败均不会回退成“完整扫描”
 - Schema 3.0 matcher provenance 贯穿 scan hit、pending v2 与管理员 clean：记录并重验 `matched_pattern` / `matched_type` / `matched_field`，危险动作只取决于实际命中的 `exact` 或路径字段上的 `path`；`contains` / `regex` 只调查，`execution.allow_auto` 不再提供豁免
 - `exact` / `contains` / `path` 统一为 `OrdinalIgnoreCase` 字面语义，只有 `regex` 解释表达式；管理员态按当前对象重验同一 matcher、同一字段及服务/自启/任务/进程身份，并在备份或 mutation 前最终复核。自启源限制为标准 HKLM/HKCU Run 键
 - pending 清单要求整数 `pending_schema_version: 2`；旧版、缺失、字符串或数组版本均要求重新 scan，CLI 与 GUI 都不自动升级。管理员 clean 还拒绝重复键、超过 5 MiB、深度超过 64、非法 UTF-8 或读取期间变化的 JSON 文件
