@@ -55,7 +55,9 @@ function Invoke-ValidatedRestoreManifest { return [pscustomobject]@{success=`$tr
 $Overrides
 Invoke-Restore
 "@
-            [System.IO.File]::WriteAllText($driver, $driverSource, [System.Text.UTF8Encoding]::new($false))
+            # This driver is executed by Windows PowerShell 5.1 and embeds ProjectRoot.
+            # Emit a BOM so non-ASCII checkout paths are decoded without corruption.
+            [System.IO.File]::WriteAllText($driver, $driverSource, [System.Text.UTF8Encoding]::new($true))
             $output = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $driver 2>&1
             return [pscustomobject]@{ ExitCode=[int]$LASTEXITCODE; Output=($output -join "`n") }
         }

@@ -579,7 +579,9 @@ function Invoke-ValidatedRestoreManifest { `$script:Order += 'plans-then-pre-mut
 function Write-Step {}
 Invoke-Restore
 "@
-        [System.IO.File]::WriteAllText($driver, $driverSource, [System.Text.UTF8Encoding]::new($false))
+        # Windows PowerShell 5.1 treats UTF-8 without a BOM as the active ANSI code page.
+        # The generated script embeds $script:Root, so preserve non-ASCII checkout paths.
+        [System.IO.File]::WriteAllText($driver, $driverSource, [System.Text.UTF8Encoding]::new($true))
 
         $output = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $driver 2>&1
 
