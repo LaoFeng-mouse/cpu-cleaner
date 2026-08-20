@@ -391,6 +391,14 @@ Describe 'GUI 壳 (无窗口)' {
         $source | Should -Not -Match 'cmd\s+/c'
     }
 
+    It 'routes the beginner scan launcher through the GUI UAC inventory flow' {
+        $launcher = Get-Content (Join-Path $script:GuiRoot '1-扫描.bat') -Raw -Encoding UTF8
+
+        $launcher | Should -Match 'gui-cleaner\.ps1'
+        $launcher | Should -Not -Match 'cpu-cleaner\.ps1[^\r\n]*-Mode\s+scan'
+        $launcher | Should -Not -Match 'Scan finished'
+    }
+
     It 'generates a cryptographic 64-lowercase-hex inventory nonce' {
         $values = @(1..8 | ForEach-Object { New-GuiInventoryNonce })
         $values | ForEach-Object { $_ | Should -Match '^[0-9a-f]{64}$' }

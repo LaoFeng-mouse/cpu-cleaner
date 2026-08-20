@@ -25,7 +25,8 @@
 ├── 鼠鼠版-图形界面.bat       图形界面入口（双击即用，不会命令行也能操作）
 ├── cpu-cleaner.ps1        主程序（含 scan_inventory 管理员只读采集及 scan / clean / restore / update）
 ├── bloatware-profiles.json  预装软件特征库（Schema 3.0，可自行扩展）
-├── 1-扫描.bat / 2-清理.bat / 3-恢复.bat   双击启动器（不会命令行的人用）
+├── 1-扫描.bat               图形软件启动器（完整只读扫描的主入口）
+├── 2-清理.bat / 3-恢复.bat   兼容的命令行清理与恢复入口
 ├── 零基础操作指南.md       给完全不会命令行的人的图文步骤
 ├── 命令行入门操作指南.md    从"怎么打开命令行"教起的操作步骤
 ├── 手动整理方案.md          不用脚本的手动操作指南
@@ -45,7 +46,7 @@
 | 方案 | 适合谁 | 入口 |
 |---|---|---|
 | **0. 图形界面（鼠鼠版）** | 不想看黑窗口，鼠标点点点 | 双击 `鼠鼠版-图形界面.bat`，在一个窗口完成扫描、复核、执行和恢复 |
-| **1. 零基础双击** | 完全不会命令行 / 帮别人弄 | 双击 `1-扫描.bat` → `2-清理.bat` → `3-恢复.bat`，指引见 `零基础操作指南.md` |
+| **1. 零基础图形界面** | 完全不会命令行 / 帮别人弄 | 双击 `1-扫描.bat`，在同一窗口完成扫描、复核和处理；指引见 `零基础操作指南.md` |
 | **2. 工具自动**（推荐） | 会用命令行，想要"扫描→确认→处理→可恢复"闭环 | 本 README「快速开始」，三条命令搞定 |
 | **3. 命令行入门** | 想学命令行、从零开始 | `命令行入门操作指南.md`，从打开命令行教起 |
 | **4. 手动整理** | 不想装工具 / 想逐项亲手操作 | `手动整理方案.md`，纯 Windows 自带功能 |
@@ -70,16 +71,17 @@ GUI 进程始终以普通用户权限运行。点击扫描时出现的一次 UAC
 
 ## 快速开始
 
-**不会命令行？** 直接双击 `1-扫描.bat` → `2-清理.bat` → `3-恢复.bat`，详细指引看 `零基础操作指南.md`。
+**不会命令行？** 直接双击 `1-扫描.bat` 打开图形软件，在同一个窗口里完成“扫描 → 复核 → 安全处理”；需要回退时再用界面恢复或 `3-恢复.bat`。详细指引看 `零基础操作指南.md`。
 
 **会用命令行？** 往下看：
 
 ```powershell
-# 1. 扫描（只读，不改任何东西）——普通权限即可
-powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode scan
+# 1. 命令行有限扫描（只读，不改任何东西）
+#    不请求 UAC，因此服务/计划任务信息可能不完整，不能据此授权对应清理；完整扫描请启动 gui-cleaner.ps1
+powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode scan -AllowLimited
 
 # 生成 HTML 报告
-powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode scan -ReportPath D:\报告.html
+powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode scan -AllowLimited -ReportPath D:\报告.html
 
 # 2. 处理（按扫描清单逐条确认，自动备份；可疑进程需显式输入 PID）——需要管理员
 #    开始菜单搜 "PowerShell" → 右键 → 以管理员身份运行，然后：
@@ -240,7 +242,7 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 
 ## 已知限制
 
-- **restore 恢复的是"持久化配置"而非"运行时原状"**：服务恢复 StartType/DelayedAutoStart，原运行状态（Running）会提示用户手动 `sc start`，默认不自动拉起（保守，避免误启服务）；删除的自启项/禁用的任务则完整还原。
+- **restore 按可信备份恢复稳定状态**：服务恢复 StartType/DelayedAutoStart，并尝试恢复备份记录的 Running/Stopped 状态；`sc start` 返回“已在运行”(1056)时仍会继续读取最终状态，只有最终状态吻合才算成功。删除的自启项和禁用的任务也按备份还原。
 - **卸载动作不自动执行**：uninstall 只提示，需要人工到"设置-应用"卸载（安全考虑）
 - **NOT_STOPPABLE 服务**（如联想 LISFService）：禁用成功但进程杀不掉，重启后消失，工具会如实提示
 - **自我保护服务**（如联想 HRWSCCtrl）：拒绝访问禁不掉属正常，工具标记为"别硬刚"
