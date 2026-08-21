@@ -39,6 +39,30 @@ Describe 'Profile 加载' {
             $json = '{"schema_version":3,"profiles":[{"id":"container-test","vendor":"T","name_cn":"测试","risk":"low","safe":false,"reason_cn":"r","evidence":{"tested":true},"detect":{"services":[{"match":"S1","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"none"}' + $suffix + '}]}'
             [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
         }
+        $script:NewDecisionTestProfile = {
+            param(
+                [bool]$Safe = $true,
+                [string]$Action = 'disable_service',
+                [string]$ManualAction = 'none',
+                $CleanupPolicy = $null,
+                [bool]$Tested = $true,
+                [string]$ReasonCn = '减少不必要的常驻后台'
+            )
+            $profile = [pscustomobject]@{
+                id = 'decision-test'; vendor = 'Test'; name_cn = '执行决策测试'
+                risk = 'low'; safe = $Safe; reason_cn = $ReasonCn
+                evidence = [pscustomobject]@{ tested = $Tested }
+                actions = [pscustomobject]@{ service = $Action }
+                execution = [pscustomobject]@{ allow_auto = $true }
+            }
+            if ($ManualAction -cne 'none') {
+                $profile | Add-Member -NotePropertyName manual_actions -NotePropertyValue ([pscustomobject]@{ service = $ManualAction })
+            }
+            if ($null -ne $CleanupPolicy) {
+                $profile | Add-Member -NotePropertyName cleanup_policy -NotePropertyValue $CleanupPolicy
+            }
+            return $profile
+        }
     }
 
     It '合法 v2 特征库加载成功' {
@@ -249,5 +273,145 @@ Describe 'Profile 加载' {
         & $script:WritePolicyTestLibrary -Path $tmp -Profile (& $script:NewPolicyTestProfile -CleanupPolicy $policy -ManualActions $manual -Evidence $evidence)
         try { { Load-Profiles -Path $tmp } | Should -Throw $expected }
         finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'safe tested exact 危险 normal action 返回 automatic_safe 完整决策' {
+        $policy = [pscustomobject]@{
+            execution_class = 'automatic_safe'; necessity = 'unnecessary'
+            default_selected = $true; requires_confirmation = $false
+            impact_cn = '不影响 Windows 核心功能'; cleanup_reason_cn = '关闭 OEM 通知后台'
+        }
+        $profile = & $script:NewDecisionTestProfile -CleanupPolicy $policy
+
+        $decision = Get-HitExecutionDecision $profile 'service' ([pscustomobject]@{ matched_type = 'exact' })
+
+        @($decision.PSObject.Properties.Name) | Should -Be @(
+            'Action', 'ExecutionClass', 'Necessity', 'DefaultSelected',
+            'RequiresConfirmation', 'ImpactCn', 'CleanupReasonCn'
+        )
+        $decision.Action | Should -BeExactly 'disable_service'
+        $decision.ExecutionClass | Should -BeExactly 'automatic_safe'
+        $decision.Necessity | Should -BeExactly 'unnecessary'
+        $decision.DefaultSelected | Should -BeTrue
+        $decision.RequiresConfirmation | Should -BeFalse
+        $decision.ImpactCn | Should -BeExactly '不影响 Windows 核心功能'
+        $decision.CleanupReasonCn | Should -BeExactly '关闭 OEM 通知后台'
+    }
+
+    It '旧 safe tested exact 自动规则没有 cleanup_policy 时保留动作和保守默认值' {
+        $profile = & $script:NewDecisionTestProfile -ReasonCn '实测后建议关闭此后台项'
+
+        $decision = Get-HitExecutionDecision $profile 'service' ([pscustomobject]@{ matched_type = 'path' })
+
+        $decision.Action | Should -BeExactly 'disable_service'
+        $decision.ExecutionClass | Should -BeExactly 'automatic_safe'
+        $decision.Necessity | Should -BeExactly 'recommended'
+        $decision.DefaultSelected | Should -BeTrue
+        $decision.RequiresConfirmation | Should -BeFalse
+        $decision.ImpactCn | Should -BeExactly '实测后建议关闭此后台项'
+        $decision.CleanupReasonCn | Should -BeExactly '实测后建议关闭此后台项'
+    }
+
+    It 'safe false tested exact 且有合规危险 manual action 返回 manual_impact' {
+        $policy = [pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '可能影响 OEM 主动防护'; cleanup_reason_cn = '不用 OEM 管家时可减少后台'
+        }
+        $profile = & $script:NewDecisionTestProfile -Safe $false -Action 'none' -ManualAction 'disable_service' -CleanupPolicy $policy
+
+        $decision = Get-HitExecutionDecision $profile 'service' ([pscustomobject]@{ matched_type = 'exact' })
+
+        $decision.Action | Should -BeExactly 'disable_service'
+        $decision.ExecutionClass | Should -BeExactly 'manual_impact'
+        $decision.Necessity | Should -BeExactly 'optional'
+        $decision.DefaultSelected | Should -BeFalse
+        $decision.RequiresConfirmation | Should -BeTrue
+        $decision.ImpactCn | Should -BeExactly '可能影响 OEM 主动防护'
+        $decision.CleanupReasonCn | Should -BeExactly '不用 OEM 管家时可减少后台'
+    }
+
+    It 'manual_impact 规则实际只由 <matcher> 命中时降级为 observation' -TestCases @(
+        @{ matcher = 'contains' }
+        @{ matcher = 'regex' }
+    ) {
+        param($matcher)
+        $policy = [pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '可能影响 OEM 功能'; cleanup_reason_cn = '减少后台'
+        }
+        $profile = & $script:NewDecisionTestProfile -Safe $false -Action 'none' -ManualAction 'disable_service' -CleanupPolicy $policy
+
+        $decision = Get-HitExecutionDecision $profile 'service' ([pscustomobject]@{ matched_type = $matcher })
+
+        $decision.Action | Should -BeExactly 'investigate'
+        $decision.ExecutionClass | Should -BeExactly 'observation'
+        $decision.DefaultSelected | Should -BeFalse
+    }
+
+    It 'execution allow_auto 不能绕过未实测证据' {
+        $profile = & $script:NewDecisionTestProfile -Tested $false
+
+        $decision = Get-HitExecutionDecision $profile 'service' ([pscustomobject]@{ matched_type = 'exact' })
+
+        $decision.Action | Should -BeExactly 'investigate'
+        $decision.ExecutionClass | Should -BeExactly 'observation'
+    }
+
+    It '同一 hit type 同时声明危险 normal 和 manual action 时拒绝 profile' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $policy = [pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '可能影响 OEM 功能'; cleanup_reason_cn = '减少后台'
+        }
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy $policy
+        $profile.safe = $true
+        $profile.actions.service = 'disable_service'
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        try { { Load-Profiles -Path $tmp } | Should -Throw '*actions.service 和 manual_actions.service 不能同时声明危险动作*' }
+        finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'Match-Profiles 选择 exact 胜过 contains 并复制决策和真实 matcher provenance' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $profile = [pscustomobject]@{
+            id = 'strongest-match'; vendor = 'OEM'; name_cn = '最强匹配测试'
+            risk = 'low'; safe = $true; reason_cn = '建议关闭 OEM 通知'
+            evidence = [pscustomobject]@{ tested = $true }
+            detect = [pscustomobject]@{
+                services = @(
+                    [pscustomobject]@{ match = 'OEM'; type = 'contains' }
+                    [pscustomobject]@{ match = 'OEMService'; type = 'exact' }
+                )
+                processes = @(); autostarts = @(); tasks = @()
+            }
+            actions = [pscustomobject]@{ service = 'disable_service' }
+            cleanup_policy = [pscustomobject]@{
+                execution_class = 'automatic_safe'; necessity = 'recommended'
+                default_selected = $true; requires_confirmation = $false
+                impact_cn = '仅影响 OEM 通知'; cleanup_reason_cn = '减少 OEM 通知后台'
+            }
+        }
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        $script:ProfileFile = $tmp
+        try {
+            $hits = @(Match-Profiles -Services @([pscustomobject]@{
+                Name = 'OEMService'; DisplayName = 'OEM Service'; State = 'Running'; StartMode = 'Auto'
+            }) -AutoStarts @() -Tasks @() -TopProcs @())
+
+            $hits.Count | Should -Be 1
+            $hits[0].action | Should -BeExactly 'disable_service'
+            $hits[0].execution_class | Should -BeExactly 'automatic_safe'
+            $hits[0].necessity | Should -BeExactly 'recommended'
+            $hits[0].default_selected | Should -BeTrue
+            $hits[0].requires_confirmation | Should -BeFalse
+            $hits[0].impact_cn | Should -BeExactly '仅影响 OEM 通知'
+            $hits[0].cleanup_reason_cn | Should -BeExactly '减少 OEM 通知后台'
+            $hits[0].matched_pattern | Should -BeExactly 'OEMService'
+            $hits[0].matched_type | Should -BeExactly 'exact'
+            $hits[0].matched_field | Should -BeExactly 'service_name'
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 }
