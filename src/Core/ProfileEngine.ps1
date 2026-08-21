@@ -456,7 +456,8 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
     $manualAction = Get-ManualActionFor $profile $hitType
     $policy = Get-CleanupPolicy $profile
     $reasonCn = [string](Get-ObjectPropertyValue $profile 'reason_cn')
-    $neutralImpact = if ([string]::IsNullOrWhiteSpace($reasonCn)) { '已验证为可处理项，具体功能影响请查看规则说明' } else { $reasonCn }
+    $neutralImpact = if ([string]::IsNullOrWhiteSpace($reasonCn)) { '具体功能影响未说明，处理前请确认目标用途' } else { $reasonCn }
+    $neutralCleanupReason = if ([string]::IsNullOrWhiteSpace($reasonCn)) { '该项目已实测可处理，但规则未提供具体清理原因' } else { $reasonCn }
     $matchedType = [string](Get-ObjectPropertyValue $evidence 'matched_type')
     $hasNarrowEvidence = @('exact','path') -ccontains $matchedType
     $tested = Get-ObjectPropertyValue (Get-ObjectPropertyValue $profile 'evidence') 'tested'
@@ -478,7 +479,7 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
             DefaultSelected = if ($hasAutomaticPolicy) { $policy.default_selected } else { $true }
             RequiresConfirmation = if ($hasAutomaticPolicy) { $policy.requires_confirmation } else { $false }
             ImpactCn = if ($hasAutomaticPolicy) { $policy.impact_cn } else { $neutralImpact }
-            CleanupReasonCn = if ($hasAutomaticPolicy) { $policy.cleanup_reason_cn } else { $reasonCn }
+            CleanupReasonCn = if ($hasAutomaticPolicy) { $policy.cleanup_reason_cn } else { $neutralCleanupReason }
         }
     }
 
@@ -507,15 +508,14 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
         }
     }
 
-    $observationAction = if (($script:DangerousActions -ccontains $declaredAction) -or ($script:DangerousActions -ccontains $manualAction)) { 'investigate' } else { $declaredAction }
     return [pscustomobject][ordered]@{
-        Action = $observationAction
+        Action = 'investigate'
         ExecutionClass = 'observation'
         Necessity = if ($null -ne $policy -and $policy.necessity -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.necessity)) { $policy.necessity } else { 'informational' }
         DefaultSelected = $false
         RequiresConfirmation = $false
         ImpactCn = if ($null -ne $policy -and $policy.impact_cn -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.impact_cn)) { $policy.impact_cn } else { $neutralImpact }
-        CleanupReasonCn = if ($null -ne $policy -and $policy.cleanup_reason_cn -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.cleanup_reason_cn)) { $policy.cleanup_reason_cn } else { $reasonCn }
+        CleanupReasonCn = if ($null -ne $policy -and $policy.cleanup_reason_cn -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.cleanup_reason_cn)) { $policy.cleanup_reason_cn } else { $neutralCleanupReason }
     }
 }
 

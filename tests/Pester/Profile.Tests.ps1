@@ -359,6 +359,36 @@ Describe 'Profile 加载' {
         $decision.ExecutionClass | Should -BeExactly 'observation'
     }
 
+    It '声明 none 的规则缺少窄证据时仍返回明确 observation 决策: <label>' -TestCases @(
+        @{ label = 'contains'; evidence = ([pscustomobject]@{ matched_type = 'contains' }) }
+        @{ label = 'regex'; evidence = ([pscustomobject]@{ matched_type = 'regex' }) }
+        @{ label = 'missing'; evidence = $null }
+    ) {
+        param($label, $evidence)
+        $profile = & $script:NewDecisionTestProfile -Action 'none'
+
+        $decision = Get-HitExecutionDecision $profile 'service' $evidence
+
+        $decision.Action | Should -BeExactly 'investigate'
+        $decision.ExecutionClass | Should -BeExactly 'observation'
+    }
+
+    It '旧 automatic profile 缺少或留空 reason_cn 时返回明确保守中文文案' {
+        $missingReason = & $script:NewDecisionTestProfile
+        $missingReason.PSObject.Properties.Remove('reason_cn')
+        $blankReason = & $script:NewDecisionTestProfile -ReasonCn '   '
+
+        foreach ($profile in @($missingReason, $blankReason)) {
+            $decision = Get-HitExecutionDecision $profile 'service' ([pscustomobject]@{ matched_type = 'exact' })
+
+            $decision.ExecutionClass | Should -BeExactly 'automatic_safe'
+            $decision.ImpactCn | Should -BeExactly '具体功能影响未说明，处理前请确认目标用途'
+            $decision.CleanupReasonCn | Should -BeExactly '该项目已实测可处理，但规则未提供具体清理原因'
+            [string]::IsNullOrWhiteSpace($decision.ImpactCn) | Should -BeFalse
+            [string]::IsNullOrWhiteSpace($decision.CleanupReasonCn) | Should -BeFalse
+        }
+    }
+
     It '同一 hit type 同时声明危险 normal 和 manual action 时拒绝 profile' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $policy = [pscustomobject]@{
