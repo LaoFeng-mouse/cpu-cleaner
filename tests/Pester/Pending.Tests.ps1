@@ -36,15 +36,16 @@ Describe '待办清单规则' {
         }
     }
 
-    It '空数组以 schema v2 和 UTF-8 BOM 原子保存' {
+    It '空数组以 schema v3 和 UTF-8 BOM 原子保存' {
         Save-PendingActions -Hits @() -Suspicious @()
 
         $bytes = [System.IO.File]::ReadAllBytes($script:PendingFile)
         $bytes.Length | Should -BeGreaterThan 3
         @($bytes[0], $bytes[1], $bytes[2]) | Should -Be @(0xEF, 0xBB, 0xBF)
         $pending = Get-Content -LiteralPath $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        $pending.pending_schema_version | Should -Be 2
+        $pending.pending_schema_version | Should -Be 3
         @($pending.actions).Count | Should -Be 0
+        @($pending.resolved).Count | Should -Be 0
         @($pending.observations).Count | Should -Be 0
         @($pending.suspicious).Count | Should -Be 0
     }
@@ -100,8 +101,9 @@ Describe '待办清单规则' {
         { Save-PendingActions -Hits @() -Suspicious @() } | Should -Not -Throw
 
         $pending = ConvertFrom-StrictPendingJson (Get-Content -LiteralPath $script:PendingFile -Raw -Encoding UTF8)
-        $pending.pending_schema_version | Should -Be 2
+        $pending.pending_schema_version | Should -Be 3
         @($pending.actions).Count | Should -Be 0
+        @($pending.resolved).Count | Should -Be 0
         @($pending.observations).Count | Should -Be 0
         @($pending.suspicious).Count | Should -Be 0
         $parent = Split-Path $script:PendingFile -Parent
@@ -155,12 +157,12 @@ Describe '待办清单规则' {
         @(Get-ChildItem -LiteralPath (Split-Path $script:PendingFile -Parent) -Filter ((Split-Path $script:PendingFile -Leaf) + '.*.tmp')) | Should -HaveCount 0
     }
 
-    It '仅接受 Int32 pending schema v2' {
-        Test-PendingSchemaSupported ([pscustomobject]@{ pending_schema_version = [int32]2 }) | Should -BeTrue
+    It '仅接受 Int32 pending schema v3' {
+        Test-PendingSchemaSupported ([pscustomobject]@{ pending_schema_version = [int32]3 }) | Should -BeTrue
     }
 
-    It '接受 Windows PowerShell ConvertFrom-Json 可能产生的 Int64 schema v2' {
-        Test-PendingSchemaSupported ([pscustomobject]@{ pending_schema_version = [int64]2 }) | Should -BeTrue
+    It '接受 Windows PowerShell ConvertFrom-Json 可能产生的 Int64 schema v3' {
+        Test-PendingSchemaSupported ([pscustomobject]@{ pending_schema_version = [int64]3 }) | Should -BeTrue
     }
 
     It '拒绝缺失、空值、错误版本及非整数标量 pending schema' {
@@ -168,18 +170,67 @@ Describe '待办清单规则' {
             [pscustomobject]@{},
             [pscustomobject]@{ pending_schema_version = $null },
             [pscustomobject]@{ pending_schema_version = [int32]1 },
-            [pscustomobject]@{ pending_schema_version = [int32]3 },
-            [pscustomobject]@{ pending_schema_version = '2' },
-            [pscustomobject]@{ pending_schema_version = [double]2.0 },
-            [pscustomobject]@{ pending_schema_version = [decimal]2 },
+            [pscustomobject]@{ pending_schema_version = [int32]2 },
+            [pscustomobject]@{ pending_schema_version = [int32]4 },
+            [pscustomobject]@{ pending_schema_version = '3' },
+            [pscustomobject]@{ pending_schema_version = [double]3.0 },
+            [pscustomobject]@{ pending_schema_version = [decimal]3 },
             [pscustomobject]@{ pending_schema_version = $true },
-            [pscustomobject]@{ pending_schema_version = @([int32]2) },
-            [pscustomobject]@{ pending_schema_version = [pscustomobject]@{ value = 2 } }
+            [pscustomobject]@{ pending_schema_version = @([int32]3) },
+            [pscustomobject]@{ pending_schema_version = [pscustomobject]@{ value = 3 } }
         )
 
         foreach ($pending in $unsupported) {
             Test-PendingSchemaSupported $pending | Should -BeFalse
         }
+    }
+
+    It 'Build-PendingPayload 生成 Int32 schema 3 四数组并保留扩展字段' {
+        $sourceAction = [pscustomobject][ordered]@{
+            id = 'extension-action'
+            action = 'disable_service'
+            extension_flag = 'keep-action-extension'
+        }
+        $sourceResolved = [pscustomobject][ordered]@{
+            id = 'extension-resolved'
+            extension_state = 'keep-resolved-extension'
+        }
+        $source = [pscustomobject][ordered]@{
+            pending_schema_version = [int32]3
+            generated = '2026-08-21 12:00:00'
+            actions = @($sourceAction)
+            resolved = @($sourceResolved)
+            observations = @()
+            suspicious = @()
+            envelope_extension = 'keep-envelope-extension'
+        }
+
+        $payload = Build-PendingPayload -Source $source
+
+        $payload.pending_schema_version.GetType() | Should -Be ([int32])
+        $payload.pending_schema_version | Should -Be 3
+        foreach ($name in @('actions','resolved','observations','suspicious')) {
+            $payload.PSObject.Properties.Name | Should -Contain $name
+            $payload.$name -is [System.Array] | Should -BeTrue
+        }
+        @($payload.PSObject.Properties | Where-Object { $_.Name -ceq 'resolved' }).Count | Should -Be 1
+        $payload.envelope_extension | Should -BeExactly 'keep-envelope-extension'
+        $payload.actions[0].extension_flag | Should -BeExactly 'keep-action-extension'
+        $payload.resolved[0].extension_state | Should -BeExactly 'keep-resolved-extension'
+    }
+
+    It 'Build-PendingPayload 的空集合始终序列化为 JSON 数组' {
+        $payload = Build-PendingPayload -Source ([pscustomobject]@{ envelope_extension = 'keep' })
+        $raw = ConvertTo-Json -InputObject $payload -Depth 100
+
+        foreach ($name in @('actions','resolved','observations','suspicious')) {
+            $raw | Should -Match ('"' + $name + '"\s*:\s*\[\s*\]')
+        }
+    }
+
+    It 'strict reader 拒绝重复 resolved envelope 属性' {
+        $raw = '{"pending_schema_version":3,"actions":[],"resolved":[],"resolved":[],"observations":[],"suspicious":[]}'
+        { ConvertFrom-StrictPendingJson $raw } | Should -Throw '*重复*'
     }
 
     It 'Invoke-Clean 在读取 actions 和 Load-Profiles 前拒绝旧 pending envelope' {
@@ -212,7 +263,7 @@ Describe '待办清单规则' {
         $pendingPath = Join-Path $TestDrive 'legacy-pending.json'
         $markerPath = Join-Path $TestDrive 'forbidden-calls.txt'
         $fixturePath = Join-Path $TestDrive 'invoke-clean-fixture.ps1'
-        [System.IO.File]::WriteAllText($pendingPath, '{"pending_schema_version":1,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($pendingPath, '{"pending_schema_version":2,"actions":[],"resolved":[],"observations":[],"suspicious":[]}', [System.Text.UTF8Encoding]::new($false))
         $actionEnginePath = Join-Path $projectRoot 'src\Core\ActionEngine.ps1'
         $fixture = @'
 param([string]$PendingPath, [string]$MarkerPath, [string]$ActionEnginePath)
@@ -263,7 +314,7 @@ exit 0
         $pendingPath = Join-Path $TestDrive "hash-$label.json"
         $markerPath = Join-Path $TestDrive "hash-$label-forbidden.txt"
         $fixturePath = Join-Path $TestDrive "hash-$label-fixture.ps1"
-        [System.IO.File]::WriteAllText($pendingPath, '{"pending_schema_version":2,"actions":[],"observations":[],"suspicious":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($pendingPath, '{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[],"suspicious":[]}', [System.Text.UTF8Encoding]::new($false))
         $actionEnginePath = Join-Path $projectRoot 'src\Core\ActionEngine.ps1'
         $fixture = @'
 param([string]$PendingPath, [string]$MarkerPath, [string]$ActionEnginePath, [string]$ProvidedHash)
@@ -300,7 +351,7 @@ Invoke-Clean
 
     It '自定义空动作 pending 的正确 SHA-256 通过锁内 hash gate、解析并到达 Load-Profiles' {
         $pendingPath = Join-Path $TestDrive 'hash-correct-empty.json'
-        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes('{"pending_schema_version":2,"actions":[],"observations":[],"suspicious":[]}')
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes('{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[],"suspicious":[]}')
         [System.IO.File]::WriteAllBytes($pendingPath, $bytes)
         $oldPendingFile = $script:PendingFile
         $oldPendingSha256 = $script:PendingSha256
@@ -400,7 +451,7 @@ Invoke-Clean
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $p.actions[0].status | Should -Be 'pending'
     }
-    It 'pending v2 保存可执行服务的匹配证据和进程空值' {
+    It 'pending v3 保存可执行服务的匹配证据和进程空值' {
         $hit = [pscustomobject]@{
             id='v2-service'; vendor='T'; name_cn='V2'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'
             service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
@@ -409,7 +460,7 @@ Invoke-Clean
         }
         Save-PendingActions -Hits @($hit) -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        $p.pending_schema_version | Should -Be 2
+        $p.pending_schema_version | Should -Be 3
         @($p.actions).Count | Should -Be 1
         $p.actions[0].matched_pattern | Should -Be 'S1'
         $p.actions[0].matched_type | Should -Be 'exact'
@@ -471,7 +522,7 @@ Invoke-Clean
             $p.observations[0].obs_reason | Should -Match $case.reason -Because $case.label
         }
     }
-    It 'pending v2 保存可执行进程的身份和窄匹配来源' {
+    It 'pending v3 保存可执行进程的身份和窄匹配来源' {
         $hit = [pscustomobject]@{
             id='process-path'; vendor='T'; name_cn='Process'; action='uninstall'; hit_type='process'; detail='P1 PID=4242'; reason_cn='r'
             service_name=''; autostart_source=''; autostart_name=''; task_path=''; process_name='P1'; process_id=4242; process_path='C:\Apps\P1.exe'
@@ -605,23 +656,29 @@ Invoke-Clean
             $p.observations[0].process_path | Should -Be 'C:\Apps\P1.exe' -Because $case.label
         }
     }
-    It 'pending JSON 对 0/1 条 action 和 observation 始终使用数组 token' {
+    It 'pending JSON 对 0/1 条 action 和 observation 始终使用四数组 token' {
         Save-PendingActions -Hits @() -Suspicious @()
         $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8
         $raw | Should -Match '"actions"\s*:\s*\[\s*\]'
+        $raw | Should -Match '"resolved"\s*:\s*\[\s*\]'
         $raw | Should -Match '"observations"\s*:\s*\[\s*\]'
+        $raw | Should -Match '"suspicious"\s*:\s*\[\s*\]'
 
         $action = [pscustomobject]@{ id='one-action'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }
         Save-PendingActions -Hits @($action) -Suspicious @()
         $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8
         $raw | Should -Match '"actions"\s*:\s*\[\s*\{'
+        $raw | Should -Match '"resolved"\s*:\s*\[\s*\]'
         $raw | Should -Match '"observations"\s*:\s*\[\s*\]'
+        $raw | Should -Match '"suspicious"\s*:\s*\[\s*\]'
 
         $observation = [pscustomobject]@{ id='one-observation'; vendor='T'; name_cn='O'; action='investigate'; hit_type='service'; detail='S2'; reason_cn='r'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S2'; matched_type='exact'; matched_field='service_name' }
         Save-PendingActions -Hits @($observation) -Suspicious @()
         $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8
         $raw | Should -Match '"actions"\s*:\s*\[\s*\]'
+        $raw | Should -Match '"resolved"\s*:\s*\[\s*\]'
         $raw | Should -Match '"observations"\s*:\s*\[\s*\{'
+        $raw | Should -Match '"suspicious"\s*:\s*\[\s*\]'
     }
     It 'pending JSON 保存扫描健康状态与警告' {
         $health = [pscustomobject]@{ system_info='degraded'; services='complete'; tasks='complete' }
@@ -817,12 +874,15 @@ Invoke-Clean
         { Assert-SuspiciousPendingRow $arrayPid -RequireStoppable } | Should -Throw '*PID*'
         { Assert-SuspiciousPendingRow $missingPath -RequireStoppable } | Should -Throw '*Path*'
     }
-    It '可疑停止子集保持与 OEM actions observations 完全分离' {
+    It '可疑停止子集保持与 OEM actions resolved observations 完全分离' {
         $row = [pscustomobject]@{PID=42;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;StopBlockReason='';status='pending';Reason='temp';'CPU%'=8;MemMB=50}
 
         $subset = Build-SuspiciousSubsetPayload @($row)
 
+        $subset.pending_schema_version.GetType() | Should -Be ([int32])
+        $subset.pending_schema_version | Should -Be 3
         @($subset.actions).Count | Should -Be 0
+        @($subset.resolved).Count | Should -Be 0
         @($subset.observations).Count | Should -Be 0
         @($subset.suspicious).Count | Should -Be 1
         $subset.suspicious[0].PID | Should -Be 42

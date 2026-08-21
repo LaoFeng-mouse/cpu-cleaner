@@ -264,9 +264,10 @@ function Build-SuspiciousSubsetPayload($Rows) {
         }
     }
     return [pscustomobject]@{
-        pending_schema_version=2
+        pending_schema_version=[int32]3
         generated=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         actions=@()
+        resolved=@()
         observations=@()
         suspicious=@($selected)
     }
@@ -473,7 +474,7 @@ function Test-PendingSchemaSupported($Pending) {
     if ($null -eq $schemaProperty) { return $false }
     $version = $schemaProperty.Value
     if ($version -isnot [int32] -and $version -isnot [int64]) { return $false }
-    return ([int64]2).Equals([int64]$version)
+    return ([int64]3).Equals([int64]$version)
 }
 
 function Test-PendingJsonFileLength($Length) {
@@ -733,30 +734,34 @@ function Read-StrictPendingJsonFile($Path) {
     return ConvertFrom-StrictPendingJson (Read-LimitedPendingJsonFile $Path)
 }
 
-function Build-PendingV2Payload {
-    param($Source, $Actions, $Observations, $Suspicious)
+function Build-PendingPayload {
+    param($Source, $Actions, $Resolved, $Observations, $Suspicious)
     $sourceActions = @()
+    $sourceResolved = @()
     $sourceObservations = @()
     $sourceSuspicious = @()
     if ($Source -and $Source.actions) { $sourceActions = @($Source.actions) }
+    if ($Source -and $Source.resolved) { $sourceResolved = @($Source.resolved) }
     if ($Source -and $Source.observations) { $sourceObservations = @($Source.observations) }
     if ($Source -and $Source.suspicious) { $sourceSuspicious = @($Source.suspicious) }
     if ($PSBoundParameters.ContainsKey('Actions')) { $sourceActions = @($Actions) }
+    if ($PSBoundParameters.ContainsKey('Resolved')) { $sourceResolved = @($Resolved) }
     if ($PSBoundParameters.ContainsKey('Observations')) { $sourceObservations = @($Observations) }
     if ($PSBoundParameters.ContainsKey('Suspicious')) { $sourceSuspicious = @($Suspicious) }
 
     $generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     if ($Source -and $Source.PSObject.Properties.Name -contains 'generated') { $generated = $Source.generated }
     $properties = [ordered]@{
-        pending_schema_version = 2
+        pending_schema_version = [int32]3
         generated = $generated
         actions = @($sourceActions)
+        resolved = @($sourceResolved)
         observations = @($sourceObservations)
         suspicious = @($sourceSuspicious)
     }
     if ($Source) {
         foreach ($property in $Source.PSObject.Properties) {
-            if ($property.Name -notin @('pending_schema_version','generated','actions','observations','suspicious')) {
+            if ($property.Name -notin @('pending_schema_version','generated','actions','resolved','observations','suspicious')) {
                 $properties[$property.Name] = $property.Value
             }
         }
@@ -1113,9 +1118,10 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
         })
     }
     $payload = [pscustomobject]@{
-        pending_schema_version = 2
+        pending_schema_version = [int32]3
         generated     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         actions       = $actions
+        resolved      = @()
         observations  = $observations
         suspicious    = $suspArr
         scan_health   = $ScanHealth
@@ -1931,10 +1937,11 @@ function Invoke-StopProcessPending {
         if (-not [string]::Equals($actualHash,$ExpectedSha256,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'stop_process pending SHA-256 不匹配' }
         $pending = ConvertFrom-StrictPendingJson (Read-LimitedPendingJsonStream $stream)
         if (-not (Test-PendingSchemaSupported $pending)) { throw 'stop_process pending schema 不兼容' }
-        foreach ($name in @('actions','observations','suspicious')) {
+        foreach ($name in @('actions','resolved','observations','suspicious')) {
             if ($pending.PSObject.Properties.Name -notcontains $name -or $pending.$name -isnot [System.Array]) { throw "stop_process $name 必须是数组" }
         }
         if (@($pending.actions).Count -ne 0) { throw 'stop_process actions 必须为空' }
+        if (@($pending.resolved).Count -ne 0) { throw 'stop_process resolved 必须为空' }
         if (@($pending.observations).Count -ne 0) { throw 'stop_process observations 必须为空' }
         $rows = @($pending.suspicious)
         if ($rows.Count -eq 0) { throw 'stop_process suspicious 不能为空' }
@@ -1944,7 +1951,7 @@ function Invoke-StopProcessPending {
             if ($row.status -cin @('pending','failed')) { $results += Invoke-OneTimeProcessStop $row }
             else { $results += $row }
         }
-        $payload = Build-PendingV2Payload -Source $pending -Actions @() -Observations @() -Suspicious @($results)
+        $payload = Build-PendingPayload -Source $pending -Actions @() -Resolved @() -Observations @() -Suspicious @($results)
         Write-PendingToLockedStream -Stream $stream -Pending $payload
         $failed = @($results | Where-Object { $_.status -ceq 'failed' }).Count
         return [pscustomobject]@{ ExitCode=$(if ($failed -gt 0) { 2 } else { 0 }); Results=@($results) }
@@ -2132,7 +2139,7 @@ function Invoke-Clean {
     } finally {
         try {
             if ($pendingValidated -and $null -ne $pendingStream) {
-                $payload = Build-PendingV2Payload -Source $pending -Actions @($pending.actions)
+                $payload = Build-PendingPayload -Source $pending -Actions @($pending.actions)
                 Write-PendingToLockedStream -Stream $pendingStream -Pending $payload
             }
         } finally {
