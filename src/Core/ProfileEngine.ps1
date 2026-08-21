@@ -257,13 +257,13 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
             else {
                 foreach ($ak in Get-ActionKeys $p.actions) {
                     $av = Get-ActionFor $p.actions $ak
-                    if ($script:ValidActions -notcontains $av) { $errors += "id=$($p.id) actions.$ak 非法: $av" }
+                    if ($av -isnot [string] -or $script:ValidActions -cnotcontains $av) { $errors += "id=$($p.id) actions.$ak 非法: $av" }
                 }
                 # safe=false 只能配 none/investigate
                 if ($p.safe -eq $false) {
                     foreach ($ak in Get-ActionKeys $p.actions) {
                         $av = Get-ActionFor $p.actions $ak
-                        if ($script:DangerousActions -contains $av) {
+                        if ($script:DangerousActions -ccontains $av) {
                             $errors += "id=$($p.id) safe=false 但 actions.$ak=$av (危险动作禁止)"
                         }
                     }
@@ -272,7 +272,7 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                 if ($hasTested -and $p.evidence.tested -is [bool] -and $p.evidence.tested -eq $false) {
                     foreach ($ak in Get-ActionKeys $p.actions) {
                         $av = Get-ActionFor $p.actions $ak
-                        if ($script:DangerousActions -contains $av) {
+                        if ($script:DangerousActions -ccontains $av) {
                             $errors += "id=$($p.id) evidence.tested=false 但 actions.$ak=$av (未实测规则禁止危险动作)"
                         }
                     }
@@ -287,34 +287,47 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
             }
 
             $hasDangerousManualAction = $false
-            if ($p.PSObject.Properties.Name -contains 'manual_actions' -and $null -ne $p.manual_actions) {
-                foreach ($ak in Get-ActionKeys $p.manual_actions) {
-                    $av = Get-ActionFor $p.manual_actions $ak
-                    if ($script:ValidActions -notcontains $av) {
-                        $errors += "id=$($p.id) manual_actions.$ak 非法: $av"
-                    }
-                    if ($script:DangerousActions -contains $av) {
-                        $hasDangerousManualAction = $true
+            $hasManualActions = $p.PSObject.Properties.Name -contains 'manual_actions'
+            if ($hasManualActions) {
+                $manualActions = $p.PSObject.Properties['manual_actions'].Value
+                if (-not (Test-ObjectContainer $manualActions)) {
+                    $errors += "id=$($p.id) manual_actions 必须是对象"
+                } else {
+                    foreach ($ak in Get-ActionKeys $manualActions) {
+                        $av = Get-ActionFor $manualActions $ak
+                        if ($av -isnot [string] -or $script:ValidActions -cnotcontains $av) {
+                            $errors += "id=$($p.id) manual_actions.$ak 非法: $av"
+                        }
+                        if ($script:DangerousActions -ccontains $av) {
+                            $hasDangerousManualAction = $true
+                        }
                     }
                 }
             }
 
-            $policy = Get-CleanupPolicy $p
-            if ($null -ne $policy) {
-                if ($policy.execution_class -isnot [string] -or $script:ValidCleanupExecutionClasses -cnotcontains $policy.execution_class) {
-                    $errors += "id=$($p.id) cleanup_policy.execution_class 非法: $($policy.execution_class)"
-                }
-                if ($policy.necessity -isnot [string] -or [string]::IsNullOrWhiteSpace($policy.necessity)) {
-                    $errors += "id=$($p.id) cleanup_policy.necessity 必须是非空字符串"
-                }
-                foreach ($field in @('default_selected','requires_confirmation')) {
-                    if ($policy.$field -isnot [bool]) {
-                        $errors += "id=$($p.id) cleanup_policy.$field 必须是布尔值"
+            $policy = $null
+            $hasCleanupPolicy = $p.PSObject.Properties.Name -contains 'cleanup_policy'
+            if ($hasCleanupPolicy) {
+                $rawPolicy = $p.PSObject.Properties['cleanup_policy'].Value
+                if (-not (Test-ObjectContainer $rawPolicy)) {
+                    $errors += "id=$($p.id) cleanup_policy 必须是对象"
+                } else {
+                    $policy = Get-CleanupPolicy $p
+                    if ($policy.execution_class -isnot [string] -or $script:ValidCleanupExecutionClasses -cnotcontains $policy.execution_class) {
+                        $errors += "id=$($p.id) cleanup_policy.execution_class 非法: $($policy.execution_class)"
                     }
-                }
-                foreach ($field in @('impact_cn','cleanup_reason_cn')) {
-                    if ($policy.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($policy.$field)) {
-                        $errors += "id=$($p.id) cleanup_policy.$field 必须是非空字符串"
+                    if ($policy.necessity -isnot [string] -or [string]::IsNullOrWhiteSpace($policy.necessity)) {
+                        $errors += "id=$($p.id) cleanup_policy.necessity 必须是非空字符串"
+                    }
+                    foreach ($field in @('default_selected','requires_confirmation')) {
+                        if ($policy.$field -isnot [bool]) {
+                            $errors += "id=$($p.id) cleanup_policy.$field 必须是布尔值"
+                        }
+                    }
+                    foreach ($field in @('impact_cn','cleanup_reason_cn')) {
+                        if ($policy.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($policy.$field)) {
+                            $errors += "id=$($p.id) cleanup_policy.$field 必须是非空字符串"
+                        }
                     }
                 }
             }
@@ -397,6 +410,10 @@ function Get-ObjectPropertyValue($Object, [string]$Name) {
     }
     if ($Object.PSObject.Properties.Name -contains $Name) { return $Object.$Name }
     return $null
+}
+
+function Test-ObjectContainer($Value) {
+    return ($null -ne $Value -and ($Value -is [pscustomobject] -or $Value -is [System.Collections.IDictionary]))
 }
 
 function Get-ManualActionFor($profile, [string]$hitType) {

@@ -670,6 +670,7 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
 
         $profile | Should -Not -BeNullOrEmpty
         $profile.safe | Should -BeFalse
+        $profile.reason_cn | Should -BeExactly '联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需禁用'
         $services.Count | Should -Be 2
         $services[0].match | Should -BeExactly 'HRWSCCtrl'
         $services[0].type | Should -BeExactly 'exact'

@@ -33,6 +33,12 @@ Describe 'Profile 加载' {
             $library = [pscustomobject]@{ schema_version = 3; profiles = @($Profile) }
             [System.IO.File]::WriteAllText($Path, ($library | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
         }
+        $script:WriteRawContainerProfile = {
+            param([string]$Path, [string]$ContainerName, [string]$RawValue)
+            $suffix = if ($ContainerName) { ',"' + $ContainerName + '":' + $RawValue } else { '' }
+            $json = '{"schema_version":3,"profiles":[{"id":"container-test","vendor":"T","name_cn":"测试","risk":"low","safe":false,"reason_cn":"r","evidence":{"tested":true},"detect":{"services":[{"match":"S1","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"none"}' + $suffix + '}]}'
+            [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+        }
     }
 
     It '合法 v2 特征库加载成功' {
@@ -110,6 +116,41 @@ Describe 'Profile 加载' {
     It '缺少 manual_actions 时 Get-ManualActionFor 返回 none' {
         $profile = [pscustomobject]@{ actions = [pscustomobject]@{ service = 'disable_service' } }
         Get-ManualActionFor $profile 'service' | Should -BeExactly 'none'
+    }
+
+    It '缺少 manual_actions 和 cleanup_policy 容器时仍允许加载' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        & $script:WriteRawContainerProfile -Path $tmp -ContainerName '' -RawValue ''
+        try {
+            @((Load-Profiles -Path $tmp).profiles).Count | Should -Be 1
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It '<container> 显式 <label> 容器被拒绝' -TestCases @(
+        @{ container = 'manual_actions'; label = 'null'; raw = 'null' }
+        @{ container = 'manual_actions'; label = 'empty-array'; raw = '[]' }
+        @{ container = 'manual_actions'; label = 'string'; raw = '"invalid"' }
+        @{ container = 'manual_actions'; label = 'number'; raw = '1' }
+        @{ container = 'cleanup_policy'; label = 'null'; raw = 'null' }
+        @{ container = 'cleanup_policy'; label = 'empty-array'; raw = '[]' }
+        @{ container = 'cleanup_policy'; label = 'string'; raw = '"invalid"' }
+        @{ container = 'cleanup_policy'; label = 'number'; raw = '1' }
+    ) {
+        param($container, $label, $raw)
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        & $script:WriteRawContainerProfile -Path $tmp -ContainerName $container -RawValue $raw
+        try {
+            { Load-Profiles -Path $tmp } | Should -Throw "*$container 必须是对象*"
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It '危险 manual action 大小写不规范时被拒绝' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $rawPolicy = '{"service":"Disable_Service"},"cleanup_policy":{"execution_class":"manual_impact","necessity":"optional","default_selected":false,"requires_confirmation":true,"impact_cn":"影响","cleanup_reason_cn":"原因"}'
+        & $script:WriteRawContainerProfile -Path $tmp -ContainerName 'manual_actions' -RawValue $rawPolicy
+        try {
+            { Load-Profiles -Path $tmp } | Should -Throw '*manual_actions.service 非法*'
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
     It 'cleanup_policy 的空白 <field> 被拒绝' -TestCases @(
