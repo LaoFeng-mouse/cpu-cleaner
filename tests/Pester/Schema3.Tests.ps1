@@ -640,6 +640,53 @@ Describe 'Schema 3.0 格式校验' {
 }
 
 Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
+    It 'Lenovo 通知任务 exact 身份优先于 contains 回退且使用 automatic_safe 策略' {
+        $profile = @((Load-Profiles -Path $script:ProfileFile).profiles | Where-Object { $_.id -eq 'lenovo-task-notify' }) | Select-Object -First 1
+        $tasks = @($profile.detect.tasks)
+
+        $profile | Should -Not -BeNullOrEmpty
+        $tasks.Count | Should -Be 4
+        $tasks[0].match | Should -BeExactly 'LenovoMachineFixUser_OOBE_AUTO_Notification'
+        $tasks[0].type | Should -BeExactly 'exact'
+        $tasks[1].match | Should -BeExactly 'Lenovo UDC Diagnostic Scan'
+        $tasks[1].type | Should -BeExactly 'exact'
+        $tasks[2].match | Should -BeExactly 'LenovoMachineFixUser_OOBE_AUTO_Notification'
+        $tasks[2].type | Should -BeExactly 'contains'
+        $tasks[3].match | Should -BeExactly 'Lenovo UDC Diagnostic Scan'
+        $tasks[3].type | Should -BeExactly 'contains'
+
+        $policy = Get-CleanupPolicy $profile
+        $policy.execution_class | Should -BeExactly 'automatic_safe'
+        $policy.necessity | Should -BeExactly 'optional'
+        $policy.default_selected | Should -BeTrue
+        $policy.requires_confirmation | Should -BeFalse
+        $policy.impact_cn.Trim().Length | Should -BeGreaterThan 0
+        $policy.cleanup_reason_cn.Trim().Length | Should -BeGreaterThan 0
+    }
+
+    It 'HRWSCCtrl exact 身份优先于 broad 回退并锁定 manual_impact 策略' {
+        $profile = @((Load-Profiles -Path $script:ProfileFile).profiles | Where-Object { $_.id -eq 'lenovo-hrwscctrl' }) | Select-Object -First 1
+        $services = @($profile.detect.services)
+
+        $profile | Should -Not -BeNullOrEmpty
+        $profile.safe | Should -BeFalse
+        $services.Count | Should -Be 2
+        $services[0].match | Should -BeExactly 'HRWSCCtrl'
+        $services[0].type | Should -BeExactly 'exact'
+        $services[1].match | Should -BeExactly 'HRWSCCtrl'
+        $services[1].type | Should -BeExactly 'contains'
+        Get-ActionFor $profile.actions 'service' | Should -BeExactly 'none'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'disable_service'
+
+        $policy = Get-CleanupPolicy $profile
+        $policy.execution_class | Should -BeExactly 'manual_impact'
+        $policy.necessity | Should -BeExactly 'optional'
+        $policy.default_selected | Should -BeFalse
+        $policy.requires_confirmation | Should -BeTrue
+        $policy.impact_cn | Should -BeExactly '可能影响联想电脑管家的安全状态、主动防护和通知'
+        $policy.cleanup_reason_cn | Should -BeExactly '不使用联想电脑管家时可减少常驻后台'
+    }
+
     It '七个已验证 Lenovo 清理规则使用 exact 内部服务名且 evidence.tested=true' {
         $profiles = Load-Profiles -Path $script:ProfileFile
         $expected = @{

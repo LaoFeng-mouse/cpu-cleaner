@@ -3,6 +3,7 @@
 $script:ValidRisks   = @('high','medium','low')
 $script:ValidActions = @('disable_service','remove_autostart','disable_task','uninstall','investigate','none')
 $script:DangerousActions = @('disable_service','remove_autostart','disable_task','uninstall')
+$script:ValidCleanupExecutionClasses = @('automatic_safe','manual_impact')
 
 # 旧格式 v1 → v2 转换 (type/match/action → detect/actions)
 function Convert-ProfilesV1ToV2($old) {
@@ -284,6 +285,57 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                     $errors += "id=$($p.id) execution.allow_auto 必须是布尔值"
                 }
             }
+
+            $hasDangerousManualAction = $false
+            if ($p.PSObject.Properties.Name -contains 'manual_actions' -and $null -ne $p.manual_actions) {
+                foreach ($ak in Get-ActionKeys $p.manual_actions) {
+                    $av = Get-ActionFor $p.manual_actions $ak
+                    if ($script:ValidActions -notcontains $av) {
+                        $errors += "id=$($p.id) manual_actions.$ak 非法: $av"
+                    }
+                    if ($script:DangerousActions -contains $av) {
+                        $hasDangerousManualAction = $true
+                    }
+                }
+            }
+
+            $policy = Get-CleanupPolicy $p
+            if ($null -ne $policy) {
+                if ($policy.execution_class -isnot [string] -or $script:ValidCleanupExecutionClasses -cnotcontains $policy.execution_class) {
+                    $errors += "id=$($p.id) cleanup_policy.execution_class 非法: $($policy.execution_class)"
+                }
+                if ($policy.necessity -isnot [string] -or [string]::IsNullOrWhiteSpace($policy.necessity)) {
+                    $errors += "id=$($p.id) cleanup_policy.necessity 必须是非空字符串"
+                }
+                foreach ($field in @('default_selected','requires_confirmation')) {
+                    if ($policy.$field -isnot [bool]) {
+                        $errors += "id=$($p.id) cleanup_policy.$field 必须是布尔值"
+                    }
+                }
+                foreach ($field in @('impact_cn','cleanup_reason_cn')) {
+                    if ($policy.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($policy.$field)) {
+                        $errors += "id=$($p.id) cleanup_policy.$field 必须是非空字符串"
+                    }
+                }
+            }
+
+            if ($hasDangerousManualAction -and ($null -eq $policy -or $policy.execution_class -cne 'manual_impact')) {
+                $errors += "id=$($p.id) 危险 manual_actions 必须使用 manual_impact execution_class"
+            }
+            if ($null -ne $policy -and $policy.execution_class -ceq 'manual_impact') {
+                if (-not $hasTested -or $p.evidence.tested -isnot [bool] -or $p.evidence.tested -ne $true) {
+                    $errors += "id=$($p.id) manual_impact 要求 evidence.tested=true"
+                }
+                if (-not $hasDangerousManualAction) {
+                    $errors += "id=$($p.id) manual_impact 要求危险 manual_actions"
+                }
+                if ($policy.default_selected -isnot [bool] -or $policy.default_selected -ne $false) {
+                    $errors += "id=$($p.id) manual_impact 要求 default_selected=false"
+                }
+                if ($policy.requires_confirmation -isnot [bool] -or $policy.requires_confirmation -ne $true) {
+                    $errors += "id=$($p.id) manual_impact 要求 requires_confirmation=true"
+                }
+            }
         }
     }
 
@@ -335,6 +387,35 @@ function Get-ActionFor($act, $key) {
     }
     if ($act.PSObject.Properties.Name -contains $key) { return $act.$key }
     return 'none'
+}
+
+function Get-ObjectPropertyValue($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+        return $null
+    }
+    if ($Object.PSObject.Properties.Name -contains $Name) { return $Object.$Name }
+    return $null
+}
+
+function Get-ManualActionFor($profile, [string]$hitType) {
+    $manualActions = Get-ObjectPropertyValue $profile 'manual_actions'
+    if ($null -eq $manualActions) { return 'none' }
+    return Get-ActionFor $manualActions $hitType
+}
+
+function Get-CleanupPolicy($profile) {
+    $source = Get-ObjectPropertyValue $profile 'cleanup_policy'
+    if ($null -eq $source) { return $null }
+    return [pscustomobject][ordered]@{
+        execution_class = Get-ObjectPropertyValue $source 'execution_class'
+        necessity = Get-ObjectPropertyValue $source 'necessity'
+        default_selected = Get-ObjectPropertyValue $source 'default_selected'
+        requires_confirmation = Get-ObjectPropertyValue $source 'requires_confirmation'
+        impact_cn = Get-ObjectPropertyValue $source 'impact_cn'
+        cleanup_reason_cn = Get-ObjectPropertyValue $source 'cleanup_reason_cn'
+    }
 }
 
 # 危险动作只能由当前命中的窄规则证据授权; execution.allow_auto 仅保留作兼容/审计字段
