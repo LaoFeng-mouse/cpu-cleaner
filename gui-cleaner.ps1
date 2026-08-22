@@ -397,7 +397,7 @@ function Get-PendingItems {
     param([string]$Path = '')
     $pf = if ($Path) { $Path } else { Join-Path $script:Root 'pending_actions.json' }
     if (-not (Test-Path $pf)) { return @() }
-    $p = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json
+    $p = Read-GuiPendingFile -Path $pf
     if (-not $p.actions) { return @() }
     return @($p.actions)
 }

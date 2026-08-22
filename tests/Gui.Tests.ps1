@@ -994,6 +994,7 @@ exit 0
         $tmpRoot = Join-Path $env:TEMP ("gui_sum_" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
         $payload = [pscustomobject]@{
+            pending_schema_version = 3
             generated = '2026-01-01 00:00:00'
             actions = @(
                 [pscustomobject]@{ id='a'; status='success' },
@@ -1001,6 +1002,8 @@ exit 0
                 [pscustomobject]@{ id='c'; status='skipped' },
                 [pscustomobject]@{ id='d'; status='manual_required' }
             )
+            resolved = @()
+            observations = @()
             suspicious = @()
         }
         $payload | ConvertTo-Json -Depth 5 | Out-File (Join-Path $tmpRoot 'pending_actions.json') -Encoding utf8
@@ -1764,12 +1767,14 @@ Describe '勾选视图 (v1.5.5)' {
         New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
         $tmpFile = Join-Path $tmpRoot 'subset.json'
         $pending = [pscustomobject]@{
+            pending_schema_version = 3
             generated = 'x'
             actions = @(
                 [pscustomobject]@{ id='a'; status='success' },
                 [pscustomobject]@{ id='b'; status='failed' }
             )
             resolved = @()
+            observations = @()
             suspicious = @()
         }
         $pending | ConvertTo-Json -Depth 5 | Out-File $tmpFile -Encoding utf8
@@ -1890,6 +1895,52 @@ Describe '勾选视图 (v1.5.5)' {
         $missing = '{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[]}'
         [System.IO.File]::WriteAllText($path, $missing, [System.Text.UTF8Encoding]::new($false))
         { Read-GuiPendingFile -Path $path } | Should -Throw '*数组*'
+    }
+
+    It 'Get-PendingItems 拒绝重复键 pending JSON' {
+        $path = Join-Path $TestDrive 'gui-items-duplicate.json'
+        $json = '{"pending_schema_version":3,"actions":[],"Actions":[],"resolved":[],"observations":[],"suspicious":[]}'
+        [System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))
+
+        { Get-PendingItems -Path $path } | Should -Throw '*重复*'
+    }
+
+    It 'Get-PendingItems 拒绝深度 65 pending JSON' {
+        $path = Join-Path $TestDrive 'gui-items-depth.json'
+        $deep = ('[' * 64) + '0' + (']' * 64)
+        $json = '{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[],"suspicious":[],"extension":' + $deep + '}'
+        [System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))
+
+        { Get-PendingItems -Path $path } | Should -Throw '*深度*'
+    }
+
+    It 'Get-PendingItems 拒绝非 schema3 或四数组 shape' -TestCases @(
+        @{ Label='v2'; Json='{"pending_schema_version":2,"actions":[],"resolved":[],"observations":[],"suspicious":[]}' }
+        @{ Label='missing actions'; Json='{"pending_schema_version":3,"resolved":[],"observations":[],"suspicious":[]}' }
+        @{ Label='missing resolved'; Json='{"pending_schema_version":3,"actions":[],"observations":[],"suspicious":[]}' }
+        @{ Label='missing observations'; Json='{"pending_schema_version":3,"actions":[],"resolved":[],"suspicious":[]}' }
+        @{ Label='missing suspicious'; Json='{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[]}' }
+        @{ Label='scalar actions'; Json='{"pending_schema_version":3,"actions":"bad","resolved":[],"observations":[],"suspicious":[]}' }
+        @{ Label='object resolved'; Json='{"pending_schema_version":3,"actions":[],"resolved":{},"observations":[],"suspicious":[]}' }
+        @{ Label='scalar observations'; Json='{"pending_schema_version":3,"actions":[],"resolved":[],"observations":1,"suspicious":[]}' }
+        @{ Label='object suspicious'; Json='{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[],"suspicious":{}}' }
+    ) {
+        param($Label, $Json)
+        $path = Join-Path $TestDrive (('gui-items-{0}.json' -f ($Label -replace ' ', '-')))
+        [System.IO.File]::WriteAllText($path, $Json, [System.Text.UTF8Encoding]::new($false))
+
+        { Get-PendingItems -Path $path } | Should -Throw -Because $Label
+    }
+
+    It 'Get-PendingItems 读取合法 schema3 四数组 envelope 的 actions' {
+        $path = Join-Path $TestDrive 'gui-items-valid.json'
+        $json = '{"pending_schema_version":3,"actions":[{"id":"ok","status":"success"}],"resolved":[],"observations":[],"suspicious":[]}'
+        [System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))
+
+        $items = @(Get-PendingItems -Path $path)
+
+        $items.Count | Should -Be 1
+        $items[0].id | Should -BeExactly 'ok'
     }
 
     It 'Get-PendingViewItems 直接调用时拒绝 v2 及缺失 null scalar object 四数组分支' {
