@@ -7,7 +7,10 @@
 ## 设计上的安全承诺
 
 1. **默认只读**：scan 不修改任何设置
-2. **管理员 + 用户确认**：destructive clean 只有在用户选中条目并完成复核后才请求管理员 UAC；`manual_impact` 还需要二次确认。`-YesToAll` 也不绕过 safe/tested、类别或 matcher 授权
+2. **入口分别确认**：
+   - **GUI**：普通权限界面先完成 review 选择；只有选择中包含 `manual_impact` 时才要求独立二次确认，之后才请求用于 clean 的管理员 UAC
+   - **CLI / `2-清理.bat`**：必须以管理员权限运行，并在控制台中选择待处理项；它不提供与 GUI review 相同的复核体验，但仍受 strict pending、当前 profile 和 current-target 重验约束。`manual_impact` 没有正确确认 digest 时一律拒绝
+   - 两种入口的 `-YesToAll` 都不能绕过 safe/tested、执行类别、matcher 或当前目标授权
 3. **逐命中来源**：scan hit 保存 `matched_pattern`、`matched_type`、`matched_field`。危险动作只接受实际命中的 `exact`，或命中真实路径字段的 `path`；规则中存在其他窄 matcher 不构成授权，`contains` / `regex` 与 `execution.allow_auto=true` 都不能绕过
 4. **确定的匹配语义**：`exact` / `contains` / `path` 使用 `OrdinalIgnoreCase` 字面比较，通配符字符保持字面含义；`regex` 是唯一表达式 matcher
 5. **pending schema 3 失败关闭**：只接受整数 `pending_schema_version: 3`，且必须包含 `actions`、`resolved`、`observations`、`suspicious` 四个数组。schema 2、旧版、缺失、字符串或数组版本必须重新 scan，不自动升级；GUI 也拒绝用它们生成执行子集
