@@ -1518,20 +1518,51 @@ function Convert-NumberToSc($n) {
     }
 }
 
-# 采集服务备份信息: 启动类型(sc 格式/显示格式) + 运行状态 + DelayedAutoStart
+# 采集服务备份信息: 变更前必须完整绑定服务身份、启动配置、状态与二进制。
+function Get-ServiceBinaryPathFromPathName($PathName) {
+    if ($PathName -isnot [string] -or [string]::IsNullOrWhiteSpace($PathName)) { return $null }
+    $trimmed = $PathName.Trim()
+    if ($trimmed -match '^"([^"]+)"') { return $matches[1] }
+    if ($trimmed -match '^([^\s]+\.exe)(?:\s|$)') { return $matches[1] }
+    return $null
+}
+
 function Get-ServiceBackupInfo($srvName) {
+    if ($srvName -isnot [string] -or $srvName -cnotmatch '^[A-Za-z0-9_.]+$') { return $null }
     $svc = Get-Service -Name $srvName -ErrorAction SilentlyContinue
     if (-not $svc) { return $null }
+    try {
+        $cim = Get-CimInstance -ClassName Win32_Service -Filter ("Name='{0}'" -f $srvName) -ErrorAction Stop
+        if (-not $cim -or $cim.Name -cne $srvName -or
+            $cim.DisplayName -isnot [string] -or [string]::IsNullOrWhiteSpace($cim.DisplayName) -or
+            $cim.PathName -isnot [string] -or [string]::IsNullOrWhiteSpace($cim.PathName) -or
+            $cim.StartMode -isnot [string] -or [string]::IsNullOrWhiteSpace($cim.StartMode) -or
+            $cim.State -isnot [string] -or $cim.State -cnotin @('Running','Stopped')) { return $null }
+        $binaryPath = Get-ServiceBinaryPathFromPathName $cim.PathName
+        if ($binaryPath -isnot [string] -or -not [System.IO.File]::Exists($binaryPath)) { return $null }
+        $binarySha256 = Get-FileSha256Hex $binaryPath
+        if ($binarySha256 -isnot [string] -or $binarySha256 -cnotmatch '^[0-9A-F]{64}$') { return $null }
+    } catch { return $null }
     $startType = $svc.StartType.ToString()
+    $status = $svc.Status.ToString()
+    if ($status -cnotin @('Running','Stopped') -or $status -cne $cim.State) { return $null }
     $delayed = 0
     try {
         $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$srvName"
         $delayed = (Get-ItemProperty $regPath -Name DelayedAutostart -ErrorAction Stop).DelayedAutostart
     } catch { $delayed = 0 }
     return [pscustomobject]@{
+        name               = $cim.Name
+        display_name       = $cim.DisplayName
+        path_name          = $cim.PathName
+        binary_path        = $binaryPath
+        binary_sha256      = $binarySha256
+        start_mode         = $cim.StartMode
         start_type_sc      = Convert-StartTypeToSc $startType
         start_type_display = $startType
-        status             = $svc.Status.ToString()
+        state              = $cim.State
+        status             = $status
+        was_running        = ($status -ceq 'Running')
         delayed_autostart  = $delayed
     }
 }
@@ -1541,6 +1572,15 @@ function Test-ServiceBackupInfo($Info) {
     if ($Info.start_type_sc -isnot [string] -or $Info.start_type_sc -cnotin @('auto','demand','disabled','boot','system')) { return $false }
     if ($Info.start_type_display -isnot [string] -or [string]::IsNullOrWhiteSpace($Info.start_type_display)) { return $false }
     if ($Info.status -isnot [string] -or $Info.status -cnotin @('Running','Stopped')) { return $false }
+    if ($Info.name -isnot [string] -or $Info.name -cnotmatch '^[A-Za-z0-9_.]+$' -or
+        $Info.display_name -isnot [string] -or [string]::IsNullOrWhiteSpace($Info.display_name) -or
+        $Info.path_name -isnot [string] -or [string]::IsNullOrWhiteSpace($Info.path_name) -or
+        $Info.binary_path -isnot [string] -or [string]::IsNullOrWhiteSpace($Info.binary_path) -or
+        $Info.binary_sha256 -isnot [string] -or $Info.binary_sha256 -cnotmatch '^[0-9A-F]{64}$' -or
+        $Info.start_mode -isnot [string] -or [string]::IsNullOrWhiteSpace($Info.start_mode) -or
+        $Info.state -isnot [string] -or $Info.state -cnotin @('Running','Stopped') -or
+        $Info.was_running -isnot [bool] -or $Info.was_running -ne ($Info.status -ceq 'Running') -or
+        $Info.state -cne $Info.status) { return $false }
     return $true
 }
 
@@ -1683,8 +1723,10 @@ function Invoke-ServiceDisableAction {
     $manifest = [pscustomobject]@{
         backup_format_version=1; entry_id=$Tag; type='service'; name=$srvName; target_identity=$srvName
         backup=$bak; backup_verified=$true; backup_sha256=$artifact.Sha256
+        service_name=$info.name; display_name=$info.display_name; path_name=$info.path_name
+        binary_path=$info.binary_path; binary_sha256=$info.binary_sha256; start_mode=$info.start_mode
         start_type_sc=$info.start_type_sc; start_type_display=$info.start_type_display
-        status=$info.status; delayed_autostart=$info.delayed_autostart
+        state=$info.state; status=$info.status; was_running=$info.was_running; delayed_autostart=$info.delayed_autostart
         execution_status='prepared'; verified=$false; note='restore: sc config <name> start= <start_type_sc>'
     }
     try { $null = Add-BackupManifestEntryAtomic -BackupDir $BackupDir -Entry $manifest } catch {
@@ -1696,17 +1738,17 @@ function Invoke-ServiceDisableAction {
     try {
         Invoke-ServiceConfigDisable -ServiceName $srvName
         $after = Get-Service -Name $srvName -ErrorAction SilentlyContinue
-        if ($after -and $after.StartType -eq 'Disabled') {
+        if ($after -and $after.StartType -eq 'Disabled' -and $after.Status -eq 'Stopped') {
             try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'success' $true } catch {
                 return [pscustomobject]@{ status='failed'; reason=('服务已修改，但 manifest 状态更新失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
             }
             $manifest.execution_status = 'success'; $manifest.verified = $true
-            $note = if ($after.Status -eq 'Running') { '已禁用但进程仍在运行(重启后消失)' } else { '已禁用并停止' }
-            return [pscustomobject]@{ status='success'; reason=$note; backup=$bak; manifest=$manifest }
+            return [pscustomobject]@{ status='success'; reason='已禁用并停止'; backup=$bak; manifest=$manifest }
         }
-        $actual = if ($after) { $after.StartType.ToString() } else { '服务不存在' }
+        $actual = if ($after) { ('StartType={0}; Status={1}' -f $after.StartType,$after.Status) } else { '服务不存在' }
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
-        return [pscustomobject]@{ status='failed'; reason="当前 StartType=$actual"; backup=$bak; manifest=$manifest }
+        $reason = if ($after -and $after.StartType -eq 'Disabled' -and $after.Status -eq 'Running') { '服务已禁用但仍在运行' } else { "服务禁用后置验证失败: $actual" }
+        return [pscustomobject]@{ status='failed'; reason=$reason; backup=$bak; manifest=$manifest }
     } catch {
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
         return [pscustomobject]@{ status='failed'; reason=('服务修改或验证失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
@@ -1742,6 +1784,8 @@ function Invoke-TaskDisableAction {
     try {
         $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
         if (-not $task) { return [pscustomobject]@{ status='skipped'; reason='计划任务不存在'; backup=''; manifest=$null } }
+        if ($task.State -isnot [string] -or [string]::IsNullOrWhiteSpace($task.State)) { throw '计划任务原始 Enabled 状态不可用' }
+        $enabled = ($task.State -cne 'Disabled')
         $xml = Export-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop
         $bak = Write-TaskXmlBackup -Xml $xml -BackupDir $BackupDir -Tag $Tag
         $bak = Resolve-ValidatedBackupPath $BackupDir $bak
@@ -1754,6 +1798,7 @@ function Invoke-TaskDisableAction {
     $manifest = [pscustomobject]@{
         backup_format_version=1; entry_id=$Tag; type='task'; name=$taskPath; target_identity=$taskPath
         backup=$bak; backup_verified=$true; backup_sha256=$artifact.Sha256
+        task_path=$taskPath; task_name=$taskName; enabled=[bool]$enabled
         execution_status='prepared'; verified=$false
         note='restore: Register-ScheduledTask -Xml <backup> -TaskName <name> -TaskPath <path> -Force'
     }
@@ -1876,9 +1921,9 @@ function Assert-RestoreManifestSchema($Manifest) {
     if ($Manifest.PSObject.Properties.Name -notcontains 'backup_verified' -or $Manifest.backup_verified -isnot [bool] -or -not $Manifest.backup_verified) { throw (New-RestoreCandidateRejectedException 'manifest 未标记验证过的备份') }
     $common = @('backup_format_version','entry_id','type','name','target_identity','backup','backup_verified','backup_sha256','execution_status','verified','note')
     $specific = switch -CaseSensitive ($Manifest.type) {
-        'service' { @('start_type_sc','start_type_display','status','delayed_autostart','restart_after_restore') }
+        'service' { @('service_name','display_name','path_name','binary_path','binary_sha256','start_mode','start_type_sc','start_type_display','state','status','was_running','delayed_autostart','restart_after_restore') }
         'autostart' { @('key') }
-        'task' { @() }
+        'task' { @('task_path','task_name','enabled') }
     }
     foreach ($property in $Manifest.PSObject.Properties) { if ($property.Name -cnotin @($common + $specific)) { throw (New-RestoreCandidateRejectedException "manifest 包含未知字段: $($property.Name)") } }
     foreach ($field in @('entry_id','type','name','target_identity','backup','backup_sha256','execution_status')) {
@@ -1893,8 +1938,23 @@ function Assert-RestoreManifestSchema($Manifest) {
         if ($Manifest.status -isnot [string] -or $Manifest.status -cnotin @('Running','Stopped')) { throw (New-RestoreCandidateRejectedException '服务状态必须是稳定 Running 或 Stopped') }
         if ($Manifest.PSObject.Properties.Name -contains 'delayed_autostart' -and (-not (Test-StrictInteger $Manifest.delayed_autostart) -or [int64]$Manifest.delayed_autostart -notin @(0,1))) { throw (New-RestoreCandidateRejectedException 'delayed_autostart 无效') }
         if ($Manifest.PSObject.Properties.Name -contains 'restart_after_restore' -and $Manifest.restart_after_restore -isnot [bool]) { throw (New-RestoreCandidateRejectedException 'restart_after_restore 必须是真正 Boolean') }
+        foreach ($field in @('service_name','display_name','path_name','binary_path','binary_sha256','start_mode','state','was_running')) {
+            if ($Manifest.PSObject.Properties.Name -contains $field) {
+                if ($field -eq 'was_running') { if ($Manifest.$field -isnot [bool]) { throw (New-RestoreCandidateRejectedException '服务 was_running 必须是 Boolean') } }
+                elseif ($Manifest.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.$field)) { throw (New-RestoreCandidateRejectedException "服务字段 $field 无效") }
+            }
+        }
+        if ($Manifest.PSObject.Properties.Name -contains 'service_name' -and -not [string]::Equals($Manifest.service_name, $Manifest.name, [System.StringComparison]::OrdinalIgnoreCase)) { throw (New-RestoreCandidateRejectedException '服务备份名称不匹配') }
+        if ($Manifest.PSObject.Properties.Name -contains 'binary_sha256' -and $Manifest.binary_sha256 -cnotmatch '^[0-9A-Fa-f]{64}$') { throw (New-RestoreCandidateRejectedException '服务二进制 SHA-256 无效') }
+        if ($Manifest.PSObject.Properties.Name -contains 'state' -and $Manifest.state -cnotin @('Running','Stopped')) { throw (New-RestoreCandidateRejectedException '服务原始 State 无效') }
+        if ($Manifest.PSObject.Properties.Name -contains 'was_running' -and $Manifest.was_running -ne ($Manifest.status -ceq 'Running')) { throw (New-RestoreCandidateRejectedException '服务 WasRunning 与 Status 不一致') }
     }
     if ($Manifest.type -eq 'autostart' -and ($Manifest.key -isnot [string] -or [string]::IsNullOrWhiteSpace($Manifest.key))) { throw (New-RestoreCandidateRejectedException '自启动 key 必须是字符串') }
+    if ($Manifest.type -eq 'task') {
+        if ($Manifest.PSObject.Properties.Name -contains 'task_path' -and -not [string]::Equals((Normalize-TaskPathIdentity $Manifest.task_path), (Normalize-TaskPathIdentity $Manifest.name), [System.StringComparison]::OrdinalIgnoreCase)) { throw (New-RestoreCandidateRejectedException '任务备份路径不匹配') }
+        if ($Manifest.PSObject.Properties.Name -contains 'task_name' -and ($Manifest.task_name -isnot [string] -or $Manifest.task_name -cne (Normalize-TaskPathIdentity $Manifest.name).Split('\')[-1])) { throw (New-RestoreCandidateRejectedException '任务备份名称不匹配') }
+        if ($Manifest.PSObject.Properties.Name -contains 'enabled' -and $Manifest.enabled -isnot [bool]) { throw (New-RestoreCandidateRejectedException '任务 Enabled 必须是 Boolean') }
+    }
 }
 
 function Get-RestorePlan {
@@ -1936,7 +1996,8 @@ function Get-RestorePlan {
             $parsed = Assert-BackupArtifactIdentity -Type 'task' -Artifact $artifact -TargetIdentity $normalizedTaskName
             $taskName = $normalizedTaskName.Split('\')[-1]
             $taskFolder = $normalizedTaskName.Substring(0, $normalizedTaskName.Length - $taskName.Length)
-            return [pscustomobject]@{ Type='task'; Name=$normalizedTaskName; TaskName=$taskName; TaskPath=$taskFolder; BackupPath=$backupPath; Xml=$parsed.Xml; TaskFingerprint=$parsed.TaskFingerprint; Artifact=$artifact }
+            $expectedEnabled = if ($Manifest.PSObject.Properties.Name -contains 'enabled') { [bool]$Manifest.enabled } else { $null }
+            return [pscustomobject]@{ Type='task'; Name=$normalizedTaskName; TaskName=$taskName; TaskPath=$taskFolder; ExpectedEnabled=$expectedEnabled; BackupPath=$backupPath; Xml=$parsed.Xml; TaskFingerprint=$parsed.TaskFingerprint; Artifact=$artifact }
         }
         'process' { return [pscustomobject]@{ Type='process'; Name=$Manifest.name; Path=$Manifest.path } }
         default { throw (New-RestoreCandidateRejectedException 'manifest 记录类型不受支持') }
@@ -2001,15 +2062,25 @@ function Invoke-RestorePlanAction($Plan) {
         }
         'task' {
             Register-ScheduledTask -Xml $Plan.Xml -TaskName $Plan.TaskName -TaskPath $Plan.TaskPath -Force -ErrorAction Stop | Out-Null
+            $hasExpectedEnabled = ($Plan.PSObject.Properties.Name -contains 'ExpectedEnabled' -and $Plan.ExpectedEnabled -is [bool])
+            if ($hasExpectedEnabled) {
+                if ($Plan.ExpectedEnabled) { Enable-ScheduledTask -TaskName $Plan.TaskName -TaskPath $Plan.TaskPath -ErrorAction Stop | Out-Null }
+                else { Disable-ScheduledTask -TaskName $Plan.TaskName -TaskPath $Plan.TaskPath -ErrorAction Stop | Out-Null }
+            }
             $after = Get-ScheduledTask -TaskName $Plan.TaskName -TaskPath $Plan.TaskPath -ErrorAction SilentlyContinue
             $success = $false
+            $reason = '任务定义回读不一致'
             if ($after) {
                 try {
                     $restoredXml = Export-ScheduledTask -TaskName $Plan.TaskName -TaskPath $Plan.TaskPath -ErrorAction Stop
                     $success = (Get-TaskDefinitionFingerprint $restoredXml) -ceq $Plan.TaskFingerprint
                 } catch { $success = $false }
+                if ($success -and $hasExpectedEnabled) {
+                    $actualEnabled = ($after.State -cne 'Disabled')
+                    if ($actualEnabled -ne $Plan.ExpectedEnabled) { $success = $false; $reason = "任务 Enabled 回读不一致: actual=$actualEnabled expected=$($Plan.ExpectedEnabled)" }
+                }
             }
-            return [pscustomobject]@{ success=[bool]$success; type='task'; name=$Plan.Name }
+            return [pscustomobject]@{ success=[bool]$success; type='task'; name=$Plan.Name; reason=$(if ($success) { '任务定义和 Enabled 状态回读一致' } else { $reason }) }
         }
         'process' { return [pscustomobject]@{ success=$true; type='process'; name=$Plan.Name } }
         default { throw '恢复计划类型不受支持' }
@@ -2271,6 +2342,7 @@ function Invoke-Clean {
     $pendingStream = $null
     $pending = $null
     $pendingValidated = $false
+    $cleanExitCode = 0
     try {
     $pendingStream = Open-LockedPendingFile $script:PendingFile
     if ($script:RequirePendingSha256) {
@@ -2454,6 +2526,7 @@ function Invoke-Clean {
         Write-Host "`n无可疑高占用进程。" -ForegroundColor Green
     }
 
+    $cleanExitCode = if (@($pending.actions | Where-Object { $_.status -ceq 'failed' }).Count -gt 0) { 2 } else { 0 }
     Write-Step '完成。建议重启一次让所有禁用生效。'
     } finally {
         try {
@@ -2465,6 +2538,7 @@ function Invoke-Clean {
             if ($null -ne $pendingStream) { $pendingStream.Dispose() }
         }
     }
+    return [int]$cleanExitCode
 }
 
 # ---------- 11. restore 模式 ----------

@@ -104,7 +104,7 @@ Describe '清理动作逻辑' {
 
     It '服务备份创建失败时配置和停止调用均为 0' {
         Mock Get-ServiceBackupInfo {
-            [pscustomobject]@{ start_type_sc='auto'; start_type_display='Automatic'; status='Running'; delayed_autostart=0 }
+            [pscustomobject]@{ name='ExactSvc';display_name='Exact Service';path_name='C:\ExactSvc.exe';binary_path='C:\ExactSvc.exe';binary_sha256=('A' * 64);start_mode='Auto';state='Running';was_running=$true;start_type_sc='auto';start_type_display='Automatic';status='Running';delayed_autostart=0 }
         }
         Mock Backup-RegistryKey { throw 'backup failed' }
         Mock Invoke-ServiceConfigDisable {}
@@ -153,7 +153,7 @@ Describe '清理动作逻辑' {
 
     It '服务 write-ahead manifest 持久化失败时 mutation 为 0' {
         Mock Get-ServiceBackupInfo {
-            [pscustomobject]@{ start_type_sc='auto'; start_type_display='Automatic'; status='Running'; delayed_autostart=0 }
+            [pscustomobject]@{ name='ExactSvc';display_name='Exact Service';path_name='C:\ExactSvc.exe';binary_path='C:\ExactSvc.exe';binary_sha256=('A' * 64);start_mode='Auto';state='Running';was_running=$true;start_type_sc='auto';start_type_display='Automatic';status='Running';delayed_autostart=0 }
         }
         Mock Backup-RegistryKey {
             $out = Join-Path $TestDrive 'service.reg'
@@ -230,9 +230,28 @@ Describe '清理动作逻辑' {
         Should -Invoke Disable-ScheduledTask -Times 1 -Exactly
     }
 
+    It '计划任务禁用命令返回后仍 Enabled 时返回 failed' {
+        $script:TaskReadCount = 0
+        Mock Get-ScheduledTask {
+            $script:TaskReadCount++
+            return [pscustomobject]@{State='Ready'}
+        }
+        Mock Export-ScheduledTask { '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo></Task>' }
+        Mock Add-BackupManifestEntryAtomic {}
+        Mock Update-BackupManifestEntryAtomic {}
+        Mock Disable-ScheduledTask {}
+
+        $result = Invoke-TaskDisableAction -Pending ([pscustomobject]@{task_path='\Vendor\Task'}) -BackupDir $TestDrive -Tag 'task-still-enabled'
+
+        $result.status | Should -BeExactly 'failed'
+        $result.reason | Should -Match 'Ready'
+        Should -Invoke Disable-ScheduledTask -Times 1 -Exactly
+        Should -Invoke Update-BackupManifestEntryAtomic -Times 1 -Exactly -ParameterFilter { $ExecutionStatus -eq 'failed' -and $Verified -eq $false }
+    }
+
     It '服务备份键与目标服务错配时 mutation 为 0' {
         Mock Get-ServiceBackupInfo {
-            [pscustomobject]@{ start_type_sc='auto'; start_type_display='Automatic'; status='Running'; delayed_autostart=0 }
+            [pscustomobject]@{ name='ExactSvc';display_name='Exact Service';path_name='C:\ExactSvc.exe';binary_path='C:\ExactSvc.exe';binary_sha256=('A' * 64);start_mode='Auto';state='Running';was_running=$true;start_type_sc='auto';start_type_display='Automatic';status='Running';delayed_autostart=0 }
         }
         Mock Backup-RegistryKey {
             $out = Join-Path $TestDrive 'wrong-service.reg'
@@ -379,6 +398,70 @@ Describe '清理动作逻辑' {
         Should -Invoke Backup-RegistryKey -Times 0 -Exactly
         Should -Invoke Invoke-ServiceConfigDisable -Times 0 -Exactly
     }
+
+    It '服务禁用后仍在运行时标记 failed 而不是 success' {
+        $backup = Join-Path $TestDrive 'running-service.reg'
+        [System.IO.File]::WriteAllText($backup, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\ExactSvc]`r`n")
+        Mock Get-ServiceBackupInfo { [pscustomobject]@{ name='ExactSvc';display_name='Exact Service';path_name='C:\ExactSvc.exe';binary_path='C:\ExactSvc.exe';binary_sha256=('A' * 64);start_mode='Auto';state='Running';was_running=$true;start_type_sc='auto'; start_type_display='Automatic'; status='Running'; delayed_autostart=0 } }
+        Mock Backup-RegistryKey { $backup }
+        Mock Add-BackupManifestEntryAtomic {}
+        Mock Update-BackupManifestEntryAtomic {}
+        Mock Invoke-ServiceConfigDisable {}
+        Mock Get-Service { [pscustomobject]@{ StartType='Disabled'; Status='Running' } }
+
+        $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'svc-still-running'
+
+        $result.status | Should -BeExactly 'failed'
+        $result.reason | Should -Match '仍在运行'
+        Should -Invoke Update-BackupManifestEntryAtomic -Times 1 -Exactly -ParameterFilter { $ExecutionStatus -eq 'failed' -and $Verified -eq $false }
+    }
+
+    It '服务备份 manifest 保存原始显示名路径和二进制摘要' {
+        $backup = Join-Path $TestDrive 'metadata-service.reg'
+        [System.IO.File]::WriteAllText($backup, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\ExactSvc]`r`n")
+        $script:CapturedEntry = $null
+        Mock Get-ServiceBackupInfo {
+            [pscustomobject]@{
+                name='ExactSvc'; display_name='Exact Service'; path_name='C:\Program Files\Vendor\exact.exe -service'
+                binary_path='C:\Program Files\Vendor\exact.exe'; binary_sha256=('A' * 64)
+                start_mode='Auto'; start_type_sc='auto'; start_type_display='Automatic'; state='Stopped'; status='Stopped'; was_running=$false; delayed_autostart=0
+            }
+        }
+        Mock Backup-RegistryKey { $backup }
+        Mock Add-BackupManifestEntryAtomic { $script:CapturedEntry = $Entry }
+        Mock Update-BackupManifestEntryAtomic {}
+        Mock Invoke-ServiceConfigDisable {}
+        Mock Get-Service { [pscustomobject]@{ StartType='Disabled'; Status='Stopped' } }
+
+        $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'svc-metadata'
+
+        $result.status | Should -BeExactly 'success'
+        $script:CapturedEntry.display_name | Should -BeExactly 'Exact Service'
+        $script:CapturedEntry.path_name | Should -BeExactly 'C:\Program Files\Vendor\exact.exe -service'
+        $script:CapturedEntry.binary_sha256 | Should -BeExactly ('A' * 64)
+        $script:CapturedEntry.was_running | Should -BeFalse
+    }
+
+    It '任务备份 manifest 保存完整路径名称和原始 Enabled 状态' {
+        $script:CapturedEntry = $null
+        $script:TaskReadCount = 0
+        Mock Get-ScheduledTask {
+            $script:TaskReadCount++
+            if ($script:TaskReadCount -eq 1) { return [pscustomobject]@{State='Ready'} }
+            return [pscustomobject]@{State='Disabled'}
+        }
+        Mock Export-ScheduledTask { '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo></Task>' }
+        Mock Add-BackupManifestEntryAtomic { $script:CapturedEntry = $Entry }
+        Mock Update-BackupManifestEntryAtomic {}
+        Mock Disable-ScheduledTask {}
+
+        $result = Invoke-TaskDisableAction -Pending ([pscustomobject]@{task_path='\Vendor\Task'}) -BackupDir $TestDrive -Tag 'task-enabled'
+
+        $result.status | Should -BeExactly 'success'
+        $script:CapturedEntry.task_path | Should -BeExactly '\Vendor\Task'
+        $script:CapturedEntry.task_name | Should -BeExactly 'Task'
+        $script:CapturedEntry.enabled | Should -BeTrue
+    }
 }
 
 Describe 'clean impact confirmation 参数与最终选择闸门' {
@@ -390,6 +473,20 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         }
         function Is-Admin { return $false }
         function Write-Step { param([string]$Message) }
+        function New-CleanExitAction([string]$Id, [string]$Action = 'disable_service') {
+            return [pscustomobject]@{
+                id=$Id; name_cn=$Id; detail=$Id; reason_cn='test'; hit_type='service'; action=$Action; status='pending'
+                service_name=$Id; matched_pattern=$Id; matched_type='exact'; matched_field='service_name'; safe=$true
+                execution_class='automatic_safe'; necessity='optional'; default_selected=$true; requires_confirmation=$false
+                impact_cn='test impact'; cleanup_reason_cn='test reason'
+            }
+        }
+        function Write-CleanExitPending([string]$Name, $Actions) {
+            $path = Join-Path $TestDrive $Name
+            $payload = [pscustomobject]@{pending_schema_version=3;generated='scan';actions=@($Actions);resolved=@();observations=@();suspicious=@()}
+            [System.IO.File]::WriteAllText($path, (ConvertTo-Json -InputObject $payload -Depth 8), [System.Text.UTF8Encoding]::new($false))
+            return $path
+        }
         $script:RequirePendingSha256 = $false
         $script:PendingSha256 = ''
         $script:ConfirmedImpactSha256 = $null
@@ -449,7 +546,7 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         Mock Initialize-ProtectedBackupDirectory { $BackupDir }
         Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';reason='mocked'} }
         try {
-            Invoke-Clean
+            $null = Invoke-Clean
             Should -Invoke Initialize-ProtectedBackupDirectory -Times $expectedMutation -Exactly
             Should -Invoke Invoke-ServiceDisableAction -Times $expectedMutation -Exactly
             $after = Read-StrictPendingJsonFile $path
@@ -515,7 +612,7 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         Mock Initialize-ProtectedBackupDirectory { $BackupDir }
         Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';reason='mocked'} }
         try {
-            Invoke-Clean
+            $null = Invoke-Clean
             Should -Invoke Test-PendingActionEligible -Times 1 -Exactly
             Should -Invoke Test-SelectedPendingActionAuthorized -Times 1 -Exactly
             Should -Invoke Initialize-ProtectedBackupDirectory -Times 1 -Exactly
@@ -524,5 +621,88 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
             $script:PendingFile = $oldPendingFile
             $script:ConfirmedImpactSha256 = $oldImpactDigest
         }
+    }
+
+    It '一项 success 一项 failed 时先写回 pending 再返回 exit code 2' {
+        $path = Write-CleanExitPending 'clean-partial.json' @(
+            (New-CleanExitAction 'SuccessSvc'),
+            (New-CleanExitAction 'FailedSvc')
+        )
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { $BackupDir }
+        Mock Invoke-ServiceDisableAction {
+            if ($Pending.service_name -ceq 'FailedSvc') { return [pscustomobject]@{status='failed';reason='mock failure'} }
+            return [pscustomobject]@{status='success';reason='mock success'}
+        }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 2
+        @($saved.actions | Where-Object status -ceq 'success').Count | Should -Be 1
+        @($saved.actions | Where-Object status -ceq 'failed').Count | Should -Be 1
+    }
+
+    It '全部 success 时写回并返回 exit code 0' {
+        $path = Write-CleanExitPending 'clean-success.json' @(
+            (New-CleanExitAction 'SuccessOne'),
+            (New-CleanExitAction 'SuccessTwo')
+        )
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { $BackupDir }
+        Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';reason='mock success'} }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 0
+        @($saved.actions | Where-Object status -ceq 'success').Count | Should -Be 2
+    }
+
+    It '仅 skipped 和 manual_required 时写回并返回 exit code 0' {
+        $skipped = New-CleanExitAction 'SkippedSvc' 'unknown_action'
+        $manual = New-CleanExitAction 'ManualSvc' 'uninstall'
+        $path = Write-CleanExitPending 'clean-nonfailure.json' @($skipped,$manual)
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { $BackupDir }
+        Mock Invoke-ServiceDisableAction { throw 'service mutation must not run' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 0
+        @($saved.actions | Where-Object status -ceq 'skipped').Count | Should -Be 1
+        @($saved.actions | Where-Object status -ceq 'manual_required').Count | Should -Be 1
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+    }
+
+    It 'cpu-cleaner clean 分支显式使用 Invoke-Clean 返回码退出' {
+        $source = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
+        $branch = [regex]::Match($source, "(?s)'clean'\s*\{(?<body>.*?)\n\s*\}\s*\n\s*'restore'").Groups['body'].Value
+
+        $branch | Should -Not -BeNullOrEmpty
+        $branch | Should -Match '\$cleanExitCode\s*=\s*Invoke-Clean'
+        $branch | Should -Match 'exit\s*\(\[int\]\$cleanExitCode\)'
     }
 }

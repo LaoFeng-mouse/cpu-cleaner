@@ -330,6 +330,43 @@ Invoke-Restore
         Should -Invoke Register-ScheduledTask -Times 1 -Exactly -ParameterFilter { $ErrorAction -eq 'Stop' }
     }
 
+    It '任务恢复按备份的 Disabled 状态显式禁用并回读验证' {
+        $plan = [pscustomobject]@{
+            Type='task';Name='\Vendor\Task';TaskName='Task';TaskPath='\Vendor\'
+            Xml='<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo></Task>'
+            TaskFingerprint='expected'; ExpectedEnabled=$false
+        }
+        Mock Register-ScheduledTask {}
+        Mock Disable-ScheduledTask {}
+        Mock Get-ScheduledTask { [pscustomobject]@{State='Disabled'} }
+        Mock Export-ScheduledTask { '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo></Task>' }
+        Mock Get-TaskDefinitionFingerprint { 'expected' }
+
+        $result = Invoke-RestorePlanAction -Plan $plan
+
+        $result.success | Should -BeTrue
+        Should -Invoke Disable-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq 'Task' -and $TaskPath -eq '\Vendor\' -and $ErrorAction -eq 'Stop' }
+    }
+
+    It '任务恢复原来启用但回读仍 Disabled 时不得报告 success' {
+        $plan = [pscustomobject]@{
+            Type='task';Name='\Vendor\Task';TaskName='Task';TaskPath='\Vendor\'
+            Xml='<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo></Task>'
+            TaskFingerprint='expected'; ExpectedEnabled=$true
+        }
+        Mock Register-ScheduledTask {}
+        Mock Enable-ScheduledTask {}
+        Mock Get-ScheduledTask { [pscustomobject]@{State='Disabled'} }
+        Mock Export-ScheduledTask { '<Task><RegistrationInfo><URI>\Vendor\Task</URI></RegistrationInfo></Task>' }
+        Mock Get-TaskDefinitionFingerprint { 'expected' }
+
+        $result = Invoke-RestorePlanAction -Plan $plan
+
+        $result.success | Should -BeFalse
+        $result.reason | Should -Match 'Enabled.*回读不一致'
+        Should -Invoke Enable-ScheduledTask -Times 1 -Exactly -ParameterFilter { $TaskName -eq 'Task' -and $TaskPath -eq '\Vendor\' -and $ErrorAction -eq 'Stop' }
+    }
+
     It '自启动回读 value type 或完整 data 不一致时失败' {
         $info = [pscustomobject]@{key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run';name='Updater';value_type='ExpandString';value='%TEMP%\updater.exe'}
         $plan = [pscustomobject]@{Type='autostart';Format='single_value';Key=$info.key;Name=$info.name;Info=$info}

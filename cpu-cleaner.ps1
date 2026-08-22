@@ -115,7 +115,8 @@ switch ($Mode) {
             $script:PendingFile = $PendingFileArg
             $script:RequirePendingSha256 = $true
         }
-        Invoke-Clean
+        $cleanExitCode = Invoke-Clean
+        exit ([int]$cleanExitCode)
     }
     'restore' { Invoke-Restore }
     'stop_process' {
