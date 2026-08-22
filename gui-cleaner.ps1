@@ -9,6 +9,9 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:Lang = 'zh'   # zh / en
 $script:MaxGuiPendingJsonDepth = 64
+# Task4 的 manual-impact 摘要必须与管理员 clean 使用同一实现；这里只加载既有 core，不改其逻辑。
+. (Join-Path $script:Root 'src\Core\ProfileEngine.ps1')
+. (Join-Path $script:Root 'src\Core\ActionEngine.ps1')
 # v1.5.3: 测试模式 (SHUSHU_CLEANER_TEST=1) — 跳过单实例检查与窗口显示, 供 CI 无窗口验证 (Pester)
 $script:TestMode = ($env:SHUSHU_CLEANER_TEST -eq '1')
 
@@ -648,6 +651,7 @@ function Get-PendingViewItems {
             matcher_detail    = Format-GuiMatcherDetail $i
             matched_type      = [string]$i.matched_type
             matched_field     = [string]$i.matched_field
+            reviewed_identity_key = Get-PendingIdentityKey $i
             _raw              = $i
         }
     }
@@ -1895,6 +1899,8 @@ function Resolve-GuiReviewedActions {
     foreach ($row in $selectedRows) {
         if ($null -eq $row._raw) { throw '选择项缺少审核身份。未开始处理。' }
         $key = Get-PendingIdentityKey $row._raw
+        $viewIdentityKey = Get-GuiReviewScalarString -Item $row -PropertyName 'reviewed_identity_key' -Context 'selected action'
+        if ($viewIdentityKey -cne $key) { throw '选择项身份与 reviewed 视图不一致。未开始处理。' }
         if (-not $script:ReviewedActionIdentityKeys.Contains($key) -or -not $actionByKey.ContainsKey($key)) {
             throw '选择项不在 reviewed action allowlist 中。未开始处理。'
         }
@@ -1902,6 +1908,50 @@ function Resolve-GuiReviewedActions {
         $resolved += [pscustomobject]@{ _raw = $actionByKey[$key] }
     }
     return @($resolved)
+}
+
+function Confirm-GuiImpactActions {
+    param([Parameter(Mandatory=$true)]$Actions)
+    try {
+        $manualActions = @($Actions)
+        if ($manualActions.Count -eq 0) { return $false }
+        $english = ($script:Lang -ceq 'en')
+        $lines = if ($english) {
+            @('The selected items can affect OEM features.', '')
+        } else {
+            @('以下已选项目可能影响 OEM 附加功能：', '')
+        }
+        foreach ($action in $manualActions) {
+            foreach ($propertyName in @('name_cn','necessity','cleanup_reason_cn','impact_cn')) {
+                $null = Get-GuiReviewScalarString -Item $action -PropertyName $propertyName -Context 'manual confirmation'
+            }
+            if ($english) {
+                $lines += 'Target: ' + $action.name_cn
+                $lines += 'Necessity: ' + $action.necessity
+                $lines += 'Cleanup reason: ' + $action.cleanup_reason_cn
+                $lines += 'Impact: ' + $action.impact_cn
+            } else {
+                $lines += '目标：' + $action.name_cn
+                $lines += '必要性：' + $action.necessity
+                $lines += '清理原因：' + $action.cleanup_reason_cn
+                $lines += '影响：' + $action.impact_cn
+            }
+            $lines += ''
+        }
+        if ($english) {
+            $lines += 'Each action will be backed up first and can be undone through Restore.'
+            $lines += 'Continue with these selected items?'
+            $title = 'Confirm high-impact cleanup'
+        } else {
+            $lines += '每个动作会先备份，可通过恢复撤销。'
+            $lines += '是否继续处理这些已选项目？'
+            $title = '确认高影响清理'
+        }
+        $result = [System.Windows.MessageBox]::Show(($lines -join [Environment]::NewLine), $title, 'YesNo', 'Warning')
+        return ($result -eq [System.Windows.MessageBoxResult]::Yes)
+    } catch {
+        return $false
+    }
 }
 
 function Format-GuiExecutionDetail {
@@ -2127,6 +2177,20 @@ function Start-GuiExecution {
             return $false
         }
 
+        $manualActions = @($checked | ForEach-Object { $_._raw } | Where-Object { $_.execution_class -ceq 'manual_impact' })
+        $confirmedImpactSha256 = $null
+        if ($manualActions.Count -gt 0) {
+            $confirmedImpactSha256 = Get-ManualImpactDigest $manualActions
+            if ($confirmedImpactSha256 -isnot [string] -or $confirmedImpactSha256 -cnotmatch '^[0-9a-f]{64}$') {
+                throw '高影响清理摘要无效。请重新运行 scan 并审核。'
+            }
+            $confirmationCopies = @($manualActions | ForEach-Object { Copy-PendingActionForSubset $_ })
+            if (-not (Confirm-GuiImpactActions -Actions $confirmationCopies)) {
+                $null = Clear-GuiExecutionResources -RemoveTemp
+                return $false
+            }
+        }
+
         $payload = New-PendingSubsetPayload -Checked $checked -SourcePending $script:ReviewedPendingSnapshot
         if (-not $payload) { throw '无法生成 pending 子集。请重新运行 scan 生成新清单。' }
         $payload.observations = @()
@@ -2142,7 +2206,9 @@ function Start-GuiExecution {
         }
         $window.FindName('ExecutionList').ItemsSource = @(ConvertTo-GuiExecutionRows $runningItems)
 
-        $script:ExecutionProcess = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll','-PendingFileArg',"`"$script:ExecutionTempPath`"",'-PendingSha256Arg',$pendingSha256
+        $cleanArguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll','-PendingFileArg',"`"$script:ExecutionTempPath`"",'-PendingSha256Arg',$pendingSha256)
+        if ($null -ne $confirmedImpactSha256) { $cleanArguments += @('-ConfirmedImpactSha256Arg',$confirmedImpactSha256) }
+        $script:ExecutionProcess = Start-Process powershell -Verb RunAs -PassThru -ArgumentList $cleanArguments
         if ($null -eq $script:ExecutionProcess) { throw '管理员进程未启动。' }
         $startedProcess = $true
         $script:ExecutionLifecycle = 'running'

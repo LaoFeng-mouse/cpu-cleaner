@@ -1129,6 +1129,33 @@ Describe '勾选视图 (v1.5.5)' {
             return [pscustomobject]@{ Pending=$pending; List=$list }
         }
 
+        function Set-GuiReviewedImpactExecutionFixture {
+            param([switch]$SelectAutomatic, [switch]$SelectSecondManual)
+            Set-GuiState review -Force
+            $pending = New-GuiReviewPendingFixture
+            $manualOne = $pending.actions[0].PSObject.Copy()
+            $manualOne.id = 'manual-one'; $manualOne.name_cn = '手动目标一'; $manualOne.service_name = 'ManualOne'
+            $manualOne.matched_pattern = 'ManualOne'; $manualOne.matched_type = 'exact'
+            $manualOne.execution_class = 'manual_impact'; $manualOne.necessity = 'optional'; $manualOne.default_selected = $false; $manualOne.requires_confirmation = $true
+            $manualOne.cleanup_reason_cn = '停止不用的 OEM 功能以减少后台'; $manualOne.impact_cn = '可能影响 OEM 附加功能'
+            $manualTwo = $manualOne.PSObject.Copy()
+            $manualTwo.id = 'manual-two'; $manualTwo.name_cn = '手动目标二'; $manualTwo.service_name = 'ManualTwo'
+            $manualTwo.matched_pattern = 'ManualTwo'
+            $pending.actions = @($pending.actions[0], $manualOne, $manualTwo)
+            $script:ReviewedPendingSnapshot = $pending
+            $keys = [System.Collections.Generic.List[string]]::new()
+            foreach ($key in @(Get-GuiValidatedActionIdentityKeys -Pending $pending)) { $keys.Add($key) }
+            $script:ReviewedActionIdentityKeys = $keys.AsReadOnly()
+            $list = $script:Win.FindName('PendingList')
+            $list.ItemsSource = $null
+            $list.Items.Clear()
+            foreach ($item in @(Get-PendingViewItems -Pending $pending)) { [void]$list.Items.Add($item) }
+            $list.Items[0].IsChecked = [bool]$SelectAutomatic
+            $list.Items[1].IsChecked = $true
+            $list.Items[2].IsChecked = [bool]$SelectSecondManual
+            return [pscustomobject]@{ Pending=$pending; List=$list; ManualOne=$manualOne; ManualTwo=$manualTwo }
+        }
+
         function New-ExecutionFakeTimer {
             $timer = [pscustomobject]@{ Stopped=$false; Started=$false; TickHandler=$null; Interval=$null }
             $timer | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.Stopped = $true }
@@ -2601,6 +2628,185 @@ Describe '勾选视图 (v1.5.5)' {
             $passedHash | Should -Match '^[0-9a-fA-F]{64}$'
             $expectedHash = (Get-FileHash -LiteralPath $script:ExecutionTempPath -Algorithm SHA256).Hash
             $passedHash | Should -BeExactly $expectedHash
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It '高影响确认返回 No 或关闭时不写 subset、不启动管理员进程且保留 reviewed snapshot' -TestCases @(
+        @{ Response=$false }
+        @{ Response=$null }
+    ) {
+        param($Response)
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('impact-no-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedImpactExecutionFixture
+            $snapshot = $script:ReviewedPendingSnapshot
+            $identityKeys = $script:ReviewedActionIdentityKeys
+            Mock Confirm-GuiImpactActions { return $Response }
+            Mock Start-Process { throw 'administrator clean must not start' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeFalse
+
+            Assert-MockCalled Confirm-GuiImpactActions -Times 1 -Exactly
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
+            $script:ReviewedPendingSnapshot | Should -Be $snapshot
+            $script:ReviewedActionIdentityKeys | Should -Be $identityKeys
+            $script:GuiState | Should -Be 'review'
+            $script:ExecutionLifecycle | Should -Be 'idle'
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It '确认高影响 action 后仅将 manual digest 与 subset SHA-256 传给管理员 clean' {
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('impact-yes-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedImpactExecutionFixture
+            $script:CapturedExecutionArguments = $null
+            $script:ConfirmedImpactActions = $null
+            Mock Confirm-GuiImpactActions { param($Actions); $script:ConfirmedImpactActions = @($Actions); return $true }
+            Mock Start-Process { $script:CapturedExecutionArguments = @($ArgumentList); return [pscustomobject]@{ HasExited=$false; ExitCode=0 } }
+            Mock New-Object { return (New-ExecutionFakeTimer) } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeTrue
+
+            @($script:ConfirmedImpactActions).Count | Should -Be 1
+            $script:ConfirmedImpactActions[0].service_name | Should -BeExactly 'ManualOne'
+            $impactIndex = [array]::IndexOf($script:CapturedExecutionArguments, '-ConfirmedImpactSha256Arg')
+            $impactIndex | Should -BeGreaterOrEqual 0
+            $script:CapturedExecutionArguments[$impactIndex + 1] | Should -BeExactly (Get-ManualImpactDigest @($fixture.ManualOne))
+            $pendingIndex = [array]::IndexOf($script:CapturedExecutionArguments, '-PendingSha256Arg')
+            $pendingIndex | Should -BeGreaterOrEqual 0
+            $script:CapturedExecutionArguments[$pendingIndex + 1] | Should -BeExactly (Get-FileHash -LiteralPath $script:ExecutionTempPath -Algorithm SHA256).Hash
+            $payload = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            @($payload.actions).Count | Should -Be 1
+            $payload.actions[0].service_name | Should -BeExactly 'ManualOne'
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It 'automatic-only 不弹高影响确认且不传 impact digest' {
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('impact-auto-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedExecutionFixture
+            $script:CapturedExecutionArguments = $null
+            Mock Confirm-GuiImpactActions { throw 'automatic-only must not ask' }
+            Mock Start-Process { $script:CapturedExecutionArguments = @($ArgumentList); return [pscustomobject]@{ HasExited=$false; ExitCode=0 } }
+            Mock New-Object { return (New-ExecutionFakeTimer) } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeTrue
+
+            Assert-MockCalled Confirm-GuiImpactActions -Times 0 -Exactly
+            [array]::IndexOf($script:CapturedExecutionArguments, '-ConfirmedImpactSha256Arg') | Should -Be -1
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It 'mixed selection confirms only manual identities while launching the complete selected subset' {
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('impact-mixed-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedImpactExecutionFixture -SelectAutomatic
+            $script:ConfirmedImpactActions = $null
+            Mock Confirm-GuiImpactActions { param($Actions); $script:ConfirmedImpactActions = @($Actions); return $true }
+            Mock Start-Process { return [pscustomobject]@{ HasExited=$false; ExitCode=0 } }
+            Mock New-Object { return (New-ExecutionFakeTimer) } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeTrue
+
+            @($script:ConfirmedImpactActions).Count | Should -Be 1
+            $script:ConfirmedImpactActions[0].service_name | Should -BeExactly 'ManualOne'
+            $payload = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            @($payload.actions).Count | Should -Be 2
+            @($payload.actions | ForEach-Object service_name) | Should -Be @('ActionService','ManualOne')
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It '多个手动 action 的确认摘要与选择顺序无关' {
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('impact-order-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedImpactExecutionFixture -SelectSecondManual
+            $fixture.List.Items[1].IsChecked = $false
+            $fixture.List.Items[2].IsChecked = $true
+            $fixture.List.Items[1].IsChecked = $true
+            $script:CapturedExecutionArguments = $null
+            Mock Confirm-GuiImpactActions { return $true }
+            Mock Start-Process { $script:CapturedExecutionArguments = @($ArgumentList); return [pscustomobject]@{ HasExited=$false; ExitCode=0 } }
+            Mock New-Object { return (New-ExecutionFakeTimer) } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeTrue
+
+            $impactIndex = [array]::IndexOf($script:CapturedExecutionArguments, '-ConfirmedImpactSha256Arg')
+            $script:CapturedExecutionArguments[$impactIndex + 1] | Should -BeExactly (Get-ManualImpactDigest @($fixture.ManualTwo, $fixture.ManualOne))
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It '高影响确认 wrapper 异常、reviewed identity 篡改或 manual 字段漂移均失败关闭' -TestCases @(
+        @{ Case='wrapper'; Field=$null }
+        @{ Case='identity'; Field=$null }
+        @{ Case='drift'; Field='impact_cn' }
+    ) {
+        param($Case, $Field)
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ("impact-fail-$Case-" + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedImpactExecutionFixture
+            if ($Case -eq 'identity') { $fixture.List.Items[1]._raw = $fixture.ManualTwo }
+            if ($Case -eq 'drift') { $fixture.ManualOne.$Field = ' ' }
+            Mock Confirm-GuiImpactActions { if ($Case -eq 'wrapper') { throw 'confirmation failed' }; return $true }
+            Mock Start-Process { throw 'administrator clean must not start' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeFalse
+
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
+            $script:ExecutionLifecycle | Should -Be 'idle'
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It '确认 callback 不得改变 reviewed 原始 manual action 或最终 subset' {
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('impact-immutable-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedImpactExecutionFixture
+            Mock Confirm-GuiImpactActions { param($Actions); $Actions[0].service_name = 'MutatedByConfirmation'; return $true }
+            Mock Start-Process { return [pscustomobject]@{ HasExited=$false; ExitCode=0 } }
+            Mock New-Object { return (New-ExecutionFakeTimer) } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeTrue
+
+            $fixture.ManualOne.service_name | Should -BeExactly 'ManualOne'
+            $script:ReviewedPendingSnapshot.actions[1].service_name | Should -BeExactly 'ManualOne'
+            $payload = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $payload.actions[0].service_name | Should -BeExactly 'ManualOne'
         } finally {
             $env:TEMP = $oldTemp
         }
