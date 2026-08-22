@@ -624,7 +624,7 @@ function Get-PendingViewItems {
     $view = @()
     foreach ($i in @($p.actions | Where-Object { $_ -and $_.status -cin @('pending','failed') })) {
         $d = Get-RuleDisplay $map[$i.id]
-        $presentation = Get-GuiReviewPresentation -Branch actions -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn
+        $presentation = Get-GuiReviewPresentation -Branch actions -Name $i.name_cn -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn
         $view += [pscustomobject]@{
             IsChecked         = $presentation.IsChecked
             CanExecute        = $presentation.CanExecute
@@ -632,6 +632,8 @@ function Get-PendingViewItems {
             GroupKey          = $presentation.GroupKey
             GroupLabel        = $presentation.GroupLabel
             StatusLabel       = $presentation.StatusLabel
+            StatusForeground  = $presentation.StatusForeground
+            AutomationName    = $presentation.AutomationName
             NecessityLabel    = $presentation.NecessityLabel
             ImpactText        = $presentation.ImpactText
             CleanupReasonText = $presentation.CleanupReasonText
@@ -651,7 +653,7 @@ function Get-PendingViewItems {
     }
     foreach ($i in @($p.resolved)) {
         $d = Get-RuleDisplay $map[$i.id]
-        $presentation = Get-GuiReviewPresentation -Branch resolved -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn -CurrentState $i.current_state
+        $presentation = Get-GuiReviewPresentation -Branch resolved -Name $i.name_cn -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn -CurrentState $i.current_state
         $view += [pscustomobject]@{
             IsChecked         = $presentation.IsChecked
             CanExecute        = $presentation.CanExecute
@@ -659,6 +661,8 @@ function Get-PendingViewItems {
             GroupKey          = $presentation.GroupKey
             GroupLabel        = $presentation.GroupLabel
             StatusLabel       = $presentation.StatusLabel
+            StatusForeground  = $presentation.StatusForeground
+            AutomationName    = $presentation.AutomationName
             NecessityLabel    = $presentation.NecessityLabel
             ImpactText        = $presentation.ImpactText
             CleanupReasonText = $presentation.CleanupReasonText
@@ -678,7 +682,7 @@ function Get-PendingViewItems {
     }
     foreach ($i in @($p.observations)) {
         $d = Get-RuleDisplay $map[$i.id]
-        $presentation = Get-GuiReviewPresentation -Branch observations -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn
+        $presentation = Get-GuiReviewPresentation -Branch observations -Name $i.name_cn -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn
         $view += [pscustomobject]@{
             IsChecked         = $presentation.IsChecked
             CanExecute        = $presentation.CanExecute
@@ -686,6 +690,8 @@ function Get-PendingViewItems {
             GroupKey          = $presentation.GroupKey
             GroupLabel        = $presentation.GroupLabel
             StatusLabel       = $presentation.StatusLabel
+            StatusForeground  = $presentation.StatusForeground
+            AutomationName    = $presentation.AutomationName
             NecessityLabel    = $presentation.NecessityLabel
             ImpactText        = $presentation.ImpactText
             CleanupReasonText = $presentation.CleanupReasonText
@@ -1091,6 +1097,7 @@ function Set-AllChecked($list, $value) {
             $it.IsChecked = $false
         }
     }
+    if ($null -ne $list.Items.PSObject.Methods['Refresh']) { $list.Items.Refresh() }
 }
 
 # v1.5.5: 把勾选子集临时文件的处理结果状态合并回主 pending_actions.json
@@ -1606,12 +1613,10 @@ if ($legacyBtnLoadPending) { $legacyBtnLoadPending.Add_Click({
 # v1.5.5: 全选 / 清空 勾选 (v1.5.6: 全选跳过观察项 CanExecute=false)
 $window.FindName('BtnSelectAll').Add_Click({
     Set-AllChecked $window.FindName('PendingList') $true
-    $window.FindName('PendingList').Items.Refresh()
     Update-GuiExecuteAvailability
 })
 $window.FindName('BtnClearAll').Add_Click({
     Set-AllChecked $window.FindName('PendingList') $false
-    $window.FindName('PendingList').Items.Refresh()
     Update-GuiExecuteAvailability
 })
 

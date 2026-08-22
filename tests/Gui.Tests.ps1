@@ -1053,6 +1053,61 @@ Describe '勾选视图 (v1.5.5)' {
             }
         }
 
+        function New-GuiFourGroupPendingFixture {
+            $pending = New-GuiReviewPendingFixture
+            $manual = $pending.actions[0].PSObject.Copy()
+            $manual.id = 'manual-row'; $manual.service_name = 'ManualService'; $manual.name_cn = '需确认分支'
+            $manual.execution_class = 'manual_impact'; $manual.necessity = 'optional'; $manual.default_selected = $false; $manual.requires_confirmation = $true
+            $manual.impact_cn = '可能影响 OEM 安全状态'; $manual.cleanup_reason_cn = '不使用该功能时可减少后台'
+            $resolved = $pending.actions[0].PSObject.Copy()
+            $resolved.id = 'resolved-row'; $resolved.service_name = 'ResolvedService'; $resolved.name_cn = '已处理分支'; $resolved.status = 'success'
+            $resolved | Add-Member -NotePropertyName current_state -NotePropertyValue 'disabled'
+            $pending.actions = @($pending.actions[0], $manual)
+            $pending.resolved = @($resolved)
+            return $pending
+        }
+
+        function Get-GuiVisualDescendants {
+            param([Parameter(Mandatory=$true)]$Root, [Parameter(Mandatory=$true)][Type]$Type)
+            for ($index = 0; $index -lt [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Root); $index++) {
+                $child = [System.Windows.Media.VisualTreeHelper]::GetChild($Root, $index)
+                if ($Type.IsInstanceOfType($child)) { $child }
+                Get-GuiVisualDescendants -Root $child -Type $Type
+            }
+        }
+
+        function Show-GuiReviewBindingFixture {
+            param([Parameter(Mandatory=$true)]$Items)
+            $list = $script:Win.FindName('PendingList')
+            [System.Windows.Controls.VirtualizingStackPanel]::SetIsVirtualizing($list, $false)
+            $list.ItemsSource = $Items
+            Set-GuiState review -Force
+            $script:Win.WindowStartupLocation = 'Manual'
+            $script:Win.Left = -30000
+            $script:Win.Top = -30000
+            $script:Win.ShowActivated = $false
+            $script:Win.ShowInTaskbar = $false
+            if (-not $script:Win.IsVisible) { $script:Win.Show() }
+            $script:Win.UpdateLayout()
+            $list.UpdateLayout()
+            return $list
+        }
+
+        function Get-GuiBoundControl {
+            param(
+                [Parameter(Mandatory=$true)]$List,
+                [Parameter(Mandatory=$true)]$Item,
+                [Parameter(Mandatory=$true)][Type]$Type,
+                [string]$Text = ''
+            )
+            $container = $List.ItemContainerGenerator.ContainerFromItem($Item)
+            if ($null -eq $container) { return $null }
+            return @(Get-GuiVisualDescendants -Root $container -Type $Type | Where-Object {
+                [object]::ReferenceEquals($_.DataContext, $Item) -and
+                ([string]::IsNullOrEmpty($Text) -or $_.Text -ceq $Text)
+            } | Select-Object -Last 1)[0]
+        }
+
         function Invoke-GuiOpenReviewClick {
             $script:Win.FindName('BtnOpenReview').RaiseEvent(
                 [System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)
@@ -1436,6 +1491,81 @@ Describe '勾选视图 (v1.5.5)' {
         (Get-GuiReviewCounts $items).observation | Should -Be 1
         Update-GuiReviewCounts -Items $items
         $script:Win.FindName('ReviewCountsText').Text | Should -Be '安全自动 1 项 · 需确认 1 项 · 已处理 1 项 · 仅观察 1 项'
+    }
+
+    It 'synchronizes safe-select and clear through real STA WPF checkbox bindings without losing selection or identity' {
+        $items = @(Get-PendingViewItems -Pending (New-GuiFourGroupPendingFixture))
+        $list = Show-GuiReviewBindingFixture -Items $items
+        $manual = @($items | Where-Object GroupKey -ceq 'manual')[0]
+        $automatic = @($items | Where-Object GroupKey -ceq 'automatic')[0]
+        $list.SelectedItem = $manual
+
+        try {
+            $manualBox = Get-GuiBoundControl -List $list -Item $manual -Type ([System.Windows.Controls.CheckBox])
+            $manualBox | Should -Not -BeNullOrEmpty
+            $manualBox.IsChecked = $true
+            $manual.IsChecked | Should -BeTrue
+
+            Set-AllChecked $list $true
+            $list.UpdateLayout()
+            foreach ($item in $items) {
+                $box = Get-GuiBoundControl -List $list -Item $item -Type ([System.Windows.Controls.CheckBox])
+                $box | Should -Not -BeNullOrEmpty -Because "a rendered checkbox must exist for $($item.GroupKey)"
+                $box.IsChecked | Should -Be ([bool]$item.IsChecked) -Because "visible $($item.GroupKey) selection must match its model"
+            }
+            $automatic.IsChecked | Should -BeTrue
+            $manual.IsChecked | Should -BeFalse
+            [object]::ReferenceEquals($list.SelectedItem, $manual) | Should -BeTrue
+            for ($index = 0; $index -lt $items.Count; $index++) {
+                [object]::ReferenceEquals($list.Items[$index], $items[$index]) | Should -BeTrue
+            }
+
+            Set-AllChecked $list $false
+            $list.UpdateLayout()
+            foreach ($item in $items) {
+                $box = Get-GuiBoundControl -List $list -Item $item -Type ([System.Windows.Controls.CheckBox])
+                $item.IsChecked | Should -BeFalse
+                $box.IsChecked | Should -BeFalse -Because "clear must update the visible $($item.GroupKey) checkbox"
+            }
+            [object]::ReferenceEquals($list.SelectedItem, $manual) | Should -BeTrue
+        } finally {
+            $script:Win.Hide()
+        }
+    }
+
+    It 'renders group-specific status colors and stable descriptive checkbox automation names' {
+        $items = @(Get-PendingViewItems -Pending (New-GuiFourGroupPendingFixture))
+        $list = Show-GuiReviewBindingFixture -Items $items
+        $expectedColors = @{
+            automatic='#FF3E6F55'; manual='#FFA05A00'; resolved='#FF2F7D44'; observation='#FF6E675D'
+        }
+        $namesBefore = @{}
+
+        try {
+            foreach ($item in $items) {
+                $status = Get-GuiBoundControl -List $list -Item $item -Type ([System.Windows.Controls.TextBlock]) -Text $item.StatusLabel
+                $status.Foreground.ToString() | Should -Be $expectedColors[$item.GroupKey]
+                $box = Get-GuiBoundControl -List $list -Item $item -Type ([System.Windows.Controls.CheckBox])
+                $automationName = [System.Windows.Automation.AutomationProperties]::GetName($box)
+                $automationName | Should -Match ([regex]::Escape($item.name_cn))
+                $automationName | Should -Match ([regex]::Escape($item.GroupLabel))
+                $automationName | Should -Match ([regex]::Escape($item.NecessityLabel))
+                $automationName | Should -Match ([regex]::Escape($item.StatusLabel))
+                $namesBefore[$item.GroupKey] = $automationName
+            }
+
+            $script:Lang = 'en'
+            Apply-Language
+            $list.UpdateLayout()
+            foreach ($item in $items) {
+                $box = Get-GuiBoundControl -List $list -Item $item -Type ([System.Windows.Controls.CheckBox])
+                [System.Windows.Automation.AutomationProperties]::GetName($box) | Should -Be $namesBefore[$item.GroupKey]
+            }
+        } finally {
+            $script:Lang = 'zh'
+            Apply-Language
+            $script:Win.Hide()
+        }
     }
 
     It 'fails closed for missing or malformed review policy fields and never promotes them to executable rows' {

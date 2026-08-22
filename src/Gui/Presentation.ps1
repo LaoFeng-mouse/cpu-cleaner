@@ -46,6 +46,7 @@ function Get-GuiItemSummary {
 function Get-GuiReviewPresentation {
     param(
         [Parameter(Mandatory=$true)][ValidateSet('actions','resolved','observations')][string]$Branch,
+        [Parameter(Mandatory=$true)][string]$Name,
         [Parameter(Mandatory=$true)][string]$ExecutionClass,
         [Parameter(Mandatory=$true)][string]$Necessity,
         [Parameter(Mandatory=$true)][string]$ImpactCn,
@@ -65,14 +66,23 @@ function Get-GuiReviewPresentation {
         'resolved'    { '已处理' }
         default       { '仅观察' }
     }
+    $statusLabel = if ($groupKey -eq 'resolved') { '已处理' } elseif ($groupKey -eq 'observation') { '仅观察' } elseif ($groupKey -eq 'manual') { '需确认' } else { '可执行' }
+    $necessityLabel = '必要性：{0}' -f $Necessity
     return [pscustomobject]@{
         GroupKey           = $groupKey
         GroupLabel         = $groupLabel
         CanExecute         = ($groupKey -in @('automatic','manual'))
         IsChecked          = ($groupKey -eq 'automatic')
         NeedsConfirmation  = ($groupKey -eq 'manual')
-        StatusLabel        = if ($groupKey -eq 'resolved') { '已处理' } elseif ($groupKey -eq 'observation') { '仅观察' } elseif ($groupKey -eq 'manual') { '需确认' } else { '可执行' }
-        NecessityLabel     = '必要性：{0}' -f $Necessity
+        StatusLabel        = $statusLabel
+        StatusForeground   = switch ($groupKey) {
+            'automatic'   { '#FF3E6F55' }
+            'manual'      { '#FFA05A00' }
+            'resolved'    { '#FF2F7D44' }
+            default       { '#FF6E675D' }
+        }
+        NecessityLabel     = $necessityLabel
+        AutomationName    = '{0}；{1}；{2}；{3}' -f $Name, $groupLabel, $necessityLabel, $statusLabel
         ImpactText         = '影响：{0}' -f $ImpactCn
         CleanupReasonText  = '清理原因：{0}' -f $CleanupReasonCn
         CurrentStateLabel  = if ($groupKey -eq 'resolved') { '当前状态：{0}' -f $CurrentState } else { '' }
