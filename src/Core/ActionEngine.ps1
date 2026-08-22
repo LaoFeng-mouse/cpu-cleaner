@@ -1016,6 +1016,36 @@ function Get-PendingIdentityKey($Item) {
     return ConvertTo-Json -InputObject $identity -Compress -Depth 4
 }
 
+function ConvertTo-PendingTargetIdentityValue($Value) {
+    if ($null -eq $Value) { return '' }
+    if ($Value -is [string]) { return $Value.Trim().ToUpperInvariant() }
+    return [Convert]::ToString($Value, [System.Globalization.CultureInfo]::InvariantCulture).ToUpperInvariant()
+}
+
+function Get-PendingExecutableTargetIdentityKey($Item) {
+    $hitType = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'hit_type')
+    $identity = [ordered]@{ hit_type = $hitType }
+    switch -CaseSensitive ($hitType) {
+        'SERVICE' {
+            $identity.service_name = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'service_name')
+        }
+        'TASK' {
+            $identity.task_path = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'task_path')
+        }
+        'AUTOSTART' {
+            $identity.autostart_source = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'autostart_source')
+            $identity.autostart_name = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'autostart_name')
+            $identity.autostart_value = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'autostart_value')
+        }
+        'PROCESS' {
+            $identity.process_name = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_name')
+            $identity.process_id = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_id')
+            $identity.process_path = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_path')
+        }
+    }
+    return ConvertTo-Json -InputObject $identity -Compress -Depth 4
+}
+
 function Get-PendingHitProperty($Hit, [string]$Name) {
     if ($null -eq $Hit -or $Hit.PSObject.Properties.Name -notcontains $Name) { return $null }
     return $Hit.$Name
@@ -1140,8 +1170,9 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
     $actions = @()
     $resolved = @()
     $observations = @()
-    $seenExecutableIds = @{}
-    $seenObservationIds = @{}
+    $seenObservationIds = [hashtable]::new([System.StringComparer]::Ordinal)
+    $executableGroups = [hashtable]::new([System.StringComparer]::Ordinal)
+    $executableTargetOrder = @()
     foreach ($h in $Hits) {
         # v1.5.6 数据模型: actions(可执行) / observations(仅观察) 分流
         # 可执行 = 危险动作 + Boolean true safe/tested + 窄匹配证据; 其余一律进 observations
@@ -1175,8 +1206,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             ($null -ne $displayPolicy) -and
             $categoryComplete
 
-        # 精确可执行命中和 observations 分开去重，防止宽匹配观察压制同目标的窄匹配动作。
-        # actions 与 resolved 共享 identity，确保同一精确目标绝不同时进入两支。
+        # observations 保持 rule/action/provenance 身份，防止宽匹配观察压制同目标的窄匹配动作。
         $dedupeKey = Get-PendingIdentityKey $h
 
         if (-not $executable) {
@@ -1198,14 +1228,46 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             continue
         }
 
-        $resolvedState = Get-PendingResolvedTargetState $h
-        if ($seenExecutableIds.ContainsKey($dedupeKey)) { continue }
-        $seenExecutableIds[$dedupeKey] = $true
+        # 可执行候选按实际系统目标分组，不使用 rule/action/provenance。
+        # 后续每个目标只读取一次状态，并只可能写入 actions 或 resolved 其中之一。
+        $targetKey = Get-PendingExecutableTargetIdentityKey $h
+        if (-not $executableGroups.ContainsKey($targetKey)) {
+            $executableGroups[$targetKey] = New-Object System.Collections.ArrayList
+            $executableTargetOrder += $targetKey
+        }
+        $null = $executableGroups[$targetKey].Add([pscustomobject]@{ Hit=$h; Policy=$displayPolicy })
+    }
+
+    foreach ($targetKey in $executableTargetOrder) {
+        $candidates = @($executableGroups[$targetKey])
+        $actionsForTarget = [hashtable]::new([System.StringComparer]::Ordinal)
+        foreach ($candidate in $candidates) { $actionsForTarget[[string]$candidate.Hit.action] = $true }
+
+        if ($actionsForTarget.Count -gt 1) {
+            foreach ($candidate in $candidates) {
+                $observationKey = Get-PendingIdentityKey $candidate.Hit
+                if ($seenObservationIds.ContainsKey($observationKey)) { continue }
+                $seenObservationIds[$observationKey] = $true
+                $observation = New-PendingPersistedHit $candidate.Hit (Get-FailClosedObservationPolicy $candidate.Hit)
+                $observation | Add-Member -NotePropertyName obs_reason -NotePropertyValue '同一目标存在冲突动作，禁止自动处理'
+                $observations += $observation
+            }
+            continue
+        }
+
+        # 同动作的 policy 冲突优先更严格的 manual_impact；同等级保持扫描顺序稳定。
+        $selected = $null
+        foreach ($candidate in $candidates) {
+            if ($candidate.Policy.execution_class -ceq 'manual_impact') { $selected = $candidate; break }
+        }
+        if ($null -eq $selected) { $selected = $candidates[0] }
+
+        $resolvedState = Get-PendingResolvedTargetState $selected.Hit
         if ($null -ne $resolvedState) {
-            $resolved += New-PendingPersistedHit $h $displayPolicy 'success' $resolvedState
+            $resolved += New-PendingPersistedHit $selected.Hit $selected.Policy 'success' $resolvedState
         } else {
             # v1.2 状态机: pending / success / failed / skipped / manual_required
-            $actions += New-PendingPersistedHit $h $displayPolicy 'pending'
+            $actions += New-PendingPersistedHit $selected.Hit $selected.Policy 'pending'
         }
     }
 

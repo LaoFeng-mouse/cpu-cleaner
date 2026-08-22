@@ -865,6 +865,129 @@ Invoke-Clean
         $p.observations[0].matched_type | Should -BeExactly 'contains'
     }
 
+    It 'deduplicates different service rules and matcher provenance by the actual service target' {
+        Mock Get-Service { [pscustomobject]@{ Name='SharedSvc'; StartType='Automatic'; Status='Running' } } -ParameterFilter { $Name -eq 'SharedSvc' }
+        $byName = New-Schema3PolicyHit -Id 'service-by-name' -Action 'disable_service' -HitType 'service' -ServiceName 'SharedSvc' -ServiceDisplayName 'Shared Service' -MatchedPattern 'SharedSvc' -MatchedField 'service_name'
+        $byDisplay = New-Schema3PolicyHit -Id 'service-by-display' -Action 'disable_service' -HitType 'service' -ServiceName 'sharedsvc' -ServiceDisplayName 'Shared Service' -MatchedPattern 'Shared Service' -MatchedField 'service_display_name'
+
+        Save-PendingActions -Hits @($byName, $byDisplay) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        (@($p.actions).Count + @($p.resolved).Count) | Should -Be 1
+    }
+
+    It 'deduplicates different task rules by the same complete task path' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName='SharedTask'; TaskPath='\Vendor\'; State='Ready' } } -ParameterFilter { $TaskName -eq 'SharedTask' -and $TaskPath -eq '\Vendor\' }
+        $byName = New-Schema3PolicyHit -Id 'task-by-name' -Action 'disable_task' -HitType 'task' -TaskPath '\Vendor\SharedTask' -MatchedPattern 'SharedTask' -MatchedField 'task_name'
+        $byPath = New-Schema3PolicyHit -Id 'task-by-path' -Action 'disable_task' -HitType 'task' -TaskPath '\vendor\sharedtask' -MatchedPattern '\vendor\sharedtask' -MatchedField 'task_path'
+
+        Save-PendingActions -Hits @($byName, $byPath) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        (@($p.actions).Count + @($p.resolved).Count) | Should -Be 1
+    }
+
+    It 'reads target state once so duplicate service hits cannot split across action and resolved' {
+        $script:SharedServiceReadCount = 0
+        Mock Get-Service {
+            $script:SharedServiceReadCount++
+            if ($script:SharedServiceReadCount -eq 1) {
+                return [pscustomobject]@{ Name='SharedSvc'; StartType='Automatic'; Status='Running' }
+            }
+            return [pscustomobject]@{ Name='SharedSvc'; StartType='Disabled'; Status='Stopped' }
+        } -ParameterFilter { $Name -eq 'SharedSvc' }
+        $first = New-Schema3PolicyHit -Id 'state-first' -Action 'disable_service' -HitType 'service' -ServiceName 'SharedSvc' -MatchedPattern 'SharedSvc' -MatchedField 'service_name'
+        $second = New-Schema3PolicyHit -Id 'state-second' -Action 'disable_service' -HitType 'service' -ServiceName 'SharedSvc' -MatchedPattern 'Shared Service' -MatchedField 'service_display_name' -ServiceDisplayName 'Shared Service'
+
+        Save-PendingActions -Hits @($first, $second) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 1
+        @($p.resolved).Count | Should -Be 0
+        Assert-MockCalled Get-Service -Times 1 -Exactly -ParameterFilter { $Name -eq 'SharedSvc' }
+    }
+
+    It 'prefers manual_impact over automatic_safe when the same target and action conflict' {
+        Mock Get-Service { [pscustomobject]@{ Name='SharedSvc'; StartType='Automatic'; Status='Running' } } -ParameterFilter { $Name -eq 'SharedSvc' }
+        $automatic = New-Schema3PolicyHit -Id 'automatic-rule' -Action 'disable_service' -HitType 'service' -ServiceName 'SharedSvc' -MatchedPattern 'SharedSvc' -MatchedField 'service_name'
+        $manual = New-Schema3PolicyHit -Id 'manual-rule' -Action 'disable_service' -HitType 'service' -ServiceName 'SharedSvc' -MatchedPattern 'Shared Service' -MatchedField 'service_display_name' -ServiceDisplayName 'Shared Service' -ExecutionClass 'manual_impact' -DefaultSelected $false -RequiresConfirmation $true
+
+        Save-PendingActions -Hits @($automatic, $manual) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 1
+        @($p.resolved).Count | Should -Be 0
+        $p.actions[0].id | Should -BeExactly 'manual-rule'
+        $p.actions[0].execution_class | Should -BeExactly 'manual_impact'
+        $p.actions[0].default_selected | Should -BeFalse
+        $p.actions[0].requires_confirmation | Should -BeTrue
+    }
+
+    It 'downgrades conflicting executable actions for the same target to observations' {
+        Mock Get-Service { throw 'conflicting executable actions must not read target state' }
+        $disable = New-Schema3PolicyHit -Id 'disable-rule' -Action 'disable_service' -HitType 'service' -ServiceName 'SharedSvc' -MatchedPattern 'SharedSvc' -MatchedField 'service_name'
+        $uninstall = New-Schema3PolicyHit -Id 'uninstall-rule' -Action 'uninstall' -HitType 'service' -ServiceName 'SharedSvc' -MatchedPattern 'Shared Service' -MatchedField 'service_display_name' -ServiceDisplayName 'Shared Service'
+
+        Save-PendingActions -Hits @($disable, $uninstall) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.resolved).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 2
+        @($p.observations.obs_reason | Select-Object -Unique) | Should -Be @('同一目标存在冲突动作，禁止自动处理')
+        Assert-MockCalled Get-Service -Times 0 -Exactly
+    }
+
+    It 'keeps exact executable and broad observation separate for the same actual target' {
+        Mock Get-Service { [pscustomobject]@{ Name='SharedSvc'; StartType='Automatic'; Status='Running' } } -ParameterFilter { $Name -eq 'SharedSvc' }
+        $exact = New-Schema3PolicyHit -Id 'exact-rule' -Action 'disable_service' -HitType 'service' -ServiceName 'SharedSvc' -MatchedPattern 'SharedSvc' -MatchedField 'service_name'
+        $broad = $exact.PSObject.Copy()
+        $broad.id = 'broad-rule'
+        $broad.matched_pattern = 'Shared'
+        $broad.matched_type = 'contains'
+
+        Save-PendingActions -Hits @($broad, $exact) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 1
+        @($p.resolved).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].id | Should -BeExactly 'broad-rule'
+    }
+
+    It 'does not deduplicate different service targets' {
+        Mock Get-Service { [pscustomobject]@{ Name=$Name; StartType='Automatic'; Status='Running' } } -ParameterFilter { $Name -in @('ServiceA','ServiceB') }
+        $first = New-Schema3PolicyHit -Id 'same-rule' -Action 'disable_service' -HitType 'service' -ServiceName 'ServiceA' -MatchedPattern 'ServiceA' -MatchedField 'service_name'
+        $second = New-Schema3PolicyHit -Id 'same-rule' -Action 'disable_service' -HitType 'service' -ServiceName 'ServiceB' -MatchedPattern 'ServiceB' -MatchedField 'service_name'
+
+        Save-PendingActions -Hits @($first, $second) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 2
+        @($p.actions.service_name) | Should -Contain 'ServiceA'
+        @($p.actions.service_name) | Should -Contain 'ServiceB'
+    }
+
+    It 'preserves autostart value identity when source and name are the same' {
+        $first = [pscustomobject]@{
+            id='autostart-value'; vendor='T'; name_cn='Auto'; action='remove_autostart'; hit_type='autostart'; detail='X'; reason_cn='r'
+            service_name=''; autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='X'; autostart_value='C:\Apps\first.exe'
+            task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }
+            matched_pattern='C:\Apps'; matched_type='path'; matched_field='autostart_value'
+        }
+        $second = $first.PSObject.Copy()
+        $second.autostart_value = 'C:\Apps\second.exe'
+        $null = Set-ValidAutomaticPolicy $first
+        $null = Set-ValidAutomaticPolicy $second
+
+        Save-PendingActions -Hits @($first, $second) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 2
+        @($p.actions.autostart_value) | Should -Contain 'C:\Apps\first.exe'
+        @($p.actions.autostart_value) | Should -Contain 'C:\Apps\second.exe'
+    }
+
     It 'fails closed to observations for broad or malformed display policy evidence' -TestCases @(
         @{ Label='broad-only'; Mutate={ param($h) $h.matched_type='contains' } },
         @{ Label='missing policy'; Mutate={ param($h) $h.PSObject.Properties.Remove('impact_cn') } },
