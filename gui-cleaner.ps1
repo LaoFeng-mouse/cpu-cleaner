@@ -8,6 +8,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:Lang = 'zh'   # zh / en
+$script:MaxGuiPendingJsonDepth = 64
 # v1.5.3: 测试模式 (SHUSHU_CLEANER_TEST=1) — 跳过单实例检查与窗口显示, 供 CI 无窗口验证 (Pester)
 $script:TestMode = ($env:SHUSHU_CLEANER_TEST -eq '1')
 
@@ -449,6 +450,7 @@ function Get-GuiSuspiciousIdentityKey($Item) {
 }
 
 function Get-GuiValidatedSuspiciousIdentityKeys($Pending) {
+    $null = Assert-GuiPendingEnvelopeShape $Pending
     $keys = [System.Collections.Generic.List[string]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($row in @($Pending.suspicious)) {
@@ -466,8 +468,9 @@ function Get-GuiValidatedSuspiciousIdentityKeys($Pending) {
 }
 
 function Get-GuiSuspiciousViewItems($Pending) {
+    $null = Assert-GuiPendingEnvelopeShape $Pending
     $rows = @()
-    if ($null -eq $Pending -or -not $Pending.suspicious) { return @() }
+    if (-not $Pending.suspicious) { return @() }
     foreach ($item in @($Pending.suspicious)) {
         $canStop = ($item.CanStop -is [bool]) -and $item.CanStop -and ([string]$item.status -cin @('pending','failed'))
         $rows += [pscustomobject]@{
@@ -611,6 +614,7 @@ function Get-RuleDisplay($rule) {
 # 数据流: scan → Save-PendingActions 已分流; 这里 actions 只读可执行集, observations 只读观察集
 function Get-PendingViewItems {
     param([Parameter(Mandatory=$true)]$Pending)
+    $null = Assert-GuiPendingEnvelopeShape $Pending
     $p = $Pending
     $map = Get-ProfileLookup
     $view = @()
@@ -736,6 +740,7 @@ function Assert-GuiPendingPresentationShape {
 
 function Get-GuiValidatedActionIdentityKeys {
     param([Parameter(Mandatory=$true)]$Pending)
+    $null = Assert-GuiPendingEnvelopeShape $Pending
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     $selectableKeys = [System.Collections.Generic.List[string]]::new()
     foreach ($action in @($Pending.actions)) {
@@ -755,10 +760,156 @@ function Get-GuiValidatedActionIdentityKeys {
     return [string[]]$selectableKeys.ToArray()
 }
 
+function Skip-GuiJsonWhitespace([string]$Json, [ref]$Index) {
+    while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @([char]0x20,[char]0x09,[char]0x0A,[char]0x0D)) {
+        $Index.Value++
+    }
+}
+
+function Read-GuiJsonStringToken([string]$Json, [ref]$Index) {
+    if ($Index.Value -ge $Json.Length -or $Json[$Index.Value] -ne '"') { throw 'JSON 字符串缺少开引号' }
+    $Index.Value++
+    $builder = New-Object System.Text.StringBuilder
+    while ($Index.Value -lt $Json.Length) {
+        $character = $Json[$Index.Value]
+        $Index.Value++
+        if ($character -eq '"') { return $builder.ToString() }
+        if ([int]$character -lt 0x20) { throw 'JSON 字符串包含未转义控制字符' }
+        if ($character -ne '\') {
+            $null = $builder.Append($character)
+            continue
+        }
+        if ($Index.Value -ge $Json.Length) { throw 'JSON 字符串转义不完整' }
+        $escaped = $Json[$Index.Value]
+        $Index.Value++
+        switch ($escaped) {
+            '"' { $null = $builder.Append('"') }
+            '\' { $null = $builder.Append('\') }
+            '/' { $null = $builder.Append('/') }
+            'b' { $null = $builder.Append([char]0x08) }
+            'f' { $null = $builder.Append([char]0x0C) }
+            'n' { $null = $builder.Append([char]0x0A) }
+            'r' { $null = $builder.Append([char]0x0D) }
+            't' { $null = $builder.Append([char]0x09) }
+            'u' {
+                if (($Index.Value + 4) -gt $Json.Length) { throw 'JSON Unicode 转义不完整' }
+                $hex = $Json.Substring($Index.Value, 4)
+                foreach ($hexCharacter in $hex.ToCharArray()) {
+                    if ('0123456789abcdefABCDEF'.IndexOf($hexCharacter) -lt 0) { throw 'JSON Unicode 转义无效' }
+                }
+                $null = $builder.Append([char][Convert]::ToInt32($hex, 16))
+                $Index.Value = $Index.Value + 4
+            }
+            default { throw 'JSON 字符串包含未知转义' }
+        }
+    }
+    throw 'JSON 字符串缺少闭引号'
+}
+
+function Read-GuiJsonNumberToken([string]$Json, [ref]$Index) {
+    if ($Json[$Index.Value] -eq '-') {
+        $Index.Value++
+        if ($Index.Value -ge $Json.Length) { throw 'JSON 数字不完整' }
+    }
+    if ($Json[$Index.Value] -eq '0') {
+        $Index.Value++
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { throw 'JSON 数字包含前导零' }
+    } elseif ($Json[$Index.Value] -ge '1' -and $Json[$Index.Value] -le '9') {
+        while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { $Index.Value++ }
+    } else {
+        throw 'JSON 数字无效'
+    }
+    if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -eq '.') {
+        $Index.Value++
+        $fractionStart = $Index.Value
+        while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { $Index.Value++ }
+        if ($Index.Value -eq $fractionStart) { throw 'JSON 小数部分无效' }
+    }
+    if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @('e','E')) {
+        $Index.Value++
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @('+','-')) { $Index.Value++ }
+        $exponentStart = $Index.Value
+        while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { $Index.Value++ }
+        if ($Index.Value -eq $exponentStart) { throw 'JSON 指数部分无效' }
+    }
+}
+
+function Read-GuiJsonValueAndValidatePropertyNames([string]$Json, [ref]$Index, [int]$Depth) {
+    Skip-GuiJsonWhitespace $Json $Index
+    if ($Index.Value -ge $Json.Length) { throw 'JSON 值缺失' }
+    $token = $Json[$Index.Value]
+    if ($token -eq '{') {
+        $containerDepth = $Depth + 1
+        if ($containerDepth -gt $script:MaxGuiPendingJsonDepth) { throw "JSON 容器深度超过上限 $script:MaxGuiPendingJsonDepth" }
+        $Index.Value++
+        $propertyNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        Skip-GuiJsonWhitespace $Json $Index
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -eq '}') { $Index.Value++; return }
+        while ($true) {
+            Skip-GuiJsonWhitespace $Json $Index
+            $propertyName = Read-GuiJsonStringToken $Json $Index
+            if (-not $propertyNames.Add($propertyName)) { throw "JSON 对象包含重复属性: $propertyName" }
+            Skip-GuiJsonWhitespace $Json $Index
+            if ($Index.Value -ge $Json.Length -or $Json[$Index.Value] -ne ':') { throw 'JSON 属性缺少冒号' }
+            $Index.Value++
+            Read-GuiJsonValueAndValidatePropertyNames -Json $Json -Index $Index -Depth $containerDepth
+            Skip-GuiJsonWhitespace $Json $Index
+            if ($Index.Value -ge $Json.Length) { throw 'JSON 对象未闭合' }
+            if ($Json[$Index.Value] -eq '}') { $Index.Value++; return }
+            if ($Json[$Index.Value] -ne ',') { throw 'JSON 对象属性之间缺少逗号' }
+            $Index.Value++
+        }
+    }
+    if ($token -eq '[') {
+        $containerDepth = $Depth + 1
+        if ($containerDepth -gt $script:MaxGuiPendingJsonDepth) { throw "JSON 容器深度超过上限 $script:MaxGuiPendingJsonDepth" }
+        $Index.Value++
+        Skip-GuiJsonWhitespace $Json $Index
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -eq ']') { $Index.Value++; return }
+        while ($true) {
+            Read-GuiJsonValueAndValidatePropertyNames -Json $Json -Index $Index -Depth $containerDepth
+            Skip-GuiJsonWhitespace $Json $Index
+            if ($Index.Value -ge $Json.Length) { throw 'JSON 数组未闭合' }
+            if ($Json[$Index.Value] -eq ']') { $Index.Value++; return }
+            if ($Json[$Index.Value] -ne ',') { throw 'JSON 数组元素之间缺少逗号' }
+            $Index.Value++
+        }
+    }
+    if ($token -eq '"') { $null = Read-GuiJsonStringToken $Json $Index; return }
+    if ($token -eq '-' -or ($token -ge '0' -and $token -le '9')) { Read-GuiJsonNumberToken $Json $Index; return }
+    foreach ($literal in @('true','false','null')) {
+        if (($Index.Value + $literal.Length) -le $Json.Length -and $Json.Substring($Index.Value, $literal.Length) -ceq $literal) {
+            $Index.Value = $Index.Value + $literal.Length
+            return
+        }
+    }
+    throw 'JSON 值 token 无效'
+}
+
+function Assert-GuiPendingJsonStrict([string]$Json) {
+    if ([string]::IsNullOrWhiteSpace($Json)) { throw 'JSON 文本为空' }
+    $index = 0
+    Read-GuiJsonValueAndValidatePropertyNames -Json $Json -Index ([ref]$index) -Depth 0
+    Skip-GuiJsonWhitespace $Json ([ref]$index)
+    if ($index -ne $Json.Length) { throw 'JSON 根值之后存在多余 token' }
+}
+
+function ConvertFrom-GuiPendingJsonText {
+    param([Parameter(Mandatory=$true)][string]$Json)
+    Assert-GuiPendingJsonStrict $Json
+    $convertFromJson = Get-Command ConvertFrom-Json
+    if ($convertFromJson.Parameters.ContainsKey('DateKind')) {
+        return $Json | ConvertFrom-Json -DateKind String -ErrorAction Stop
+    }
+    return $Json | ConvertFrom-Json -ErrorAction Stop
+}
+
 function Read-GuiPendingFile {
     param([string]$Path = '')
     $pendingPath = if ($Path) { $Path } else { Join-Path $script:Root 'pending_actions.json' }
-    return Get-Content $pendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $pending = ConvertFrom-GuiPendingJsonText (Get-Content $pendingPath -Raw -Encoding UTF8)
+    $null = Assert-GuiPendingEnvelopeShape $pending
+    return $pending
 }
 
 function Get-GuiBytesSha256 {
@@ -777,7 +928,7 @@ function ConvertFrom-GuiPendingBytes {
     $offset = 0
     if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) { $offset = 3 }
     $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
-    return $utf8.GetString($Bytes, $offset, $Bytes.Length - $offset) | ConvertFrom-Json
+    return ConvertFrom-GuiPendingJsonText ($utf8.GetString($Bytes, $offset, $Bytes.Length - $offset))
 }
 
 function Read-GuiPendingByteSnapshot {
@@ -795,7 +946,9 @@ function Read-GuiPendingByteSnapshot {
             $read += $count
         }
         if ($stream.Length -ne $length) { throw 'pending review file changed during the single read.' }
-        return [pscustomobject]@{ Pending=(ConvertFrom-GuiPendingBytes $bytes); Sha256=(Get-GuiBytesSha256 $bytes) }
+        $pending = ConvertFrom-GuiPendingBytes $bytes
+        $null = Assert-GuiPendingEnvelopeShape $pending
+        return [pscustomobject]@{ Pending=$pending; Sha256=(Get-GuiBytesSha256 $bytes) }
     } finally {
         if ($null -ne $stream) { $stream.Dispose() }
     }

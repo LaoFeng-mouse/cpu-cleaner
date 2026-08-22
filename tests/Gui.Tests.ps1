@@ -1859,6 +1859,54 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
+    It 'GUI strict reader 拒绝 envelope 和 action 的 exact case Unicode escape 重复键' -TestCases @(
+        @{ Label='envelope exact'; Json='{"pending_schema_version":3,"actions":[],"actions":[],"resolved":[],"observations":[],"suspicious":[]}' }
+        @{ Label='envelope case'; Json='{"pending_schema_version":3,"actions":[],"Actions":[],"resolved":[],"observations":[],"suspicious":[]}' }
+        @{ Label='envelope unicode'; Json='{"pending_schema_version":3,"actions":[],"act\u0069ons":[],"resolved":[],"observations":[],"suspicious":[]}' }
+        @{ Label='action exact'; Json='{"pending_schema_version":3,"actions":[{"id":"a","id":"b"}],"resolved":[],"observations":[],"suspicious":[]}' }
+        @{ Label='action case'; Json='{"pending_schema_version":3,"actions":[{"id":"a","Id":"b"}],"resolved":[],"observations":[],"suspicious":[]}' }
+        @{ Label='action unicode'; Json='{"pending_schema_version":3,"actions":[{"id":"a","\u0069d":"b"}],"resolved":[],"observations":[],"suspicious":[]}' }
+    ) {
+        param($Label, $Json)
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Json)
+        { ConvertFrom-GuiPendingBytes -Bytes $bytes } | Should -Throw '*重复*' -Because $Label
+    }
+
+    It 'GUI strict reader 按根容器为 1 接受深度 64 并拒绝 65' {
+        $utf8 = [System.Text.UTF8Encoding]::new($false)
+        $depth64 = ('[' * 64) + '0' + (']' * 64)
+        $depth65 = ('[' * 65) + '0' + (']' * 65)
+
+        { ConvertFrom-GuiPendingBytes -Bytes $utf8.GetBytes($depth64) } | Should -Not -Throw
+        { ConvertFrom-GuiPendingBytes -Bytes $utf8.GetBytes($depth65) } | Should -Throw '*深度*'
+    }
+
+    It 'Read-GuiPendingFile 在返回对象前执行 strict JSON 和 schema 3 四数组 gate' {
+        $path = Join-Path $TestDrive 'gui-strict-read.json'
+        $duplicate = '{"pending_schema_version":3,"actions":[],"Actions":[],"resolved":[],"observations":[],"suspicious":[]}'
+        [System.IO.File]::WriteAllText($path, $duplicate, [System.Text.UTF8Encoding]::new($false))
+        { Read-GuiPendingFile -Path $path } | Should -Throw '*重复*'
+
+        $missing = '{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[]}'
+        [System.IO.File]::WriteAllText($path, $missing, [System.Text.UTF8Encoding]::new($false))
+        { Read-GuiPendingFile -Path $path } | Should -Throw '*数组*'
+    }
+
+    It 'Get-PendingViewItems 直接调用时拒绝 v2 及缺失 null scalar object 四数组分支' {
+        $valid = New-GuiReviewPendingFixture
+        $v2 = $valid.PSObject.Copy(); $v2.pending_schema_version = [int32]2
+        { Get-PendingViewItems -Pending $v2 } | Should -Throw '*重新运行 scan*'
+
+        foreach ($branch in @('actions','resolved','observations','suspicious')) {
+            $missing = $valid.PSObject.Copy(); $missing.PSObject.Properties.Remove($branch)
+            { Get-PendingViewItems -Pending $missing } | Should -Throw '*数组*'
+            foreach ($invalidValue in @($null, 'scalar', [pscustomobject]@{ nested='object' })) {
+                $invalid = $valid.PSObject.Copy(); $invalid.$branch = $invalidValue
+                { Get-PendingViewItems -Pending $invalid } | Should -Throw '*数组*'
+            }
+        }
+    }
+
     It 'GUI subset JSON 无损保留 <Levels> 层扩展字段' -TestCases @(
         @{ Levels = 12 }
         @{ Levels = 55 }
