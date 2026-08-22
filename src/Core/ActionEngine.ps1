@@ -1016,10 +1016,131 @@ function Get-PendingIdentityKey($Item) {
     return ConvertTo-Json -InputObject $identity -Compress -Depth 4
 }
 
+function Get-PendingHitProperty($Hit, [string]$Name) {
+    if ($null -eq $Hit -or $Hit.PSObject.Properties.Name -notcontains $Name) { return $null }
+    return $Hit.$Name
+}
+
+function Get-ValidPendingDisplayPolicy($Hit) {
+    $executionClass = Get-PendingHitProperty $Hit 'execution_class'
+    $necessity = Get-PendingHitProperty $Hit 'necessity'
+    $defaultSelected = Get-PendingHitProperty $Hit 'default_selected'
+    $requiresConfirmation = Get-PendingHitProperty $Hit 'requires_confirmation'
+    $impactCn = Get-PendingHitProperty $Hit 'impact_cn'
+    $cleanupReasonCn = Get-PendingHitProperty $Hit 'cleanup_reason_cn'
+
+    if ($executionClass -isnot [string] -or $executionClass -cnotin @('automatic_safe','manual_impact') -or
+        $necessity -isnot [string] -or [string]::IsNullOrWhiteSpace($necessity) -or
+        $defaultSelected -isnot [bool] -or $requiresConfirmation -isnot [bool] -or
+        $impactCn -isnot [string] -or [string]::IsNullOrWhiteSpace($impactCn) -or
+        $cleanupReasonCn -isnot [string] -or [string]::IsNullOrWhiteSpace($cleanupReasonCn)) {
+        return $null
+    }
+    if ($executionClass -ceq 'manual_impact' -and ($defaultSelected -ne $false -or $requiresConfirmation -ne $true)) {
+        return $null
+    }
+    return [pscustomobject][ordered]@{
+        execution_class = $executionClass
+        necessity = $necessity
+        default_selected = $defaultSelected
+        requires_confirmation = $requiresConfirmation
+        impact_cn = $impactCn
+        cleanup_reason_cn = $cleanupReasonCn
+    }
+}
+
+function Get-FailClosedObservationPolicy($Hit) {
+    $necessity = Get-PendingHitProperty $Hit 'necessity'
+    $impactCn = Get-PendingHitProperty $Hit 'impact_cn'
+    $cleanupReasonCn = Get-PendingHitProperty $Hit 'cleanup_reason_cn'
+    $reasonCn = Get-PendingHitProperty $Hit 'reason_cn'
+    if ($necessity -isnot [string] -or [string]::IsNullOrWhiteSpace($necessity)) { $necessity = 'informational' }
+    if ($impactCn -isnot [string] -or [string]::IsNullOrWhiteSpace($impactCn)) {
+        $impactCn = if ($reasonCn -is [string] -and -not [string]::IsNullOrWhiteSpace($reasonCn)) { $reasonCn } else { '执行政策不完整，禁止处理' }
+    }
+    if ($cleanupReasonCn -isnot [string] -or [string]::IsNullOrWhiteSpace($cleanupReasonCn)) {
+        $cleanupReasonCn = if ($reasonCn -is [string] -and -not [string]::IsNullOrWhiteSpace($reasonCn)) { $reasonCn } else { '仅保留扫描观察证据' }
+    }
+    return [pscustomobject][ordered]@{
+        execution_class = 'observation'
+        necessity = $necessity
+        default_selected = $false
+        requires_confirmation = $false
+        impact_cn = $impactCn
+        cleanup_reason_cn = $cleanupReasonCn
+    }
+}
+
+function New-PendingPersistedHit($Hit, $Policy, [string]$Status = '', [string]$CurrentState = '') {
+    $item = [ordered]@{
+        id                   = Get-PendingHitProperty $Hit 'id'
+        vendor               = Get-PendingHitProperty $Hit 'vendor'
+        name_cn              = Get-PendingHitProperty $Hit 'name_cn'
+        action               = Get-PendingHitProperty $Hit 'action'
+        hit_type             = Get-PendingHitProperty $Hit 'hit_type'
+        detail               = Get-PendingHitProperty $Hit 'detail'
+        reason_cn            = Get-PendingHitProperty $Hit 'reason_cn'
+        service_name         = Get-PendingHitProperty $Hit 'service_name'
+        service_display_name = Get-PendingHitProperty $Hit 'service_display_name'
+        autostart_source     = Get-PendingHitProperty $Hit 'autostart_source'
+        autostart_name       = Get-PendingHitProperty $Hit 'autostart_name'
+        autostart_value      = Get-PendingHitProperty $Hit 'autostart_value'
+        task_name            = Get-PendingHitProperty $Hit 'task_name'
+        task_path            = Get-PendingHitProperty $Hit 'task_path'
+        process_name         = Get-PendingHitProperty $Hit 'process_name'
+        process_id           = Get-PendingHitProperty $Hit 'process_id'
+        process_path         = Get-PendingHitProperty $Hit 'process_path'
+        matched_pattern      = Get-PendingHitProperty $Hit 'matched_pattern'
+        matched_type         = Get-PendingHitProperty $Hit 'matched_type'
+        matched_field        = Get-PendingHitProperty $Hit 'matched_field'
+        safe                 = Get-PendingHitProperty $Hit 'safe'
+        execution_class      = $Policy.execution_class
+        necessity            = $Policy.necessity
+        default_selected     = $Policy.default_selected
+        requires_confirmation = $Policy.requires_confirmation
+        impact_cn            = $Policy.impact_cn
+        cleanup_reason_cn    = $Policy.cleanup_reason_cn
+    }
+    if (-not [string]::IsNullOrEmpty($Status)) { $item.status = $Status }
+    if (-not [string]::IsNullOrEmpty($CurrentState)) { $item.current_state = $CurrentState }
+    return [pscustomobject]$item
+}
+
+function Get-PendingResolvedTargetState($Hit) {
+    $action = Get-PendingHitProperty $Hit 'action'
+    if ($action -ceq 'disable_service') {
+        $serviceName = Get-PendingHitProperty $Hit 'service_name'
+        if ($serviceName -isnot [string] -or [string]::IsNullOrWhiteSpace($serviceName)) { return $null }
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($service -and $service.StartType -eq 'Disabled' -and $service.Status -eq 'Stopped') { return 'disabled' }
+        return $null
+    }
+    if ($action -ceq 'disable_task') {
+        $taskPath = Get-PendingHitProperty $Hit 'task_path'
+        if ($taskPath -isnot [string] -or [string]::IsNullOrWhiteSpace($taskPath)) { return $null }
+        $separator = $taskPath.LastIndexOf('\')
+        if ($separator -lt 0 -or $separator -ge ($taskPath.Length - 1)) { return $null }
+        $taskName = $taskPath.Substring($separator + 1)
+        $taskFolder = if ($separator -eq 0) { '\' } else { $taskPath.Substring(0, $separator + 1) }
+        $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
+        if ($task -and $task.State -eq 'Disabled') { return 'disabled' }
+    }
+    if ($action -ceq 'remove_autostart') {
+        $source = Get-PendingHitProperty $Hit 'autostart_source'
+        $name = Get-PendingHitProperty $Hit 'autostart_name'
+        if ($source -isnot [string] -or [string]::IsNullOrWhiteSpace($source) -or
+            $name -isnot [string] -or [string]::IsNullOrWhiteSpace($name)) { return $null }
+        $key = Get-ItemProperty $source -ErrorAction SilentlyContinue
+        if (-not $key -or -not ($key.PSObject.Properties | Where-Object { $_.Name -eq $name })) { return 'removed' }
+    }
+    return $null
+}
+
 function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealth, $ScanWarnings = $script:ScanWarnings) {
     $actions = @()
+    $resolved = @()
     $observations = @()
-    $seenActionIds = @{}
+    $seenExecutableIds = @{}
     $seenObservationIds = @{}
     foreach ($h in $Hits) {
         # v1.5.6 数据模型: actions(可执行) / observations(仅观察) 分流
@@ -1036,6 +1157,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
         $hasNarrowEvidence = Test-HitMatcherEvidenceShape $h
         $hasBroadEvidence = Test-HitMatcherEvidenceShape $h -AllowedMatchTypes @('contains','regex')
         $actionHitTypeAllowed = Test-ActionMatchesHitType $h.action $h.hit_type
+        $displayPolicy = Get-ValidPendingDisplayPolicy $h
         $healthKey = if ($h.hit_type -is [string]) {
             switch -CaseSensitive ($h.hit_type) {
                 'service' { 'services' }
@@ -1050,15 +1172,16 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             $testedAllowed -and
             $hasNarrowEvidence -and
             $actionHitTypeAllowed -and
+            ($null -ne $displayPolicy) -and
             $categoryComplete
 
-        # action / observation 分开去重, 防止宽匹配观察压制同目标的窄匹配动作
+        # 精确可执行命中和 observations 分开去重，防止宽匹配观察压制同目标的窄匹配动作。
+        # actions 与 resolved 共享 identity，确保同一精确目标绝不同时进入两支。
         $dedupeKey = Get-PendingIdentityKey $h
-        $seenIds = if ($executable) { $seenActionIds } else { $seenObservationIds }
-        if ($seenIds.ContainsKey($dedupeKey)) { continue }
-        $seenIds[$dedupeKey] = $true
 
         if (-not $executable) {
+            if ($seenObservationIds.ContainsKey($dedupeKey)) { continue }
+            $seenObservationIds[$dedupeKey] = $true
             # v1.5.6: 观察条目 — 记录为什么不能自动处理 (GUI 展示为 disabled checkbox)
             $obsReason = if ($h.action -eq 'none' -or $h.action -eq 'investigate') { '动作仅观察/不处理' }
                 elseif (-not $safeAllowed) { 'safe=false 或类型无效, 不允许自动处理' }
@@ -1067,74 +1190,22 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
                 elseif (-not $categoryComplete) { '扫描信息不完整，禁止自动处理' }
                 elseif ($actionAllowed -and $hasBroadEvidence) { '实际命中为宽匹配 (contains/regex)，禁止自动处理' }
                 elseif ($actionAllowed -and -not $hasNarrowEvidence) { '匹配来源缺失或无效，禁止自动处理' }
+                elseif ($null -eq $displayPolicy) { '执行政策字段缺失或无效，禁止自动处理' }
                 else { '动作不允许自动处理, 仅观察' }
-            $observations += [pscustomobject]@{
-                id        = $h.id
-                vendor    = $h.vendor
-                name_cn   = $h.name_cn
-                action    = $h.action
-                hit_type  = $h.hit_type
-                detail    = $h.detail
-                reason_cn = $h.reason_cn
-                service_name      = $h.service_name
-                autostart_source  = $h.autostart_source
-                autostart_name    = $h.autostart_name
-                autostart_value   = $h.autostart_value
-                task_path         = $h.task_path
-                process_name      = $h.process_name
-                process_id        = $h.process_id
-                process_path      = $h.process_path
-                matched_pattern   = $h.matched_pattern
-                matched_type      = $h.matched_type
-                matched_field     = $h.matched_field
-                safe      = $h.safe
-                obs_reason = $obsReason
-            }
+            $observation = New-PendingPersistedHit $h (Get-FailClosedObservationPolicy $h)
+            $observation | Add-Member -NotePropertyName obs_reason -NotePropertyValue $obsReason
+            $observations += $observation
             continue
         }
 
-        # 跳过已经是目标状态的条目 (仅可执行条目需要, 观察条目不动系统状态)
-        $skip = $false
-        if ($h.action -eq 'disable_service' -and $h.service_name) {
-            $svc = Get-Service -Name $h.service_name -ErrorAction SilentlyContinue
-            if ($svc -and $svc.StartType -eq 'Disabled' -and $svc.Status -eq 'Stopped') { $skip = $true }
-        }
-        elseif ($h.action -eq 'disable_task' -and $h.task_path) {
-            $separator = $h.task_path.LastIndexOf('\')
-            if ($separator -lt 0 -or $separator -ge ($h.task_path.Length - 1)) { continue }
-            $taskName = $h.task_path.Substring($separator + 1)
-            $taskFolder = if ($separator -eq 0) { '\' } else { $h.task_path.Substring(0, $separator + 1) }
-            $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-            if ($task -and $task.State -eq 'Disabled') { $skip = $true }
-        }
-        elseif ($h.action -eq 'remove_autostart' -and $h.autostart_source -and $h.autostart_name) {
-            $key = Get-ItemProperty $h.autostart_source -ErrorAction SilentlyContinue
-            if (-not $key -or -not ($key.PSObject.Properties | Where-Object { $_.Name -eq $h.autostart_name })) { $skip = $true }
-        }
-        if ($skip) { continue }
-
-        $actions += [pscustomobject]@{
-            id        = $h.id
-            vendor    = $h.vendor
-            name_cn   = $h.name_cn
-            action    = $h.action
-            hit_type  = $h.hit_type
-            detail    = $h.detail
-            reason_cn = $h.reason_cn
-            service_name      = $h.service_name
-            autostart_source  = $h.autostart_source
-            autostart_name    = $h.autostart_name
-            autostart_value   = $h.autostart_value
-            task_path         = $h.task_path
-            process_name      = $h.process_name
-            process_id        = $h.process_id
-            process_path      = $h.process_path
-            matched_pattern   = $h.matched_pattern
-            matched_type      = $h.matched_type
-            matched_field     = $h.matched_field
-            safe      = $h.safe
+        $resolvedState = Get-PendingResolvedTargetState $h
+        if ($seenExecutableIds.ContainsKey($dedupeKey)) { continue }
+        $seenExecutableIds[$dedupeKey] = $true
+        if ($null -ne $resolvedState) {
+            $resolved += New-PendingPersistedHit $h $displayPolicy 'success' $resolvedState
+        } else {
             # v1.2 状态机: pending / success / failed / skipped / manual_required
-            status    = 'pending'
+            $actions += New-PendingPersistedHit $h $displayPolicy 'pending'
         }
     }
 
@@ -1154,7 +1225,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
         pending_schema_version = [int32]3
         generated     = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         actions       = $actions
-        resolved      = @()
+        resolved      = $resolved
         observations  = $observations
         suspicious    = $suspArr
         scan_health   = $ScanHealth

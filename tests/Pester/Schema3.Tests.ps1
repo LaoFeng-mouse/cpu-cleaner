@@ -222,6 +222,8 @@ Describe 'Schema 3.0 执行闸门 (识别可以宽, 执行必须窄)' {
                 service_name=''; autostart_source='HKCU:\Software\Vendor\Run'; autostart_name='Updater'; autostart_value='C:\Apps\old.exe'
                 task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{tested=$true}
                 matched_pattern='C:\Apps'; matched_type='path'; matched_field='autostart_value'
+                execution_class='automatic_safe'; necessity='optional'; default_selected=$true; requires_confirmation=$false
+                impact_cn='将移除此自启项'; cleanup_reason_cn='验证自启原始值可持久化'
             }
 
             Save-PendingActions -Hits @($hit) -Suspicious @()

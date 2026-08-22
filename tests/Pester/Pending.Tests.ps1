@@ -34,6 +34,45 @@ Describe '待办清单规则' {
         if (-not (Get-Command Invoke-PendingAtomicReplace -ErrorAction SilentlyContinue)) {
             function Invoke-PendingAtomicReplace($Source, $Destination, $Backup) { [System.IO.File]::Replace($Source, $Destination, $Backup) }
         }
+
+        function New-Schema3PolicyHit {
+            param(
+                [string]$Id,
+                [string]$Action,
+                [string]$HitType,
+                [string]$ServiceName = '',
+                [string]$ServiceDisplayName = '',
+                [string]$TaskPath = '',
+                [string]$MatchedPattern,
+                [string]$MatchedField,
+                [string]$ExecutionClass = 'automatic_safe',
+                [string]$Necessity = 'optional',
+                [bool]$DefaultSelected = $true,
+                [bool]$RequiresConfirmation = $false,
+                [string]$ImpactCn = '会停止 OEM 后台功能',
+                [string]$CleanupReasonCn = '减少不需要的后台占用'
+            )
+            return [pscustomobject]@{
+                id=$Id; vendor='Lenovo'; name_cn=$Id; action=$Action; hit_type=$HitType; detail=$Id; reason_cn='测试规则'
+                service_name=$ServiceName; service_display_name=$ServiceDisplayName; autostart_source=''; autostart_name=''; autostart_value=''
+                task_path=$TaskPath; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }
+                matched_pattern=$MatchedPattern; matched_type='exact'; matched_field=$MatchedField
+                execution_class=$ExecutionClass; necessity=$Necessity; default_selected=$DefaultSelected
+                requires_confirmation=$RequiresConfirmation; impact_cn=$ImpactCn; cleanup_reason_cn=$CleanupReasonCn
+            }
+        }
+
+        function Set-ValidAutomaticPolicy($Hit) {
+            $policy = [ordered]@{
+                execution_class='automatic_safe'; necessity='optional'; default_selected=$true; requires_confirmation=$false
+                impact_cn='会停止 OEM 后台功能'; cleanup_reason_cn='减少不需要的后台占用'
+            }
+            foreach ($name in $policy.Keys) {
+                if ($Hit.PSObject.Properties.Name -contains $name) { $Hit.$name = $policy[$name] }
+                else { $Hit | Add-Member -NotePropertyName $name -NotePropertyValue $policy[$name] }
+            }
+            return $Hit
+        }
     }
 
     It '空数组以 schema v3 和 UTF-8 BOM 原子保存' {
@@ -452,6 +491,7 @@ Invoke-Clean
             [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' },
             [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='remove_autostart'; hit_type='autostart'; detail='X'; reason_cn='r'; service_name=''; autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; autostart_name='X'; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='X'; matched_type='exact'; matched_field='autostart_name' }
         )
+        $hits | ForEach-Object { $null = Set-ValidAutomaticPolicy $_ }
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 2
@@ -462,6 +502,7 @@ Invoke-Clean
             [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' },
             [pscustomobject]@{ id='a'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }
         )
+        $hits | ForEach-Object { $null = Set-ValidAutomaticPolicy $_ }
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 1
@@ -470,6 +511,7 @@ Invoke-Clean
         $hits = @(
             [pscustomobject]@{ id='d'; vendor='T'; name_cn='D'; action='disable_service'; hit_type='service'; detail='S4'; reason_cn='r'; service_name='S4'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$false }; matched_pattern='S4'; matched_type='exact'; matched_field='service_name' }
         )
+        $hits | ForEach-Object { $null = Set-ValidAutomaticPolicy $_ }
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 0
@@ -514,6 +556,7 @@ Invoke-Clean
         $hits = @(
             [pscustomobject]@{ id='c'; vendor='T'; name_cn='C'; action='disable_task'; hit_type='task'; detail='\X\T1'; reason_cn='r'; service_name=''; autostart_source=''; autostart_name=''; task_path='\X\T1'; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='\X\T1'; matched_type='exact'; matched_field='task_path' }
         )
+        $hits | ForEach-Object { $null = Set-ValidAutomaticPolicy $_ }
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $p.actions[0].status | Should -Be 'pending'
@@ -525,6 +568,7 @@ Invoke-Clean
             safe=$true; evidence=[pscustomobject]@{ tested=$true }
             matched_pattern='S1'; matched_type='exact'; matched_field='service_name'
         }
+        $null = Set-ValidAutomaticPolicy $hit
         Save-PendingActions -Hits @($hit) -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $p.pending_schema_version | Should -Be 3
@@ -542,6 +586,7 @@ Invoke-Clean
             safe=$true; evidence=[pscustomobject]@{ tested=$true }
             matched_pattern='Lenovo'; matched_type='contains'; matched_field='service_name'
         }
+        $null = Set-ValidAutomaticPolicy $hit
         Save-PendingActions -Hits @($hit) -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 0
@@ -596,6 +641,7 @@ Invoke-Clean
             safe=$true; evidence=[pscustomobject]@{ tested=$true }
             matched_pattern='C:\Apps'; matched_type='path'; matched_field='process_path'
         }
+        $null = Set-ValidAutomaticPolicy $hit
         Save-PendingActions -Hits @($hit) -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 1
@@ -654,6 +700,8 @@ Invoke-Clean
         $exact = $broad.PSObject.Copy()
         $exact.matched_pattern = 'S1'
         $exact.matched_type = 'exact'
+        $null = Set-ValidAutomaticPolicy $broad
+        $null = Set-ValidAutomaticPolicy $exact
         Save-PendingActions -Hits @($broad, $exact) -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 1
@@ -669,6 +717,7 @@ Invoke-Clean
                 safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='P1'; matched_type='exact'; matched_field='process_name'
             }
         }
+        $hits | ForEach-Object { $null = Set-ValidAutomaticPolicy $_ }
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 2
@@ -723,6 +772,167 @@ Invoke-Clean
             $p.observations[0].process_path | Should -Be 'C:\Apps\P1.exe' -Because $case.label
         }
     }
+    It 'enabled exact Lenovo task persists as an automatic_safe action with its display policy' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName='LenovoMachineFixUser_OOBE_AUTO_Notification'; TaskPath='\Lenovo\'; State='Ready' } } -ParameterFilter { $TaskName -eq 'LenovoMachineFixUser_OOBE_AUTO_Notification' -and $TaskPath -eq '\Lenovo\' }
+        $hit = New-Schema3PolicyHit -Id 'lenovo-task-notify' -Action 'disable_task' -HitType 'task' -TaskPath '\Lenovo\LenovoMachineFixUser_OOBE_AUTO_Notification' -MatchedPattern 'LenovoMachineFixUser_OOBE_AUTO_Notification' -MatchedField 'task_name'
+
+        Save-PendingActions -Hits @($hit) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 1
+        @($p.resolved).Count | Should -Be 0
+        $p.actions[0].execution_class | Should -BeExactly 'automatic_safe'
+        $p.actions[0].default_selected | Should -BeTrue
+        $p.actions[0].requires_confirmation | Should -BeFalse
+        $p.actions[0].impact_cn | Should -BeExactly '会停止 OEM 后台功能'
+        $p.actions[0].cleanup_reason_cn | Should -BeExactly '减少不需要的后台占用'
+    }
+
+    It 'disabled exact Lenovo task persists as resolved rather than an action' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName='LenovoMachineFixUser_OOBE_AUTO_Notification'; TaskPath='\Lenovo\'; State='Disabled' } } -ParameterFilter { $TaskName -eq 'LenovoMachineFixUser_OOBE_AUTO_Notification' -and $TaskPath -eq '\Lenovo\' }
+        $hit = New-Schema3PolicyHit -Id 'lenovo-task-notify' -Action 'disable_task' -HitType 'task' -TaskPath '\Lenovo\LenovoMachineFixUser_OOBE_AUTO_Notification' -MatchedPattern 'LenovoMachineFixUser_OOBE_AUTO_Notification' -MatchedField 'task_name'
+
+        Save-PendingActions -Hits @($hit) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.resolved).Count | Should -Be 1
+        $p.resolved[0].current_state | Should -BeExactly 'disabled'
+        $p.resolved[0].status | Should -BeExactly 'success'
+        $p.resolved[0].task_path | Should -BeExactly '\Lenovo\LenovoMachineFixUser_OOBE_AUTO_Notification'
+    }
+
+    It 'exact HRWSCCtrl service persists as a manual_impact action' {
+        Mock Get-Service { [pscustomobject]@{ Name='HRWSCCtrl'; StartType='Automatic'; Status='Running' } } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+        $hit = New-Schema3PolicyHit -Id 'lenovo-hrwscctrl' -Action 'disable_service' -HitType 'service' -ServiceName 'HRWSCCtrl' -ServiceDisplayName 'Lenovo Security Controller' -MatchedPattern 'HRWSCCtrl' -MatchedField 'service_name' -ExecutionClass 'manual_impact' -DefaultSelected $false -RequiresConfirmation $true -ImpactCn '可能影响联想电脑管家的安全状态、主动防护和通知' -CleanupReasonCn '不使用联想电脑管家时可减少常驻后台'
+
+        Save-PendingActions -Hits @($hit) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 1
+        $p.actions[0].execution_class | Should -BeExactly 'manual_impact'
+        $p.actions[0].default_selected | Should -BeFalse
+        $p.actions[0].requires_confirmation | Should -BeTrue
+    }
+
+    It 'disabled HRWSCCtrl persists a full provenance and display-policy resolved row' {
+        Mock Get-Service { [pscustomobject]@{ Name='HRWSCCtrl'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+        $hit = New-Schema3PolicyHit -Id 'lenovo-hrwscctrl' -Action 'disable_service' -HitType 'service' -ServiceName 'HRWSCCtrl' -ServiceDisplayName 'Lenovo Security Controller' -MatchedPattern 'HRWSCCtrl' -MatchedField 'service_name' -ExecutionClass 'manual_impact' -DefaultSelected $false -RequiresConfirmation $true -ImpactCn '可能影响联想电脑管家的安全状态、主动防护和通知' -CleanupReasonCn '不使用联想电脑管家时可减少常驻后台'
+
+        Save-PendingActions -Hits @($hit) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.resolved).Count | Should -Be 1
+        foreach ($field in @('id','hit_type','action','service_name','service_display_name','matched_pattern','matched_type','matched_field','execution_class','necessity','default_selected','requires_confirmation','impact_cn','cleanup_reason_cn')) {
+            $p.resolved[0].$field | Should -Be $hit.$field -Because "resolved must preserve $field"
+        }
+        $p.resolved[0].current_state | Should -BeExactly 'disabled'
+        $p.resolved[0].status | Should -BeExactly 'success'
+    }
+
+    It 'keeps the exact action when an exact and contains hit share a target' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName='LenovoMachineFixUser_OOBE_AUTO_Notification'; TaskPath='\Lenovo\'; State='Ready' } } -ParameterFilter { $TaskName -eq 'LenovoMachineFixUser_OOBE_AUTO_Notification' -and $TaskPath -eq '\Lenovo\' }
+        $exact = New-Schema3PolicyHit -Id 'lenovo-task-notify' -Action 'disable_task' -HitType 'task' -TaskPath '\Lenovo\LenovoMachineFixUser_OOBE_AUTO_Notification' -MatchedPattern 'LenovoMachineFixUser_OOBE_AUTO_Notification' -MatchedField 'task_name'
+        $broad = $exact.PSObject.Copy()
+        $broad.matched_pattern = 'Lenovo'
+        $broad.matched_type = 'contains'
+
+        Save-PendingActions -Hits @($broad, $exact) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 1
+        @($p.resolved).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.actions[0].matched_type | Should -BeExactly 'exact'
+        $p.observations[0].matched_type | Should -BeExactly 'contains'
+    }
+
+    It 'keeps the exact resolved row when a contains observation shares its target' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName='LenovoMachineFixUser_OOBE_AUTO_Notification'; TaskPath='\Lenovo\'; State='Disabled' } } -ParameterFilter { $TaskName -eq 'LenovoMachineFixUser_OOBE_AUTO_Notification' -and $TaskPath -eq '\Lenovo\' }
+        $exact = New-Schema3PolicyHit -Id 'lenovo-task-notify' -Action 'disable_task' -HitType 'task' -TaskPath '\Lenovo\LenovoMachineFixUser_OOBE_AUTO_Notification' -MatchedPattern 'LenovoMachineFixUser_OOBE_AUTO_Notification' -MatchedField 'task_name'
+        $broad = $exact.PSObject.Copy()
+        $broad.matched_pattern = 'Lenovo'
+        $broad.matched_type = 'contains'
+
+        Save-PendingActions -Hits @($broad, $exact) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.resolved).Count | Should -Be 1
+        @($p.observations).Count | Should -Be 1
+        $p.resolved[0].matched_type | Should -BeExactly 'exact'
+        $p.observations[0].matched_type | Should -BeExactly 'contains'
+    }
+
+    It 'fails closed to observations for broad or malformed display policy evidence' -TestCases @(
+        @{ Label='broad-only'; Mutate={ param($h) $h.matched_type='contains' } },
+        @{ Label='missing policy'; Mutate={ param($h) $h.PSObject.Properties.Remove('impact_cn') } },
+        @{ Label='string boolean'; Mutate={ param($h) $h.default_selected='true' } }
+    ) {
+        param($Label, $Mutate)
+        $hit = New-Schema3PolicyHit -Id $Label -Action 'disable_service' -HitType 'service' -ServiceName 'S1' -MatchedPattern 'S1' -MatchedField 'service_name'
+        & $Mutate $hit
+
+        Save-PendingActions -Hits @($hit) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.resolved).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+    }
+
+    It 'never resolves a disabled service or task when that inventory category is incomplete' -TestCases @(
+        @{ HitType='service'; Action='disable_service'; HealthKey='services'; Service='HRWSCCtrl'; Task=''; Pattern='HRWSCCtrl'; Field='service_name' },
+        @{ HitType='task'; Action='disable_task'; HealthKey='tasks'; Service=''; Task='\Lenovo\LenovoMachineFixUser_OOBE_AUTO_Notification'; Pattern='LenovoMachineFixUser_OOBE_AUTO_Notification'; Field='task_name' }
+    ) {
+        param($HitType, $Action, $HealthKey, $Service, $Task, $Pattern, $Field)
+        if ($HitType -eq 'service') { Mock Get-Service { [pscustomobject]@{ Name='HRWSCCtrl'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'HRWSCCtrl' } }
+        if ($HitType -eq 'task') { Mock Get-ScheduledTask { [pscustomobject]@{ TaskName='LenovoMachineFixUser_OOBE_AUTO_Notification'; TaskPath='\Lenovo\'; State='Disabled' } } -ParameterFilter { $TaskName -eq 'LenovoMachineFixUser_OOBE_AUTO_Notification' -and $TaskPath -eq '\Lenovo\' } }
+        $hit = New-Schema3PolicyHit -Id "incomplete-$HitType" -Action $Action -HitType $HitType -ServiceName $Service -TaskPath $Task -MatchedPattern $Pattern -MatchedField $Field
+        $health = [pscustomobject]@{ system_info='complete'; services='complete'; tasks='complete' }
+        $health.$HealthKey = 'degraded'
+
+        Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth $health
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.resolved).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+    }
+
+    It 'pending JSON keeps the schema 3 four-array envelope when an action resolved and observation coexist' {
+        Mock Get-ScheduledTask { [pscustomobject]@{ TaskName='LenovoMachineFixUser_OOBE_AUTO_Notification'; TaskPath='\Lenovo\'; State='Ready' } } -ParameterFilter { $TaskName -eq 'LenovoMachineFixUser_OOBE_AUTO_Notification' -and $TaskPath -eq '\Lenovo\' }
+        Mock Get-Service { [pscustomobject]@{ Name='HRWSCCtrl'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+        $action = New-Schema3PolicyHit -Id 'enabled-task' -Action 'disable_task' -HitType 'task' -TaskPath '\Lenovo\LenovoMachineFixUser_OOBE_AUTO_Notification' -MatchedPattern 'LenovoMachineFixUser_OOBE_AUTO_Notification' -MatchedField 'task_name'
+        $resolved = New-Schema3PolicyHit -Id 'disabled-service' -Action 'disable_service' -HitType 'service' -ServiceName 'HRWSCCtrl' -MatchedPattern 'HRWSCCtrl' -MatchedField 'service_name'
+        $observation = $action.PSObject.Copy()
+        $observation.id = 'broad-observation'
+        $observation.matched_type = 'contains'
+        $observation.matched_pattern = 'Lenovo'
+
+        Save-PendingActions -Hits @($action, $resolved, $observation) -Suspicious @()
+        $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8
+        $p = $raw | ConvertFrom-Json
+
+        foreach ($branch in @('actions','resolved','observations','suspicious')) {
+            $raw | Should -Match ('"' + $branch + '"\s*:\s*\[')
+            $p.PSObject.Properties.Name | Should -Contain $branch
+        }
+        @($p.actions).Count | Should -Be 1
+        @($p.resolved).Count | Should -Be 1
+        @($p.observations).Count | Should -Be 1
+        @($p.suspicious).Count | Should -Be 0
+        foreach ($row in @($p.actions) + @($p.resolved) + @($p.observations)) {
+            $row.execution_class -is [string] | Should -BeTrue
+            $row.necessity -is [string] | Should -BeTrue
+            $row.default_selected -is [bool] | Should -BeTrue
+            $row.requires_confirmation -is [bool] | Should -BeTrue
+            $row.impact_cn -is [string] | Should -BeTrue
+            $row.cleanup_reason_cn -is [string] | Should -BeTrue
+        }
+    }
+
     It 'pending JSON 对 0/1 条 action 和 observation 始终使用四数组 token' {
         Save-PendingActions -Hits @() -Suspicious @()
         $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8
@@ -732,6 +942,7 @@ Invoke-Clean
         $raw | Should -Match '"suspicious"\s*:\s*\[\s*\]'
 
         $action = [pscustomobject]@{ id='one-action'; vendor='T'; name_cn='A'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }
+        $null = Set-ValidAutomaticPolicy $action
         Save-PendingActions -Hits @($action) -Suspicious @()
         $raw = Get-Content $script:PendingFile -Raw -Encoding UTF8
         $raw | Should -Match '"actions"\s*:\s*\[\s*\{'
@@ -792,6 +1003,7 @@ Invoke-Clean
             [pscustomobject]@{ id='limited-task';vendor='T';name_cn='Task';action='disable_task';hit_type='task';detail='\X\T1';reason_cn='r';service_name='';autostart_source='';autostart_name='';autostart_value='';task_path='\X\T1';process_name='';process_id=0;process_path='';safe=$true;evidence=[pscustomobject]@{tested=$true};matched_pattern='\X\T1';matched_type='exact';matched_field='task_path' },
             [pscustomobject]@{ id='limited-autostart';vendor='T';name_cn='Auto';action='remove_autostart';hit_type='autostart';detail='X';reason_cn='r';service_name='';autostart_source='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run';autostart_name='X';autostart_value='C:\fake\X.exe';task_path='';process_name='';process_id=0;process_path='';safe=$true;evidence=[pscustomobject]@{tested=$true};matched_pattern='X';matched_type='exact';matched_field='autostart_name' }
         )
+        $hits | ForEach-Object { $null = Set-ValidAutomaticPolicy $_ }
         $suspicious = [pscustomobject]@{ PID=42;Name='once';'CPU%'=8;MemMB=50;Path='C:\Temp\once.exe';Reason='temp';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;StopBlockReason='' }
         $health = [pscustomobject]@{ system_info='complete';services='degraded';tasks='unavailable' }
 
@@ -838,6 +1050,7 @@ Invoke-Clean
             service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''
             safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'
         }
+        $null = Set-ValidAutomaticPolicy $hit
         $health = [pscustomobject]@{ system_info='degraded'; services='complete'; tasks='complete' }
 
         Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth $health -ScanWarnings @('system info incomplete')
@@ -874,6 +1087,7 @@ Invoke-Clean
                 process_name=$case.process; process_id=$case.pid; process_path=$case.path
                 safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern=$case.pattern; matched_type='exact'; matched_field=$case.field
             }
+            $null = Set-ValidAutomaticPolicy $hit
 
             Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth ([pscustomobject]@{ system_info='complete'; services='complete'; tasks='complete' }) -ScanWarnings @()
             $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -897,6 +1111,7 @@ Invoke-Clean
                 process_name=$case.process; process_id=$case.pid; process_path=$case.path
                 safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern=$case.pattern; matched_type='exact'; matched_field=$case.field
             }
+            $null = Set-ValidAutomaticPolicy $hit
 
             Save-PendingActions -Hits @($hit) -Suspicious @() -ScanHealth ([pscustomobject]@{ system_info='complete'; services='complete'; tasks='complete' }) -ScanWarnings @()
             $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -907,13 +1122,15 @@ Invoke-Clean
             $p.actions[0].hit_type | Should -BeExactly $case.hit_type
         }
     }
-    It '服务已禁用且停止时不写入 action 或 observation' {
+    It '服务已禁用且停止时写入 resolved 而非 action 或 observation' {
         Mock Get-Service { [pscustomobject]@{ Name='S1'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'S1' }
         $hit = [pscustomobject]@{ id='already'; vendor='T'; name_cn='Already'; action='disable_service'; hit_type='service'; detail='S1'; reason_cn='r'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$true; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S1'; matched_type='exact'; matched_field='service_name' }
+        $null = Set-ValidAutomaticPolicy $hit
         Save-PendingActions -Hits @($hit) -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 0
         @($p.observations).Count | Should -Be 0
+        @($p.resolved).Count | Should -Be 1
     }
     It 'clean 只处理 pending/failed' {
         ('pending') -in @('pending','failed') | Should -Be $true
