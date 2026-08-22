@@ -14,20 +14,23 @@
 - Schema 3.0 matcher provenance 贯穿 scan hit、pending schema 3 与管理员 clean：记录并重验 `matched_pattern` / `matched_type` / `matched_field`，危险动作只取决于实际命中的 `exact` 或路径字段上的 `path`；`contains` / `regex` 只调查，`execution.allow_auto` 不再提供豁免
 - `exact` / `contains` / `path` 统一为 `OrdinalIgnoreCase` 字面语义，只有 `regex` 解释表达式；管理员态按当前对象重验同一 matcher、同一字段及服务/自启/任务/进程身份，并在备份或 mutation 前最终复核。自启源限制为标准 HKLM/HKCU Run 键
 - pending 清单要求整数 `pending_schema_version: 3`，并包含 `actions` / `resolved` / `observations` / `suspicious` 四个数组；旧版、缺失、字符串或数组版本均要求重新 scan，CLI 与 GUI 都不自动升级。管理员 clean 还拒绝重复键、超过 5 MiB、深度超过 64、非法 UTF-8 或读取期间变化的 JSON 文件
-- 本次自动测试全部使用 Mock 或非破坏性夹具，不代表已在真实用户机器执行停服务、删除注册表自启项或禁用任务；实际 destructive clean 仍需管理员权限和用户确认
 
 ### 文档
 - 说明四组结果：推荐/自动安全、可选有影响、已处理、仅观察；自动安全项默认勾选，`HRWSCCtrl` 为必要性 `optional` 的手动项，默认不选，主动勾选后需要二次确认，并提示对联想电脑管家安全状态、主动防护和通知的影响
 - 修正 README 与 SECURITY 的活动 pending 文案为 schema 3 四数组 `actions` / `resolved` / `observations` / `suspicious`；明确 `exact/path` 才能执行、`contains/regex` 只能识别，已 disabled 项进入已处理且不重复清理
-- 记录确认顺序、pending 文件 SHA-256 与 `manual_impact` 身份摘要的双绑定、备份与恢复边界；注明真实 UAC 与系统 mutation 尚需人工验收，自动测试不等同于真实验收
+- 记录确认顺序、pending 文件 SHA-256 与 `manual_impact` 身份摘要的双绑定、备份与恢复边界
 - 注明桌面图标与 shortcut 仍是后续视觉任务，不属于本次文档提交
+
+### 自动验证与真实验收边界
+- 自动测试全部使用 Mock 或非破坏性夹具，不等同于真实 UAC、用户确认、系统 mutation、执行后状态核对或恢复闭环
+- 真实停服务、删除注册表自启项、禁用计划任务及恢复仍需管理员权限和人工验收
 
 ### 计划
 - 特征库数字签名验证（profiles.json.sig + 内置公钥）：SHA256 只能防下载损坏/镜像不一致/单文件篡改，攻击者同时控制 JSON 与 SHA256 下载地址时可整体替换——真正身份验证需要签名
 - 多品牌规则实测积累：当前 23 条规则中 Lenovo 11 条全实测，非联想规则大多 tested=false→investigate（正确但价值有限）。10 分方向是逐台实机积累 Dell/HP/ASUS/Xiaomi/Acer/MSI/Huawei 规则（每台机器扫描→人工确认→测试禁用/恢复→补 evidence 实测字段）。技术框架已跑在数据前面，**找机器实测的价值 > 继续加功能**
 - 特征库 impact 字段（规则级"影响"说明，如"AI 助手不可用"）：GUI 勾选视图已预留展示位，内容随各品牌实测积累补充（不编造）
 - src/Core/ 进一步 psm1 化：当前 dot-source .ps1 拆分保持 $script: 作用域共享（低风险）；下一阶段转真模块（.psm1 + Export-ModuleMember，需显式传递共享状态）
-- v2.0 GUI（鼠鼠风格 WPF 壳，进行中）
+- 产品版本 v2.0 GUI（鼠鼠风格 WPF 壳，进行中）
 
 ## [1.7.0] - 2026-08-09
 
