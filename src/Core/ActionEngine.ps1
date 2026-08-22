@@ -345,8 +345,26 @@ function Read-JsonStringToken([string]$Json, [ref]$Index) {
                 foreach ($hexCharacter in $hex.ToCharArray()) {
                     if ('0123456789abcdefABCDEF'.IndexOf($hexCharacter) -lt 0) { throw 'JSON Unicode 转义无效' }
                 }
-                $null = $builder.Append([char][Convert]::ToInt32($hex, 16))
+                $codeUnit = [Convert]::ToInt32($hex, 16)
                 $Index.Value += 4
+                if ($codeUnit -ge 0xD800 -and $codeUnit -le 0xDBFF) {
+                    if (($Index.Value + 6) -gt $Json.Length -or $Json[$Index.Value] -ne '\' -or $Json[$Index.Value + 1] -ne 'u') {
+                        throw 'JSON Unicode 高代理必须紧跟低代理转义'
+                    }
+                    $lowHex = $Json.Substring($Index.Value + 2, 4)
+                    foreach ($hexCharacter in $lowHex.ToCharArray()) {
+                        if ('0123456789abcdefABCDEF'.IndexOf($hexCharacter) -lt 0) { throw 'JSON Unicode 低代理转义无效' }
+                    }
+                    $lowCodeUnit = [Convert]::ToInt32($lowHex, 16)
+                    if ($lowCodeUnit -lt 0xDC00 -or $lowCodeUnit -gt 0xDFFF) { throw 'JSON Unicode 高代理后缺少合法低代理' }
+                    $null = $builder.Append([char]$codeUnit)
+                    $null = $builder.Append([char]$lowCodeUnit)
+                    $Index.Value += 6
+                } elseif ($codeUnit -ge 0xDC00 -and $codeUnit -le 0xDFFF) {
+                    throw 'JSON Unicode 低代理不能单独出现'
+                } else {
+                    $null = $builder.Append([char]$codeUnit)
+                }
             }
             default { throw 'JSON 字符串包含未知转义' }
         }
@@ -487,7 +505,7 @@ function Test-PendingEnvelopeShape($Pending) {
                 break
             }
         }
-        if ($null -eq $property -or $property.Value -isnot [System.Array]) { return $false }
+        if ($null -eq $property -or $property.Value -isnot [System.Array] -or $property.Value.Rank -ne 1) { return $false }
     }
     return $true
 }

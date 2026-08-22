@@ -188,6 +188,43 @@ Describe '待办清单规则' {
         }
     }
 
+    It '严格 schema v3 envelope 拒绝二维 <Branch> 分支' -TestCases @(
+        @{ Branch='actions' }
+        @{ Branch='resolved' }
+        @{ Branch='observations' }
+        @{ Branch='suspicious' }
+    ) {
+        param($Branch)
+        $pending = [pscustomobject]@{
+            pending_schema_version = [int32]3
+            actions = @()
+            resolved = @()
+            observations = @()
+            suspicious = @()
+        }
+        $matrix = [System.Array]::CreateInstance([object], [int[]]@(1,1))
+        $matrix.SetValue([pscustomobject]@{ id='matrix' }, 0, 0)
+        $pending.$Branch = $matrix
+
+        Test-PendingEnvelopeShape $pending | Should -BeFalse
+    }
+
+    It '严格 schema v3 envelope 接受四个一维单元素数组' {
+        $item = [pscustomobject]@{ id='one' }
+        $pending = [pscustomobject]@{
+            pending_schema_version = [int32]3
+            actions = [object[]]@($item)
+            resolved = [object[]]@($item)
+            observations = [object[]]@($item)
+            suspicious = [object[]]@($item)
+        }
+
+        Test-PendingEnvelopeShape $pending | Should -BeTrue
+        foreach ($branch in @('actions','resolved','observations','suspicious')) {
+            $pending.$branch.Rank | Should -Be 1
+        }
+    }
+
     It '拒绝缺失、空值、错误版本及非整数标量 pending schema' {
         $unsupported = @(
             [pscustomobject]@{},

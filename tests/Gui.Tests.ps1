@@ -1864,6 +1864,43 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
+    It 'GUI schema3 envelope 拒绝二维 <Branch> 分支' -TestCases @(
+        @{ Branch='actions' }
+        @{ Branch='resolved' }
+        @{ Branch='observations' }
+        @{ Branch='suspicious' }
+    ) {
+        param($Branch)
+        $pending = [pscustomobject]@{
+            pending_schema_version = [int32]3
+            actions = @()
+            resolved = @()
+            observations = @()
+            suspicious = @()
+        }
+        $matrix = [System.Array]::CreateInstance([object], [int[]]@(1,1))
+        $matrix.SetValue([pscustomobject]@{ id='matrix' }, 0, 0)
+        $pending.$Branch = $matrix
+
+        { Assert-GuiPendingEnvelopeShape -Pending $pending } | Should -Throw '*一维数组*'
+    }
+
+    It 'GUI schema3 envelope 接受四个一维单元素数组' {
+        $item = [pscustomobject]@{ id='one' }
+        $pending = [pscustomobject]@{
+            pending_schema_version = [int32]3
+            actions = [object[]]@($item)
+            resolved = [object[]]@($item)
+            observations = [object[]]@($item)
+            suspicious = [object[]]@($item)
+        }
+
+        { Assert-GuiPendingEnvelopeShape -Pending $pending } | Should -Not -Throw
+        foreach ($branch in @('actions','resolved','observations','suspicious')) {
+            $pending.$branch.Rank | Should -Be 1
+        }
+    }
+
     It 'GUI strict reader 拒绝 envelope 和 action 的 exact case Unicode escape 重复键' -TestCases @(
         @{ Label='envelope exact'; Json='{"pending_schema_version":3,"actions":[],"actions":[],"resolved":[],"observations":[],"suspicious":[]}' }
         @{ Label='envelope case'; Json='{"pending_schema_version":3,"actions":[],"Actions":[],"resolved":[],"observations":[],"suspicious":[]}' }
@@ -1875,6 +1912,29 @@ Describe '勾选视图 (v1.5.5)' {
         param($Label, $Json)
         $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Json)
         { ConvertFrom-GuiPendingBytes -Bytes $bytes } | Should -Throw '*重复*' -Because $Label
+    }
+
+    It 'GUI strict reader 拒绝字符串中的孤立高低 surrogate <label>' -TestCases @(
+        @{ Label='high property'; Json='{"\uD800":1}' }
+        @{ Label='low property'; Json='{"\uDC00":1}' }
+        @{ Label='high value'; Json='{"value":"\uD800"}' }
+        @{ Label='low value'; Json='{"value":"\uDC00"}' }
+    ) {
+        param($Label, $Json)
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Json)
+        { ConvertFrom-GuiPendingBytes -Bytes $bytes } | Should -Throw '*代理*' -Because $Label
+    }
+
+    It 'GUI strict reader 接受合法高低 surrogate pair' {
+        $json = '{"\uD83D\uDE00":"\uD83D\uDE00"}'
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
+        { ConvertFrom-GuiPendingBytes -Bytes $bytes } | Should -Not -Throw
+    }
+
+    It 'GUI 在 ConvertFrom-Json 折叠属性前拒绝高低孤立 surrogate 键组合' {
+        $json = '{"\uD800":1,"\uDC00":2}'
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($json)
+        { ConvertFrom-GuiPendingBytes -Bytes $bytes } | Should -Throw '*代理*'
     }
 
     It 'GUI strict reader 按根容器为 1 接受深度 64 并拒绝 65' {
@@ -1895,6 +1955,52 @@ Describe '勾选视图 (v1.5.5)' {
         $missing = '{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[]}'
         [System.IO.File]::WriteAllText($path, $missing, [System.Text.UTF8Encoding]::new($false))
         { Read-GuiPendingFile -Path $path } | Should -Throw '*数组*'
+    }
+
+    It 'Read-GuiPendingFile 真实入口拒绝超过 5MiB 的文件' {
+        $path = Join-Path $TestDrive 'gui-pending-too-large.json'
+        $bytes = New-Object byte[] ((5MB) + 1)
+        [System.IO.File]::WriteAllBytes($path, $bytes)
+
+        { Read-GuiPendingFile -Path $path } | Should -Throw '*size*'
+    }
+
+    It 'Read-GuiPendingFile 真实入口拒绝非法 UTF-8' {
+        $path = Join-Path $TestDrive 'gui-pending-invalid-utf8.json'
+        $utf8 = [System.Text.UTF8Encoding]::new($false)
+        $prefix = $utf8.GetBytes('{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[],"suspicious":[],"extension":"')
+        $suffix = $utf8.GetBytes('"}')
+        $bytes = [byte[]]($prefix + [byte[]]@(0xC3,0x28) + $suffix)
+        [System.IO.File]::WriteAllBytes($path, $bytes)
+
+        { Read-GuiPendingFile -Path $path } | Should -Throw
+    }
+
+    It 'Read-GuiPendingFile 真实入口接受 BOM=<WithBom> 的合法 UTF-8 schema3' -TestCases @(
+        @{ WithBom=$false }
+        @{ WithBom=$true }
+    ) {
+        param($WithBom)
+        $path = Join-Path $TestDrive ("gui-pending-bom-$WithBom.json")
+        $encoding = [System.Text.UTF8Encoding]::new([bool]$WithBom)
+        $jsonBytes = $encoding.GetBytes('{"pending_schema_version":3,"actions":[{"id":"ok"}],"resolved":[],"observations":[],"suspicious":[]}')
+        $bytes = [byte[]]($encoding.GetPreamble() + $jsonBytes)
+        [System.IO.File]::WriteAllBytes($path, $bytes)
+
+        $pending = Read-GuiPendingFile -Path $path
+
+        $pending.pending_schema_version | Should -Be 3
+        $pending.actions[0].id | Should -BeExactly 'ok'
+    }
+
+    It 'Read-GuiPendingFile 真实入口使用稳定字节快照且不调用 Get-Content' {
+        $path = Join-Path $TestDrive 'gui-pending-stable-reader.json'
+        $json = '{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[],"suspicious":[]}'
+        [System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))
+        Mock Get-Content { throw 'Get-Content must not run for pending JSON' }
+
+        { Read-GuiPendingFile -Path $path } | Should -Not -Throw
+        Assert-MockCalled Get-Content -Times 0 -Exactly
     }
 
     It 'Get-PendingItems 拒绝重复键 pending JSON' {

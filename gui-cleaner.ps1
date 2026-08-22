@@ -513,8 +513,8 @@ function Assert-GuiPendingEnvelopeShape {
                 break
             }
         }
-        if ($null -eq $property -or $property.Value -isnot [System.Array]) {
-            throw "pending review shape invalid: $name 必须是数组。请重新运行 scan 生成新清单。"
+        if ($null -eq $property -or $property.Value -isnot [System.Array] -or $property.Value.Rank -ne 1) {
+            throw "pending review shape invalid: $name 必须是一维数组。请重新运行 scan 生成新清单。"
         }
     }
     return $version
@@ -797,8 +797,26 @@ function Read-GuiJsonStringToken([string]$Json, [ref]$Index) {
                 foreach ($hexCharacter in $hex.ToCharArray()) {
                     if ('0123456789abcdefABCDEF'.IndexOf($hexCharacter) -lt 0) { throw 'JSON Unicode 转义无效' }
                 }
-                $null = $builder.Append([char][Convert]::ToInt32($hex, 16))
+                $codeUnit = [Convert]::ToInt32($hex, 16)
                 $Index.Value = $Index.Value + 4
+                if ($codeUnit -ge 0xD800 -and $codeUnit -le 0xDBFF) {
+                    if (($Index.Value + 6) -gt $Json.Length -or $Json[$Index.Value] -ne '\' -or $Json[$Index.Value + 1] -ne 'u') {
+                        throw 'JSON Unicode 高代理必须紧跟低代理转义'
+                    }
+                    $lowHex = $Json.Substring($Index.Value + 2, 4)
+                    foreach ($hexCharacter in $lowHex.ToCharArray()) {
+                        if ('0123456789abcdefABCDEF'.IndexOf($hexCharacter) -lt 0) { throw 'JSON Unicode 低代理转义无效' }
+                    }
+                    $lowCodeUnit = [Convert]::ToInt32($lowHex, 16)
+                    if ($lowCodeUnit -lt 0xDC00 -or $lowCodeUnit -gt 0xDFFF) { throw 'JSON Unicode 高代理后缺少合法低代理' }
+                    $null = $builder.Append([char]$codeUnit)
+                    $null = $builder.Append([char]$lowCodeUnit)
+                    $Index.Value = $Index.Value + 6
+                } elseif ($codeUnit -ge 0xDC00 -and $codeUnit -le 0xDFFF) {
+                    throw 'JSON Unicode 低代理不能单独出现'
+                } else {
+                    $null = $builder.Append([char]$codeUnit)
+                }
             }
             default { throw 'JSON 字符串包含未知转义' }
         }
@@ -907,9 +925,7 @@ function ConvertFrom-GuiPendingJsonText {
 function Read-GuiPendingFile {
     param([string]$Path = '')
     $pendingPath = if ($Path) { $Path } else { Join-Path $script:Root 'pending_actions.json' }
-    $pending = ConvertFrom-GuiPendingJsonText (Get-Content $pendingPath -Raw -Encoding UTF8)
-    $null = Assert-GuiPendingEnvelopeShape $pending
-    return $pending
+    return (Read-GuiPendingByteSnapshot -Path $pendingPath).Pending
 }
 
 function Get-GuiBytesSha256 {

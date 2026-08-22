@@ -615,6 +615,27 @@ Describe 'pending JSON 重复属性预检' {
         Test-JsonPropertyNamesUnique '{"actions":[{"id":"a","\u0069d":"b"}]}' | Should -BeFalse
     }
 
+    It '拒绝字符串中的孤立高低 surrogate <label>' -TestCases @(
+        @{ label='high property'; json='{"\uD800":1}' }
+        @{ label='low property'; json='{"\uDC00":1}' }
+        @{ label='high value'; json='{"value":"\uD800"}' }
+        @{ label='low value'; json='{"value":"\uDC00"}' }
+    ) {
+        param($label, $json)
+        Test-JsonPropertyNamesUnique $json | Should -BeFalse -Because $label
+        { ConvertFrom-StrictPendingJson $json } | Should -Throw '*代理*' -Because $label
+    }
+
+    It '接受合法高低 surrogate pair' {
+        $json = '{"\uD83D\uDE00":"\uD83D\uDE00"}'
+        Test-JsonPropertyNamesUnique $json | Should -BeTrue
+        { ConvertFrom-StrictPendingJson $json } | Should -Not -Throw
+    }
+
+    It '在 ConvertFrom-Json 折叠属性前拒绝高低孤立 surrogate 键组合' {
+        { ConvertFrom-StrictPendingJson '{"\uD800":1,"\uDC00":2}' } | Should -Throw '*代理*'
+    }
+
     It '接受合法嵌套 JSON 并由严格入口转换' {
         $json = '{"pending_schema_version":3,"actions":[{"id":"a","status":"pending"}],"observations":[]}'
         Test-JsonPropertyNamesUnique $json | Should -BeTrue
