@@ -486,4 +486,43 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
             $script:ConfirmedImpactSha256 = $oldImpactDigest
         }
     }
+
+    It '重复选择 index 对 <executionClass> 只形成一个最终 action 且只授权和执行一次' -TestCases @(
+        @{ executionClass='automatic_safe'; safe=$true }
+        @{ executionClass='manual_impact'; safe=$false }
+    ) {
+        param($executionClass, $safe)
+        $pendingAction = [pscustomobject]@{
+            id="dedupe-$executionClass"; name_cn='Dedupe'; detail='Svc'; reason_cn='test'
+            hit_type='service'; action='disable_service'; status='pending'; service_name='DedupeSvc'
+            matched_pattern='DedupeSvc'; matched_type='exact'; matched_field='service_name'; safe=$safe
+            execution_class=$executionClass; necessity='optional'; default_selected=($executionClass -ceq 'automatic_safe')
+            requires_confirmation=($executionClass -ceq 'manual_impact'); impact_cn='impact'; cleanup_reason_cn='reason'
+        }
+        $path = Join-Path $TestDrive ("dedupe-$executionClass.json")
+        $payload = [pscustomobject]@{pending_schema_version=3;generated='scan';actions=@($pendingAction);resolved=@();observations=@();suspicious=@()}
+        [System.IO.File]::WriteAllText($path, (ConvertTo-Json -InputObject $payload -Depth 8), [System.Text.UTF8Encoding]::new($false))
+        $oldPendingFile = $script:PendingFile
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $script:ConfirmedImpactSha256 = if ($executionClass -ceq 'manual_impact') { Get-ManualImpactDigest @($pendingAction) } else { $null }
+        $YesToAll = $false
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Read-Host { '0,0,0' }
+        Mock Initialize-ProtectedBackupDirectory { $BackupDir }
+        Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';reason='mocked'} }
+        try {
+            Invoke-Clean
+            Should -Invoke Test-PendingActionEligible -Times 1 -Exactly
+            Should -Invoke Test-SelectedPendingActionAuthorized -Times 1 -Exactly
+            Should -Invoke Initialize-ProtectedBackupDirectory -Times 1 -Exactly
+            Should -Invoke Invoke-ServiceDisableAction -Times 1 -Exactly
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+    }
 }

@@ -1054,7 +1054,7 @@ function Test-ManualImpactDigestActionShape($Action) {
 }
 
 function Get-ManualImpactDigest($Actions) {
-    $identityKeys = @()
+    $identityKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($action in @($Actions)) {
         if ($null -eq $action) { throw 'manual impact digest action is null' }
         $executionClass = Get-PendingHitProperty $action 'execution_class'
@@ -1066,7 +1066,7 @@ function Get-ManualImpactDigest($Actions) {
         if ($executionClass -cnotin @('automatic_safe','manual_impact')) { throw 'manual impact digest execution_class is unsupported' }
         if ($executionClass -cne 'manual_impact') { continue }
         if (-not (Test-ManualImpactDigestActionShape $action)) { throw 'manual impact digest action identity is invalid' }
-        $identityKeys += (Get-PendingIdentityKey $action)
+        $null = $identityKeys.Add((Get-PendingIdentityKey $action))
     }
     if ($identityKeys.Count -eq 0) { return $null }
 
@@ -2344,6 +2344,12 @@ function Invoke-Clean {
                 if ([int]::TryParse($part.Trim(), [ref]$n) -and $n -ge 0 -and $n -lt $actions.Count) { $indexes += $n }
             }
         }
+        $seenIndexes = [System.Collections.Generic.HashSet[int]]::new()
+        $uniqueIndexes = @()
+        foreach ($index in $indexes) {
+            if ($seenIndexes.Add([int]$index)) { $uniqueIndexes += [int]$index }
+        }
+        $indexes = $uniqueIndexes
         if ($indexes.Count -eq 0) { Write-Host '未选择有效条目, 已取消。'; exit 0 }
 
         # Bind manual confirmation once to exactly the user's final selected subset. This is independent
@@ -2353,16 +2359,7 @@ function Invoke-Clean {
         try { $impactConfirmation = New-ManualImpactConfirmationContext $selectedActions $script:ConfirmedImpactSha256 } catch {
             $impactConfirmation = [pscustomobject]@{ HasManualImpact=$true; IsApproved=$false; ExpectedDigest=$null }
         }
-        $selectionAuthorized = @()
-        foreach ($selectedAction in $selectedActions) {
-            if (Test-SelectedPendingActionAuthorized $selectedAction $profiles $impactConfirmation) {
-                $selectionAuthorized += $selectedAction
-            }
-        }
-        $actions = $selectionAuthorized
-        if ($actions.Count -eq 0) {
-            Write-Host '最终选择未包含可授权动作，未创建备份目录。' -ForegroundColor Red
-        }
+        $actions = $selectedActions
 
         if ($actions.Count -gt 0) {
             $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'

@@ -1106,6 +1106,22 @@ Describe 'manual_impact 精确影响确认' {
         $forward | Should -Not -Be (Get-ManualImpactDigest @($first, $replacement))
     }
 
+    It '同一 manual identity 重复 1、2、N 次得到同一 digest' {
+        $manual = New-ManualImpactPending
+        $single = Get-ManualImpactDigest @($manual)
+
+        (Get-ManualImpactDigest @($manual, $manual)) | Should -Be $single
+        (Get-ManualImpactDigest @($manual, $manual, $manual, $manual, $manual)) | Should -Be $single
+    }
+
+    It 'Ordinal identity 集合不合并仅大小写不同的 identity' {
+        $lower = New-ManualImpactPending
+        $upper = New-ManualImpactPending
+        $upper.id = 'Rule'
+
+        (Get-ManualImpactDigest @($lower, $upper)) | Should -Not -Be (Get-ManualImpactDigest @($lower))
+    }
+
     It 'digest 只纳入严格 manual_impact action，且身份包含 rule/action/target/provenance' {
         $manual = New-ManualImpactPending
         $automatic = New-ServicePending
