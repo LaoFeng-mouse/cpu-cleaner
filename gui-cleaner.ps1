@@ -2185,7 +2185,8 @@ function Start-GuiExecution {
                 throw '高影响清理摘要无效。请重新运行 scan 并审核。'
             }
             $confirmationCopies = @($manualActions | ForEach-Object { Copy-PendingActionForSubset $_ })
-            if (-not (Confirm-GuiImpactActions -Actions $confirmationCopies)) {
+            $result = Confirm-GuiImpactActions -Actions $confirmationCopies
+            if (-not ($result -is [bool] -and $result -eq $true)) {
                 $null = Clear-GuiExecutionResources -RemoveTemp
                 return $false
             }

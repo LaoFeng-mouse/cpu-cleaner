@@ -2633,11 +2633,16 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It '高影响确认返回 No 或关闭时不写 subset、不启动管理员进程且保留 reviewed snapshot' -TestCases @(
-        @{ Response=$false }
-        @{ Response=$null }
+    It '高影响确认仅接受 Boolean true，返回 <Label> 时不写 subset、不启动管理员进程且保留 reviewed snapshot' -TestCases @(
+        @{ Label='Boolean false'; Response=$false }
+        @{ Label='string true'; Response='true' }
+        @{ Label='string false'; Response='false' }
+        @{ Label='integer one'; Response=1 }
+        @{ Label='array'; Response=[object[]]@($true,$false) }
+        @{ Label='null'; Response=$null }
+        @{ Label='object'; Response=[pscustomobject]@{ Confirmed=$true } }
     ) {
-        param($Response)
+        param($Label, $Response)
         $oldTemp = $env:TEMP
         $tempRoot = Join-Path $TestDrive ('impact-no-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
