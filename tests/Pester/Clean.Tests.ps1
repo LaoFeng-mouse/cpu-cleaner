@@ -380,3 +380,110 @@ Describe '清理动作逻辑' {
         Should -Invoke Invoke-ServiceConfigDisable -Times 0 -Exactly
     }
 }
+
+Describe 'clean impact confirmation 参数与最终选择闸门' {
+    BeforeEach {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        $script:Root = $projectRoot
+        foreach ($file in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
+            . (Join-Path $projectRoot ('src\Core\' + $file + '.ps1'))
+        }
+        function Is-Admin { return $false }
+        function Write-Step { param([string]$Message) }
+        $script:RequirePendingSha256 = $false
+        $script:PendingSha256 = ''
+        $script:ConfirmedImpactSha256 = $null
+        Mock Get-SecureBackupRoot { Split-Path $TestDrive -Parent }
+    }
+
+    It 'ConfirmedImpactSha256Arg 仅 clean 接受 64 位 hex 并规范化为小写' {
+        (Get-NormalizedConfirmedImpactSha256 -Value ('A' * 64) -Mode 'clean' -WasProvided $true) | Should -Be ('a' * 64)
+        (Get-NormalizedConfirmedImpactSha256 -Value $null -Mode 'clean' -WasProvided $false) | Should -BeNullOrEmpty
+    }
+
+    It 'ConfirmedImpactSha256Arg 的数组、null、空白、非 hex 或非 clean 模式均拒绝' -TestCases @(
+        @{ label='array'; value=@(('a' * 64)); mode='clean'; supplied=$true }
+        @{ label='null'; value=$null; mode='clean'; supplied=$true }
+        @{ label='blank'; value=' '; mode='clean'; supplied=$true }
+        @{ label='short'; value=('a' * 63); mode='clean'; supplied=$true }
+        @{ label='scan'; value=('a' * 64); mode='scan'; supplied=$true }
+        @{ label='restore'; value=('a' * 64); mode='restore'; supplied=$true }
+    ) {
+        param($label, $value, $mode, $supplied)
+        { Get-NormalizedConfirmedImpactSha256 -Value $value -Mode $mode -WasProvided $supplied } | Should -Throw -Because $label
+    }
+
+    It '真实 HRWSCCtrl pending 仅在正确 digest 下通过管理员最终授权，错误 digest 不创建备份或 mutation' -TestCases @(
+        @{ label='correct'; useCorrect=$true; expectedMutation=1 }
+        @{ label='wrong'; useCorrect=$false; expectedMutation=0 }
+    ) {
+        param($label, $useCorrect, $expectedMutation)
+        $pendingAction = [pscustomobject]@{
+            id='lenovo-hrwscctrl'; name_cn='HRWSCCtrl'; detail='HRWSCCtrl'; reason_cn='manual'
+            hit_type='service'; action='disable_service'; status='pending'; service_name='HRWSCCtrl'
+            matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='可能影响联想电脑管家的安全状态、主动防护和通知'; cleanup_reason_cn='不使用联想电脑管家时可减少常驻后台'
+        }
+        $profiles = [pscustomobject]@{ profiles=@([pscustomobject]@{
+            id='lenovo-hrwscctrl'; safe=$false; evidence=[pscustomobject]@{tested=$true}
+            actions=[pscustomobject]@{service='none'}; manual_actions=[pscustomobject]@{service='disable_service'}
+            cleanup_policy=[pscustomobject]@{
+                execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                impact_cn='可能影响联想电脑管家的安全状态、主动防护和通知'; cleanup_reason_cn='不使用联想电脑管家时可减少常驻后台'
+            }
+            detect=[pscustomobject]@{services=@([pscustomobject]@{match='HRWSCCtrl';type='exact'});autostarts=@();tasks=@();processes=@()}
+        }) }
+        $path = Join-Path $TestDrive ("hrwscctrl-$label.json")
+        $payload = [pscustomobject]@{pending_schema_version=3;generated='scan';actions=@($pendingAction);resolved=@();observations=@();suspicious=@()}
+        [System.IO.File]::WriteAllText($path, (ConvertTo-Json -InputObject $payload -Depth 8), [System.Text.UTF8Encoding]::new($false))
+        $oldPendingFile = $script:PendingFile
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $correctDigest = Get-ManualImpactDigest @($pendingAction)
+        $script:ConfirmedImpactSha256 = if ($useCorrect) { $correctDigest } else { ('0' * 64) }
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { $profiles }
+        Mock Get-Service { [pscustomobject]@{Name='HRWSCCtrl';DisplayName='HRWSCCtrl'} } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+        Mock Initialize-ProtectedBackupDirectory { $BackupDir }
+        Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';reason='mocked'} }
+        try {
+            Invoke-Clean
+            Should -Invoke Initialize-ProtectedBackupDirectory -Times $expectedMutation -Exactly
+            Should -Invoke Invoke-ServiceDisableAction -Times $expectedMutation -Exactly
+            $after = Read-StrictPendingJsonFile $path
+            if ($useCorrect) { $after.actions[0].status | Should -Be 'success' }
+            else { $after.actions[0].status | Should -Be 'skipped' }
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+    }
+
+    It 'pending 文件 hash 与 manual impact digest 是独立闸门，错误文件 hash 先阻止正确 digest' {
+        $path = Join-Path $TestDrive 'independent-hash-gate.json'
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[],"suspicious":[]}', [System.Text.UTF8Encoding]::new($false))
+        $oldPendingFile = $script:PendingFile
+        $oldRequirePendingSha256 = $script:RequirePendingSha256
+        $oldPendingSha256 = $script:PendingSha256
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $script:RequirePendingSha256 = $true
+        $script:PendingSha256 = ('0' * 64)
+        $script:ConfirmedImpactSha256 = ('a' * 64)
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { throw 'must not load profiles before pending hash gate' }
+        Mock Initialize-ProtectedBackupDirectory { throw 'must not create backup before pending hash gate' }
+        try {
+            { Invoke-Clean } | Should -Throw '*SHA-256*'
+            Should -Invoke Load-Profiles -Times 0 -Exactly
+            Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:RequirePendingSha256 = $oldRequirePendingSha256
+            $script:PendingSha256 = $oldPendingSha256
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+    }
+}

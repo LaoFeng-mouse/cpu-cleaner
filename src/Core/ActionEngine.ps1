@@ -1016,6 +1016,96 @@ function Get-PendingIdentityKey($Item) {
     return ConvertTo-Json -InputObject $identity -Compress -Depth 4
 }
 
+function Get-NormalizedConfirmedImpactSha256 {
+    param($Value, [string]$Mode, [bool]$WasProvided)
+    if (-not $WasProvided) { return $null }
+    if ($Mode -cne 'clean') { throw 'ConfirmedImpactSha256Arg is valid only with Mode clean.' }
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value) -or $Value -cnotmatch '^[0-9a-fA-F]{64}$') {
+        throw 'ConfirmedImpactSha256Arg must be one non-blank 64-character hexadecimal SHA-256 value.'
+    }
+    return $Value.ToLowerInvariant()
+}
+
+function Test-ManualImpactDigestActionShape($Action) {
+    if ($null -eq $Action -or
+        (Get-StrictNonBlankStringProperty $Action 'execution_class') -cne 'manual_impact' -or
+        (Get-StrictNonBlankStringProperty $Action 'id') -eq $null -or
+        (Get-StrictNonBlankStringProperty $Action 'hit_type') -eq $null -or
+        (Get-StrictNonBlankStringProperty $Action 'action') -eq $null -or
+        $Action.action -cnotin $script:DangerousActions -or
+        -not (Test-HitMatcherEvidenceShape $Action -AllowedMatchTypes @('exact','path','contains','regex','publisher','sha256')) -or
+        -not (Test-ActionMatchesHitType $Action.action $Action.hit_type)) { return $false }
+    switch -CaseSensitive ($Action.hit_type) {
+        'service' { return $null -ne (Get-StrictNonBlankStringProperty $Action 'service_name') }
+        'autostart' {
+            return $null -ne (Get-StrictNonBlankStringProperty $Action 'autostart_source') -and
+                $null -ne (Get-StrictNonBlankStringProperty $Action 'autostart_name') -and
+                $null -ne (Get-StrictNonBlankStringProperty $Action 'autostart_value')
+        }
+        'task' { return $null -ne (Get-StrictNonBlankStringProperty $Action 'task_path') }
+        'process' {
+            return $null -ne (Get-StrictNonBlankStringProperty $Action 'process_name') -and
+                $null -ne (Get-StrictNonBlankStringProperty $Action 'process_path') -and
+                $Action.PSObject.Properties.Name -contains 'process_id' -and
+                (Test-PositiveScalarProcessId $Action.process_id)
+        }
+        default { return $false }
+    }
+}
+
+function Get-ManualImpactDigest($Actions) {
+    $identityKeys = @()
+    foreach ($action in @($Actions)) {
+        if ($null -eq $action) { throw 'manual impact digest action is null' }
+        $executionClass = Get-PendingHitProperty $action 'execution_class'
+        # Legacy automatic_safe rows predate execution_class and are not part of this digest.
+        if ($null -eq $executionClass) { continue }
+        if ($executionClass -isnot [string] -or [string]::IsNullOrWhiteSpace($executionClass)) {
+            throw 'manual impact digest execution_class is missing or invalid'
+        }
+        if ($executionClass -cnotin @('automatic_safe','manual_impact')) { throw 'manual impact digest execution_class is unsupported' }
+        if ($executionClass -cne 'manual_impact') { continue }
+        if (-not (Test-ManualImpactDigestActionShape $action)) { throw 'manual impact digest action identity is invalid' }
+        $identityKeys += (Get-PendingIdentityKey $action)
+    }
+    if ($identityKeys.Count -eq 0) { return $null }
+
+    $sortedIdentityKeys = [string[]]$identityKeys
+    [array]::Sort($sortedIdentityKeys, [System.StringComparer]::Ordinal)
+    $bytes = [System.Text.UTF8Encoding]::new($false, $true).GetBytes(($sortedIdentityKeys -join "`n"))
+    $sha = $null
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        return (([System.BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant())
+    } finally {
+        if ($null -ne $sha) { $sha.Dispose() }
+    }
+}
+
+function Test-FixedTimeSha256Equals($Left, $Right) {
+    if ($Left -isnot [string] -or $Right -isnot [string] -or $Left.Length -ne 64 -or $Right.Length -ne 64) { return $false }
+    $difference = 0
+    for ($index = 0; $index -lt 64; $index++) {
+        $difference = $difference -bor (([int][char]$Left[$index]) -bxor ([int][char]$Right[$index]))
+    }
+    return $difference -eq 0
+}
+
+function New-ManualImpactConfirmationContext($Actions, $ConfirmedImpactSha256) {
+    $expectedDigest = Get-ManualImpactDigest $Actions
+    if ($null -eq $expectedDigest) {
+        return [pscustomobject]@{ HasManualImpact = $false; IsApproved = $true; ExpectedDigest = $null }
+    }
+    try { $providedDigest = Get-NormalizedConfirmedImpactSha256 -Value $ConfirmedImpactSha256 -Mode 'clean' -WasProvided $true } catch {
+        return [pscustomobject]@{ HasManualImpact = $true; IsApproved = $false; ExpectedDigest = $expectedDigest }
+    }
+    return [pscustomobject]@{
+        HasManualImpact = $true
+        IsApproved = (Test-FixedTimeSha256Equals $providedDigest $expectedDigest)
+        ExpectedDigest = $expectedDigest
+    }
+}
+
 function ConvertTo-PendingTargetIdentityValue($Value) {
     if ($null -eq $Value) { return '' }
     if ($Value -is [string]) { return $Value.Trim().ToUpperInvariant() }
@@ -1307,7 +1397,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
 # v1.5.3 P0: 提权后重新验证授权动作 (不信任 pending_actions.json)
 # pending_actions.json 在 scan 与管理员 clean 之间可能被人为修改,
 # clean 必须按当前特征库重新确认: id 存在 / tested=true / safe=true / action 匹配 / target 匹配
-function Test-PendingActionAuthorized($p, $profiles) {
+function Test-PendingActionEligible($p, $profiles) {
     if ($null -eq $p -or $null -eq $profiles) { return $false }
     foreach ($propertyName in @('id','hit_type','action','status','matched_pattern','matched_type','matched_field')) {
         if ($null -eq (Get-StrictNonBlankStringProperty $p $propertyName)) { return $false }
@@ -1324,13 +1414,37 @@ function Test-PendingActionAuthorized($p, $profiles) {
     if ($rules.Count -ne 1) { return $false }
     $rule = $rules[0]
 
-    if ($rule.PSObject.Properties.Name -notcontains 'safe' -or $rule.safe -isnot [bool] -or $rule.safe -ne $true) { return $false }
+    if ($rule.PSObject.Properties.Name -notcontains 'safe' -or $rule.safe -isnot [bool]) { return $false }
     if ($rule.PSObject.Properties.Name -notcontains 'evidence' -or $null -eq $rule.evidence) { return $false }
     if ($rule.evidence.PSObject.Properties.Name -notcontains 'tested' -or $rule.evidence.tested -isnot [bool] -or $rule.evidence.tested -ne $true) { return $false }
 
     $declaredAction = Get-ActionFor $rule.actions $p.hit_type
     if ($declaredAction -isnot [string] -or [string]::IsNullOrWhiteSpace($declaredAction)) { return $false }
-    if ($declaredAction -cnotin $script:DangerousActions -or $p.action -cne $declaredAction) { return $false }
+
+    $pendingExecutionClass = Get-PendingHitProperty $p 'execution_class'
+    $isAutomaticSafe = $null -eq $pendingExecutionClass -or $pendingExecutionClass -ceq 'automatic_safe'
+    $isManualImpact = $pendingExecutionClass -is [string] -and $pendingExecutionClass -ceq 'manual_impact'
+    if (-not $isAutomaticSafe -and -not $isManualImpact) { return $false }
+
+    if ($isAutomaticSafe) {
+        # Preserve the original automatic-safe contract; legacy pending rows did not carry a policy object.
+        if ($rule.safe -ne $true -or
+            $declaredAction -cnotin $script:DangerousActions -or $p.action -cne $declaredAction) { return $false }
+    } else {
+        # Manual authorization is a separate, stricter path. safe=false is permitted but never grants anything.
+        if ($p.safe -isnot [bool] -or $p.safe -ne $rule.safe -or
+            $declaredAction -cin $script:DangerousActions) { return $false }
+        $manualAction = Get-ManualActionFor $rule $p.hit_type
+        if ($manualAction -isnot [string] -or $manualAction -cnotin $script:DangerousActions -or $p.action -cne $manualAction) { return $false }
+        $pendingPolicy = Get-ValidPendingDisplayPolicy $p
+        $currentPolicy = Get-CleanupPolicy $rule
+        $currentPolicy = if ($null -eq $currentPolicy) { $null } else { Get-ValidPendingDisplayPolicy $currentPolicy }
+        if ($null -eq $pendingPolicy -or $null -eq $currentPolicy -or
+            $pendingPolicy.execution_class -cne 'manual_impact' -or $currentPolicy.execution_class -cne 'manual_impact') { return $false }
+        foreach ($policyName in @('execution_class','necessity','default_selected','requires_confirmation','impact_cn','cleanup_reason_cn')) {
+            if ($pendingPolicy.$policyName -cne $currentPolicy.$policyName) { return $false }
+        }
+    }
 
     if ($rule.PSObject.Properties.Name -notcontains 'detect' -or $null -eq $rule.detect) { return $false }
     $detectProperty = switch ($p.hit_type) {
@@ -1357,8 +1471,24 @@ function Test-PendingActionAuthorized($p, $profiles) {
     return [bool](Test-DetectMatch $currentValue $savedMatcher)
 }
 
-function Test-SelectedPendingActionAuthorized($Pending, $Profiles) {
-    if (Test-PendingActionAuthorized $Pending $Profiles) { return $true }
+function Test-PendingActionAuthorized($p, $profiles, $ConfirmedImpactSha256 = $null, $ManualImpactDigest = $null) {
+    if (-not (Test-PendingActionEligible $p $profiles)) { return $false }
+    if ((Get-PendingHitProperty $p 'execution_class') -cne 'manual_impact') { return $true }
+    try { $providedDigest = Get-NormalizedConfirmedImpactSha256 -Value $ConfirmedImpactSha256 -Mode 'clean' -WasProvided $true } catch { return $false }
+    if ($ManualImpactDigest -isnot [string] -or $ManualImpactDigest -cnotmatch '^[0-9a-f]{64}$') { return $false }
+    return Test-FixedTimeSha256Equals $providedDigest $ManualImpactDigest
+}
+
+function Test-SelectedPendingActionAuthorized($Pending, $Profiles, $ImpactConfirmation) {
+    if ((Get-PendingHitProperty $Pending 'execution_class') -ceq 'manual_impact' -and
+        ($null -eq $ImpactConfirmation -or $ImpactConfirmation.HasManualImpact -isnot [bool] -or
+            $ImpactConfirmation.HasManualImpact -ne $true -or $ImpactConfirmation.IsApproved -isnot [bool] -or
+            $ImpactConfirmation.IsApproved -ne $true)) {
+        if ($null -ne $Pending) { $Pending.status = 'skipped' }
+        Write-Host '  跳过: 手动影响确认摘要无效或与最终选择不一致。' -ForegroundColor Red
+        return $false
+    }
+    if (Test-PendingActionEligible $Pending $Profiles) { return $true }
     if ($null -ne $Pending) { $Pending.status = 'skipped' }
     Write-Host '  跳过: 执行前最终授权失败，当前系统状态或特征证据已变化。' -ForegroundColor Red
     return $false
@@ -2174,7 +2304,8 @@ function Invoke-Clean {
     $authorized = @()
     $rejected = @()
     foreach ($a in $actions) {
-        if (Test-PendingActionAuthorized $a $profiles) { $authorized += $a }
+        # Manual rows must be displayed before the user can supply a digest for the final selected subset.
+        if (Test-PendingActionEligible $a $profiles) { $authorized += $a }
         else { $rejected += $a; $a.status = 'skipped' }
     }
     if ($rejected.Count -gt 0) {
@@ -2215,25 +2346,45 @@ function Invoke-Clean {
         }
         if ($indexes.Count -eq 0) { Write-Host '未选择有效条目, 已取消。'; exit 0 }
 
-        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-        $secureBackupRoot = Get-SecureBackupRoot
-        $backupDir = Join-Path $secureBackupRoot $stamp
-        $backupDirReady = $false
+        # Bind manual confirmation once to exactly the user's final selected subset. This is independent
+        # from the pending-file SHA-256 binding checked above.
+        $selectedActions = @()
+        foreach ($index in $indexes) { $selectedActions += $actions[$index] }
+        try { $impactConfirmation = New-ManualImpactConfirmationContext $selectedActions $script:ConfirmedImpactSha256 } catch {
+            $impactConfirmation = [pscustomobject]@{ HasManualImpact=$true; IsApproved=$false; ExpectedDigest=$null }
+        }
+        $selectionAuthorized = @()
+        foreach ($selectedAction in $selectedActions) {
+            if (Test-SelectedPendingActionAuthorized $selectedAction $profiles $impactConfirmation) {
+                $selectionAuthorized += $selectedAction
+            }
+        }
+        $actions = $selectionAuthorized
+        if ($actions.Count -eq 0) {
+            Write-Host '最终选择未包含可授权动作，未创建备份目录。' -ForegroundColor Red
+        }
 
-        foreach ($idx in $indexes) {
-            $p = $actions[$idx]
-            $tag = ('{0}_{1}' -f $idx, ($p.id -replace '[^a-zA-Z0-9_-]', '_'))
+        if ($actions.Count -gt 0) {
+            $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+            $secureBackupRoot = Get-SecureBackupRoot
+            $backupDir = Join-Path $secureBackupRoot $stamp
+            $backupDirReady = $false
+
+        for ($selectedIndex = 0; $selectedIndex -lt $actions.Count; $selectedIndex++) {
+            $p = $actions[$selectedIndex]
+            $tag = ('{0}_{1}' -f $selectedIndex, ($p.id -replace '[^a-zA-Z0-9_-]', '_'))
             Write-Step ('处理: {0} ({1})' -f $p.name_cn, $p.action)
 
-            # v1.2 强制规则: safe=false 即使被选中/YesToAll 也拒绝执行
-            if (-not $p.safe) {
+            # automatic_safe keeps the original safe=true guard. manual_impact is gated by the
+            # selection-bound digest and its current policy instead of treating safe=false as permission.
+            if ($p.execution_class -ceq 'automatic_safe' -and $p.safe -ne $true) {
                 Write-Host '  拒绝: safe=false 条目禁止自动执行, 只做人工调查。' -ForegroundColor Red
                 $p.status = 'skipped'
                 continue
             }
 
             # 用户作出最终选择后，在任何备份或系统变更前完整重读并重放保存的 matcher。
-            if (-not (Test-SelectedPendingActionAuthorized $p $profiles)) { continue }
+            if (-not (Test-SelectedPendingActionAuthorized $p $profiles $impactConfirmation)) { continue }
             # 安全顺序不变量：下方分支或其事务 helper 才能调用 Backup-RegistryKey、
             # sc.exe config、sc.exe stop、Disable-ScheduledTask 等 mutation 原语。
             if (-not $backupDirReady) {
@@ -2288,6 +2439,8 @@ function Invoke-Clean {
             Write-Step "动作处理完成。备份目录: $backupDir"
         } else {
             Write-Step '动作处理完成。没有已授权动作进入执行阶段，未创建备份目录。'
+        }
+
         }
 
     }

@@ -36,6 +36,29 @@ BeforeAll {
         }
     }
 
+    function New-ManualImpactProfiles {
+        $profiles = New-AuthProfiles -Action 'none' -Safe $false
+        $rule = $profiles.profiles[0]
+        $rule | Add-Member -NotePropertyName manual_actions -NotePropertyValue ([pscustomobject]@{ service = 'disable_service' })
+        $rule | Add-Member -NotePropertyName cleanup_policy -NotePropertyValue ([pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'; default_selected = $false; requires_confirmation = $true
+            impact_cn = '会影响厂商安全组件'; cleanup_reason_cn = '不使用该组件时可减少后台'
+        })
+        return $profiles
+    }
+
+    function New-ManualImpactPending {
+        $pending = New-ServicePending
+        $pending | Add-Member -NotePropertyName safe -NotePropertyValue $false
+        $pending | Add-Member -NotePropertyName execution_class -NotePropertyValue 'manual_impact'
+        $pending | Add-Member -NotePropertyName necessity -NotePropertyValue 'optional'
+        $pending | Add-Member -NotePropertyName default_selected -NotePropertyValue $false
+        $pending | Add-Member -NotePropertyName requires_confirmation -NotePropertyValue $true
+        $pending | Add-Member -NotePropertyName impact_cn -NotePropertyValue '会影响厂商安全组件'
+        $pending | Add-Member -NotePropertyName cleanup_reason_cn -NotePropertyValue '不使用该组件时可减少后台'
+        return $pending
+    }
+
     function Is-Admin { return $false }
     function Write-Step { param([string]$Message) }
     if (-not (Get-Command Get-NormalizedFinalPathFromHandle -ErrorAction SilentlyContinue)) {
@@ -519,11 +542,15 @@ Describe '执行前最终授权防 TOCTOU' {
 
     It '真实 clean 选中循环在任何备份或 mutation 之前调用最终授权 helper' {
         $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
-        $loop = $source.IndexOf('foreach ($idx in $indexes)')
+        $selection = $source.IndexOf('$selectedActions = @()')
+        $impactDigest = $source.IndexOf('New-ManualImpactConfirmationContext', $selection)
+        $loop = $source.IndexOf('for ($selectedIndex = 0;', $selection)
         $guard = $source.IndexOf('Test-SelectedPendingActionAuthorized', $loop)
         $mutations = @('Initialize-ProtectedBackupDirectory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Invoke-LiteralAutostartRemoval', 'Disable-ScheduledTask') |
             ForEach-Object { $source.IndexOf($_, $loop) }
 
+        $selection | Should -BeGreaterOrEqual 0
+        $impactDigest | Should -BeGreaterThan $selection
         $loop | Should -BeGreaterOrEqual 0
         $guard | Should -BeGreaterThan $loop
         foreach ($mutation in $mutations) {
@@ -1008,5 +1035,115 @@ Describe 'clean pending v3 状态持久化' {
         @($built.observations) | Should -Be @('obs')
         @($built.suspicious) | Should -Be @('sus')
         $built.safety_nonce | Should -Be 'n'
+    }
+}
+
+Describe 'manual_impact 精确影响确认' {
+    BeforeEach {
+        Mock Get-Service { [pscustomobject]@{ Name='Svc'; DisplayName='Svc' } } -ParameterFilter { $Name -eq 'Svc' }
+    }
+
+    It 'automatic_safe exact 无需 impact digest 仍授权' {
+        $pending = New-ServicePending
+        $pending | Add-Member -NotePropertyName execution_class -NotePropertyValue 'automatic_safe'
+
+        Test-PendingActionAuthorized $pending (New-AuthProfiles) | Should -BeTrue
+    }
+
+    It 'manual_impact 缺失、空白、非法、错误或 stale digest 均拒绝' -TestCases @(
+        @{ label='missing'; digest=$null }
+        @{ label='blank'; digest=' ' }
+        @{ label='short'; digest=('a' * 63) }
+        @{ label='non-hex'; digest=('g' * 64) }
+        @{ label='wrong'; digest=('0' * 64) }
+    ) {
+        param($label, $digest)
+        $pending = New-ManualImpactPending
+        $expected = Get-ManualImpactDigest @($pending)
+
+        Test-PendingActionAuthorized $pending (New-ManualImpactProfiles) $digest $expected | Should -BeFalse -Because $label
+    }
+
+    It 'manual_impact 正确 digest（接受大写输入）授权' {
+        $pending = New-ManualImpactPending
+        $digest = Get-ManualImpactDigest @($pending)
+
+        Test-PendingActionAuthorized $pending (New-ManualImpactProfiles) $digest.ToUpperInvariant() $digest | Should -BeTrue
+    }
+
+    It 'manual_impact 最终授权缺少 selection confirmation context 时失败关闭' {
+        $pending = New-ManualImpactPending
+
+        Test-SelectedPendingActionAuthorized $pending (New-ManualImpactProfiles) $null | Should -BeFalse
+        $pending.status | Should -Be 'skipped'
+    }
+
+    It '另一 identity set 的合法 digest 不能授权当前 manual action' {
+        $pending = New-ManualImpactPending
+        $other = New-ManualImpactPending
+        $other.id = 'other-rule'
+        $currentDigest = Get-ManualImpactDigest @($pending)
+        $otherDigest = Get-ManualImpactDigest @($other)
+
+        $otherDigest | Should -Not -Be $currentDigest
+        Test-PendingActionAuthorized $pending (New-ManualImpactProfiles) $otherDigest $currentDigest | Should -BeFalse
+    }
+
+    It 'manual identities 的输入顺序不影响 digest，而增删或替换目标会改变 digest' {
+        $first = New-ManualImpactPending
+        $second = New-ManualImpactPending
+        $second.service_name = 'OtherSvc'
+        $second.matched_pattern = 'OtherSvc'
+
+        $forward = Get-ManualImpactDigest @($first, $second)
+        $reverse = Get-ManualImpactDigest @($second, $first)
+        $removed = Get-ManualImpactDigest @($first)
+        $replacement = New-ManualImpactPending
+        $replacement.id = 'other-rule'
+
+        $forward | Should -Be $reverse
+        $forward | Should -Not -Be $removed
+        $forward | Should -Not -Be (Get-ManualImpactDigest @($first, $replacement))
+    }
+
+    It 'digest 只纳入严格 manual_impact action，且身份包含 rule/action/target/provenance' {
+        $manual = New-ManualImpactPending
+        $automatic = New-ServicePending
+        $automatic | Add-Member -NotePropertyName execution_class -NotePropertyValue 'automatic_safe'
+        $manualOnly = Get-ManualImpactDigest @($manual)
+
+        (Get-ManualImpactDigest @($automatic, $manual)) | Should -Be $manualOnly
+        (Get-ManualImpactDigest @($automatic)) | Should -BeNullOrEmpty
+        $manual.matched_pattern = 'ChangedSvc'
+        (Get-ManualImpactDigest @($manual)) | Should -Not -Be $manualOnly
+    }
+
+    It 'manual_impact 的 contains 或 regex provenance 即使 digest 正确也拒绝' -TestCases @(
+        @{ type='contains'; pattern='Sv' }
+        @{ type='regex'; pattern='^Svc$' }
+    ) {
+        param($type, $pattern)
+        $pending = New-ManualImpactPending
+        $pending.matched_type = $type
+        $pending.matched_pattern = $pattern
+        $profiles = New-ManualImpactProfiles
+        $profiles.profiles[0].detect.services = @([pscustomobject]@{ match=$pattern; type=$type })
+        $digest = Get-ManualImpactDigest @($pending)
+
+        Test-PendingActionAuthorized $pending $profiles $digest $digest | Should -BeFalse
+    }
+
+    It 'scan 后 manual action、class 或 policy 变化均拒绝' -TestCases @(
+        @{ label='manual action'; mutate={ param($rule) $rule.manual_actions.service = 'disable_task' } }
+        @{ label='class'; mutate={ param($rule) $rule.cleanup_policy.execution_class = 'automatic_safe' } }
+        @{ label='policy'; mutate={ param($rule) $rule.cleanup_policy.impact_cn = '不同影响' } }
+    ) {
+        param($label, $mutate)
+        $pending = New-ManualImpactPending
+        $profiles = New-ManualImpactProfiles
+        & $mutate $profiles.profiles[0]
+        $digest = Get-ManualImpactDigest @($pending)
+
+        Test-PendingActionAuthorized $pending $profiles $digest $digest | Should -BeFalse -Because $label
     }
 }
