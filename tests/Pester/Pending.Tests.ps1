@@ -522,6 +522,7 @@ Invoke-Clean
         $hits = @(
             [pscustomobject]@{ id='b'; vendor='T'; name_cn='B'; action='disable_service'; hit_type='service'; detail='S2'; reason_cn='r'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; process_id=0; process_path=''; safe=$false; evidence=[pscustomobject]@{ tested=$true }; matched_pattern='S2'; matched_type='exact'; matched_field='service_name' }
         )
+        $hits | ForEach-Object { $null = Set-ValidAutomaticPolicy $_ }
         Save-PendingActions -Hits $hits -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
         @($p.actions).Count | Should -Be 0
@@ -829,6 +830,87 @@ Invoke-Clean
         }
         $p.resolved[0].current_state | Should -BeExactly 'disabled'
         $p.resolved[0].status | Should -BeExactly 'success'
+    }
+
+    It 'persists the real safe=false HRWSCCtrl exact Match-Profiles hit as manual action when enabled' {
+        $profiles = Load-Profiles -Path $script:ProfileFile
+        $profile = @($profiles.profiles | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
+        $services = @([pscustomobject]@{ Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Auto' })
+        $hit = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
+        Mock Get-Service { [pscustomobject]@{ Name='HRWSCCtrl'; StartType='Automatic'; Status='Running' } } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+
+        $profile.safe | Should -BeFalse
+        $profile.evidence.tested | Should -BeTrue
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'disable_service'
+        $hit.safe | Should -BeFalse
+        $hit.evidence.tested | Should -BeTrue
+        $hit.matched_type | Should -BeExactly 'exact'
+        $hit.execution_class | Should -BeExactly 'manual_impact'
+        $hit.action | Should -BeExactly 'disable_service'
+
+        Save-PendingActions -Hits @($hit) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 1
+        @($p.resolved).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 0
+        $p.actions[0].execution_class | Should -BeExactly 'manual_impact'
+        $p.actions[0].action | Should -BeExactly 'disable_service'
+        $p.actions[0].default_selected | Should -BeFalse
+        $p.actions[0].requires_confirmation | Should -BeTrue
+    }
+
+    It 'persists the real safe=false HRWSCCtrl exact Match-Profiles hit as resolved when disabled' {
+        $profiles = Load-Profiles -Path $script:ProfileFile
+        $profile = @($profiles.profiles | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
+        $services = @([pscustomobject]@{ Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Stopped'; StartMode='Disabled' })
+        $hit = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
+        Mock Get-Service { [pscustomobject]@{ Name='HRWSCCtrl'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+
+        $profile.safe | Should -BeFalse
+        $profile.evidence.tested | Should -BeTrue
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'disable_service'
+        $hit.safe | Should -BeFalse
+        $hit.evidence.tested | Should -BeTrue
+        $hit.matched_type | Should -BeExactly 'exact'
+        $hit.execution_class | Should -BeExactly 'manual_impact'
+        $hit.action | Should -BeExactly 'disable_service'
+
+        Save-PendingActions -Hits @($hit) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.resolved).Count | Should -Be 1
+        @($p.observations).Count | Should -Be 0
+        $p.resolved[0].current_state | Should -BeExactly 'disabled'
+        $p.resolved[0].status | Should -BeExactly 'success'
+        $p.resolved[0].execution_class | Should -BeExactly 'manual_impact'
+        $p.resolved[0].action | Should -BeExactly 'disable_service'
+    }
+
+    It 'keeps the real HRWSCCtrl contains Match-Profiles hit as observation' {
+        $profiles = Load-Profiles -Path $script:ProfileFile
+        $profile = @($profiles.profiles | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
+        $services = @([pscustomobject]@{ Name='HRWSCCtrlHelper'; DisplayName='Lenovo Security Controller Helper'; State='Running'; StartMode='Auto' })
+        $hit = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
+
+        $profile.safe | Should -BeFalse
+        $profile.evidence.tested | Should -BeTrue
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'disable_service'
+        $hit.safe | Should -BeFalse
+        $hit.evidence.tested | Should -BeTrue
+        $hit.matched_type | Should -BeExactly 'contains'
+        $hit.execution_class | Should -BeExactly 'observation'
+        $hit.action | Should -BeExactly 'investigate'
+
+        Save-PendingActions -Hits @($hit) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        @($p.actions).Count | Should -Be 0
+        @($p.resolved).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].matched_type | Should -BeExactly 'contains'
+        $p.observations[0].action | Should -BeExactly 'investigate'
     }
 
     It 'keeps the exact action when an exact and contains hit share a target' {

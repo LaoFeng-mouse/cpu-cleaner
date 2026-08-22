@@ -1175,8 +1175,9 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
     $executableTargetOrder = @()
     foreach ($h in $Hits) {
         # v1.5.6 数据模型: actions(可执行) / observations(仅观察) 分流
-        # 可执行 = 危险动作 + Boolean true safe/tested + 窄匹配证据; 其余一律进 observations
-        $safeAllowed = ($h.safe -is [bool]) -and ($h.safe -eq $true)
+        # 可执行资格按 execution_class 分流: automatic_safe 要求 safe=true;
+        # manual_impact 允许严格 Boolean false，但仍必须满足完整手工政策、tested 和窄匹配证据。
+        $safeTyped = ($h.PSObject.Properties.Name -contains 'safe') -and ($h.safe -is [bool])
         $testedAllowed = $h.evidence -and
             ($h.evidence.PSObject.Properties.Name -contains 'tested') -and
             ($h.evidence.tested -is [bool]) -and
@@ -1189,6 +1190,10 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
         $hasBroadEvidence = Test-HitMatcherEvidenceShape $h -AllowedMatchTypes @('contains','regex')
         $actionHitTypeAllowed = Test-ActionMatchesHitType $h.action $h.hit_type
         $displayPolicy = Get-ValidPendingDisplayPolicy $h
+        $classAllowsExecution = $null -ne $displayPolicy -and $safeTyped -and (
+            ($displayPolicy.execution_class -ceq 'automatic_safe' -and $h.safe -eq $true) -or
+            ($displayPolicy.execution_class -ceq 'manual_impact')
+        )
         $healthKey = if ($h.hit_type -is [string]) {
             switch -CaseSensitive ($h.hit_type) {
                 'service' { 'services' }
@@ -1199,7 +1204,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
         $categoryComplete = [string]::IsNullOrEmpty($healthKey) -or
             ($ScanHealth -and [string]$ScanHealth.$healthKey -ceq 'complete')
         $executable = $actionAllowed -and
-            $safeAllowed -and
+            $classAllowsExecution -and
             $testedAllowed -and
             $hasNarrowEvidence -and
             $actionHitTypeAllowed -and
@@ -1214,7 +1219,8 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             $seenObservationIds[$dedupeKey] = $true
             # v1.5.6: 观察条目 — 记录为什么不能自动处理 (GUI 展示为 disabled checkbox)
             $obsReason = if ($h.action -eq 'none' -or $h.action -eq 'investigate') { '动作仅观察/不处理' }
-                elseif (-not $safeAllowed) { 'safe=false 或类型无效, 不允许自动处理' }
+                elseif (-not $safeTyped) { 'safe 字段缺失或类型无效, 禁止处理' }
+                elseif ($null -ne $displayPolicy -and $displayPolicy.execution_class -ceq 'automatic_safe' -and $h.safe -ne $true) { 'automatic_safe 的 safe=false, 禁止处理' }
                 elseif (-not $testedAllowed) { '未实测 (tested=false 或类型无效), 仅观察' }
                 elseif ($actionAllowed -and $hasNarrowEvidence -and -not $actionHitTypeAllowed) { '动作与命中类型不匹配，禁止自动处理' }
                 elseif (-not $categoryComplete) { '扫描信息不完整，禁止自动处理' }
