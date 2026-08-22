@@ -11,10 +11,16 @@
 ### 安全
 - 管理员只读采集与 clean/restore 使用独立生命周期和互斥闩锁；启动、运行、超时或状态未知期间禁止重复扫描、清理、恢复、结束进程和关闭窗口。任务文件 ACL 不修改，任务 XML 不直接解析
 - 完整扫描结果按 nonce、固定根目录、最终路径、reparse/hardlink、ACL、当前用户 SID、时效、严格 schema、终态标记和 SHA-256 单快照验证；任何验证失败均不会回退成“完整扫描”
-- Schema 3.0 matcher provenance 贯穿 scan hit、pending v2 与管理员 clean：记录并重验 `matched_pattern` / `matched_type` / `matched_field`，危险动作只取决于实际命中的 `exact` 或路径字段上的 `path`；`contains` / `regex` 只调查，`execution.allow_auto` 不再提供豁免
+- Schema 3.0 matcher provenance 贯穿 scan hit、pending schema 3 与管理员 clean：记录并重验 `matched_pattern` / `matched_type` / `matched_field`，危险动作只取决于实际命中的 `exact` 或路径字段上的 `path`；`contains` / `regex` 只调查，`execution.allow_auto` 不再提供豁免
 - `exact` / `contains` / `path` 统一为 `OrdinalIgnoreCase` 字面语义，只有 `regex` 解释表达式；管理员态按当前对象重验同一 matcher、同一字段及服务/自启/任务/进程身份，并在备份或 mutation 前最终复核。自启源限制为标准 HKLM/HKCU Run 键
-- pending 清单要求整数 `pending_schema_version: 2`；旧版、缺失、字符串或数组版本均要求重新 scan，CLI 与 GUI 都不自动升级。管理员 clean 还拒绝重复键、超过 5 MiB、深度超过 64、非法 UTF-8 或读取期间变化的 JSON 文件
+- pending 清单要求整数 `pending_schema_version: 3`，并包含 `actions` / `resolved` / `observations` / `suspicious` 四个数组；旧版、缺失、字符串或数组版本均要求重新 scan，CLI 与 GUI 都不自动升级。管理员 clean 还拒绝重复键、超过 5 MiB、深度超过 64、非法 UTF-8 或读取期间变化的 JSON 文件
 - 本次自动测试全部使用 Mock 或非破坏性夹具，不代表已在真实用户机器执行停服务、删除注册表自启项或禁用任务；实际 destructive clean 仍需管理员权限和用户确认
+
+### 文档
+- 说明四组结果：推荐/自动安全、可选有影响、已处理、仅观察；自动安全项默认勾选，`HRWSCCtrl` 为必要性 `optional` 的手动项，默认不选，主动勾选后需要二次确认，并提示对联想电脑管家安全状态、主动防护和通知的影响
+- 修正 README 与 SECURITY 的活动 pending 文案为 schema 3 四数组 `actions` / `resolved` / `observations` / `suspicious`；明确 `exact/path` 才能执行、`contains/regex` 只能识别，已 disabled 项进入已处理且不重复清理
+- 记录确认顺序、pending 文件 SHA-256 与 `manual_impact` 身份摘要的双绑定、备份与恢复边界；注明真实 UAC 与系统 mutation 尚需人工验收，自动测试不等同于真实验收
+- 注明桌面图标与 shortcut 仍是后续视觉任务，不属于本次文档提交
 
 ### 计划
 - 特征库数字签名验证（profiles.json.sig + 内置公钥）：SHA256 只能防下载损坏/镜像不一致/单文件篡改，攻击者同时控制 JSON 与 SHA256 下载地址时可整体替换——真正身份验证需要签名

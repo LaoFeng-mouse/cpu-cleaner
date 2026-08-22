@@ -59,11 +59,26 @@
 开始安全扫描 → UAC 管理员只读采集 → 普通权限验证并扫描 → 扫描结论 → 处理建议复核 → 管理员重新验证并执行 → 逐项结果与恢复
 ```
 
-扫描可以识别宽匹配，但执行必须保持窄匹配：实际命中 `contains` / `regex` 的项目只作为观察项展示，复核页中不能勾选。可执行项也不会直接相信普通权限扫描结果；进入管理员执行后，仍会用同一个 matcher、同一个字段和当前系统对象重新验证。
+### 四组清单与默认选择
+
+复核页把结果明确分成四组，默认选择只由规则类别决定：
+
+| 分组 | 规则含义 | 默认状态 | 能否执行 |
+|---|---|---:|---|
+| 推荐/自动安全（`automatic_safe`） | 已实测，并由本次扫描实际命中 `exact` 或 `path` | 已勾选 | 用户确认后可执行 |
+| 可选有影响（`manual_impact`） | 已实测、精确命中，但可能影响厂商功能 | 未勾选 | 用户主动勾选，并完成二次确认后可执行 |
+| 已处理（`resolved`） | 目标当前已经是 `disabled` 等目标状态 | 不可选 | 不重复清理 |
+| 仅观察（`observation`） | 只有 `contains` / `regex` 等宽匹配，或身份/扫描信息不完整 | 不可选 | 只能识别和提示 |
+
+其中，联想通知与诊断计划任务属于推荐/自动安全项；`HRWSCCtrl`（联想 Windows Security Center）属于可选有影响项：必要性是 `optional`，默认不选，只有用户主动勾选后才会弹出二次确认。它可能影响联想电脑管家的安全状态、主动防护和通知；如果不使用联想电脑管家，禁用它可以减少常驻后台。`HRWSCCtrl` 的宽匹配命中仍只进入“仅观察”，不能执行。
+
+扫描可以识别宽匹配，但执行必须保持窄匹配：实际命中 `contains` / `regex` 的项目只作为观察项展示，复核页中不能勾选。`exact` / `path` 也必须绑定实际命中的 pattern、类型、字段和目标身份；进入管理员执行后，仍会用同一个 matcher、同一个字段和当前系统对象重新验证。
 
 GUI 进程始终以普通用户权限运行。点击扫描时出现的一次 UAC 只授权独立的 `scan_inventory` 子进程读取完整服务与计划任务清单；它只接收随机 nonce，不执行清理、不改任务文件 ACL，也不直接解析任务 XML。采集结果写入 `%ProgramData%\MouseCleaner\ScanResults` 的受保护目录，普通权限扫描会再次验证路径、ACL、当前用户 SID、时效、终态标记和内容哈希后才使用。
 
 如果用户取消这次 UAC，GUI 会明确进入 `AllowLimited` 降级扫描：计划任务标为 unavailable，服务信息可能 degraded，界面不会显示“电脑干净”，这些不完整分类也不能授权清理。清理权限没有因扫描提权而扩大；仍必须经过用户勾选、执行子集 SHA-256 绑定、管理员态同 matcher 重验、可信备份、执行后验证和可恢复流程。
+
+清理阶段的管理员 UAC 只会在用户选定项目并完成复核后请求；`manual_impact` 项还必须先完成独立二次确认。扫描阶段可能先出现一次独立的只读 UAC，这两个 UAC 的用途不同。GUI 生成的执行子集同时绑定 pending 文件 SHA-256 和已确认的 `manual_impact` 身份摘要；文件哈希防止清单被替换，人工摘要防止确认范围被改变。
 
 顶部四格“鼠鼠的幻想”漫画只负责解释当前旅程和状态，不参与风险判断，也不能决定某个项目是否安全或可执行。真正的安全边界由规则证据、实际命中的 matcher、pending 授权快照和管理员态重验共同决定。
 
@@ -115,16 +130,16 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 - **权限隔离：GUI 不提权；UAC 只启动 `scan_inventory` 读取服务/任务。任务文件 ACL 永不修改，任务 XML 不直接解析**
 - **降级不授权：取消 UAC 后的 `AllowLimited` 结果明确不完整；unavailable/degraded 分类只能观察，不能生成相应清理授权**
 - 双重确认：clean 先显示完整清单（名字/动作/原因），输入编号或 all 才执行，可随时 q 退出
-- **safe 强制规则：特征库标 safe=false 的条目只报告、永不进入待办队列，即使 -YesToAll 也拒绝执行**
+- **安全类别强制规则：** `safe=false` 的条目不能进入 `automatic_safe`；只有具备完整、已验证的 `manual_impact` 策略，并且本次实际命中 `exact/path` 的项目，才允许在用户主动勾选和二次确认后进入执行子集；其他 `safe=false` 项只报告
 - **逐命中授权：每个 scan hit 记录 `matched_pattern` / `matched_type` / `matched_field`；危险动作只由实际命中的 `exact` 或 `path` matcher 授权。`contains` / `regex`（以及 `publisher` / `sha256`）只调查，`execution.allow_auto=true` 不能绕过**
 - **字面匹配：`exact` / `contains` / `path` 都按 `OrdinalIgnoreCase` 做大小写不敏感的字面比较，`*`、`?`、`[]` 没有通配含义；`regex` 是唯一表达式类型，`path` 只允许命中实际路径字段**
-- **pending v2：scan 写入整数 `pending_schema_version: 2`。旧版、缺失版本、字符串或数组版本都必须重新 scan，不自动升级；GUI 生成执行子集时同样拒绝不兼容清单**
+- **pending schema 3：** scan 写入整数 `pending_schema_version: 3`，并始终包含四个数组：`actions`、`resolved`、`observations`、`suspicious`。schema 2、旧版、缺失版本、字符串或数组版本都必须重新 scan，不自动升级；GUI 生成执行子集时同样拒绝不兼容清单
+- **双重摘要绑定：** 执行子集的 pending 文件 SHA-256 与 `manual_impact` 项的确认摘要都在提权前生成、传递并校验；任一不一致都拒绝执行
 - **管理员态重验：clean 按当前特征库、同一 matcher、同一字段和当前系统对象重新确认服务、自启、任务或进程身份；自启仅允许标准 Run 键。用户选定后、任何备份或系统变更前还会最终复核一次**
 - **敌对清单防护：管理员 clean 拒绝重复 JSON 键、超过 5 MiB、容器深度超过 64、非法 UTF-8 或读取期间变化的 pending 文件，并在同一受保护文件句柄上完成检查与读取**
 - **执行后验证：每个动作执行完重新读取真实状态确认（服务 StartType / 注册表值 / 任务 State），验证通过才标记 success，否则 failed**
-- **状态机：pending → success / failed / skipped / manual_required；重跑只处理 pending 和 failed，其余自动跳过（幂等）**
-- 自动备份：每个处理动作备份到 `backups\时间戳\`，服务备份含启动类型（sc 格式）/原运行状态/DelayedAutoStart，reg 文件 / 任务 XML / manifest 一应俱全
-- 智能跳过：已经 Disabled 的服务不会重复进清单（清理过的机器 clean 清单为空）
+- **状态机：** `actions` 中的项目按 `pending → success / failed / skipped / manual_required` 流转；已完成项目进入 `resolved`，重跑不会重复清理，观察项目保留在 `observations`
+- **自动备份与恢复：** 每个处理动作在系统变更前备份原状态到 `backups\时间戳\`；restore 只接受本工具创建且校验通过的备份，恢复后重新读取并核对状态
 - 卸载动作不自动执行：只提示，人工去"设置-应用"卸载（卸载是重操作，交给用户）
 
 ---
@@ -187,7 +202,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
   "vendor": "Lenovo",
   "name_cn": "中文名",
   "risk": "high | medium | low",
-  "safe": true,                   // false = 只报告, 永不进执行队列
+  "safe": true,                   // false 不能成为 automatic_safe
   "reason_cn": "处理原因（会显示在报告和确认清单里）",
   "detect": {                     // 每种检测对象的 matcher
     "services":  [{"match": "LeMCPManagerService", "type": "exact"}],
@@ -208,16 +223,18 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 }
 ```
 
-matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sha256`。危险动作只接受实际命中的 `exact`，或命中 `autostart_value` / `task_path` / `process_path` 的 `path`；其余命中保留为观察项。
+matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sha256`。危险动作只接受实际命中的 `exact`，或命中 `autostart_value` / `task_path` / `process_path` 的 `path`；`contains` / `regex` 只能识别，不能因为规则声明了动作或 `allow_auto` 就获得执行资格。
+
+可选清理规则还应声明 `cleanup_policy`：`execution_class`、必要性、默认选择、是否需要确认、中文影响和清理原因。`HRWSCCtrl` 通过 `manual_actions.service=disable_service` 进入手动路径；它不是自动安全项。
 
 **程序启动时自动校验，错误规则直接拒绝加载：**
-- 当前特征库格式为 Schema 3.0；Schema 2.0 可在加载时迁移，未来版本拒绝加载。此规则与不自动迁移的 pending 清单版本无关
+- 当前特征库格式为 Schema 3.0；Schema 2.0 可在加载时迁移，未来版本拒绝加载。特征库迁移规则与 pending 清单必须使用 schema 3、且不自动迁移的规则相互独立
 - id 必须存在且唯一
 - risk 必须是 high/medium/low
 - action 必须是 disable_service / remove_autostart / disable_task / uninstall / investigate / none
 - detect 不能全空（四类至少一个关键词）
 - detect matcher 的 match 必须非空、type 必须合法；`execution.allow_auto` 若存在必须是布尔值，但不参与危险动作授权
-- **safe=false 的规则只能配 none/investigate，配了危险动作（disable/remove/uninstall）直接拒绝**
+- **safe=false 的规则不能配自动危险动作；若声明 `manual_impact`，必须同时提供合法 `manual_actions`、`optional` 必要性、默认不选和二次确认，并且运行时仍只接受 `exact/path` 实际命中**
 
 **动作类型说明：**
 
@@ -245,7 +262,7 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 - **restore 按可信备份恢复稳定状态**：服务恢复 StartType/DelayedAutoStart，并尝试恢复备份记录的 Running/Stopped 状态；`sc start` 返回“已在运行”(1056)时仍会继续读取最终状态，只有最终状态吻合才算成功。删除的自启项和禁用的任务也按备份还原。
 - **卸载动作不自动执行**：uninstall 只提示，需要人工到"设置-应用"卸载（安全考虑）
 - **NOT_STOPPABLE 服务**（如联想 LISFService）：禁用成功但进程杀不掉，重启后消失，工具会如实提示
-- **自我保护服务**（如联想 HRWSCCtrl）：拒绝访问禁不掉属正常，工具标记为"别硬刚"
+- **联想 HRWSCCtrl**：属于可选有影响项，不自动处理；不使用联想电脑管家时可由用户主动确认后尝试禁用。若系统拒绝访问，按失败结果记录，不应反复强行处理
 - **瞬时采样**：Top CPU 进程是 2 秒采样，长期监控请用任务管理器
 - PowerShell 5.1 环境下脚本为 UTF-8 BOM 编码；如自行编辑脚本，**必须保持 BOM**（否则中文报错）。特征库 JSON 用 UTF-8 即可。
 
@@ -253,7 +270,7 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 
 ## 版本记录
 
-- Unreleased（Schema 3.0 matcher provenance 安全加固）：scan 到管理员 clean 全链路保存并重验实际 matcher/字段；pending 格式升级为 v2 并拒绝自动迁移旧清单；收紧自启源、对象身份、执行前最终复核及敌对 JSON/文件竞态防护。未发布新版本
+- Unreleased（Schema 3.0 matcher provenance 安全加固）：scan 到管理员 clean 全链路保存并重验实际 matcher/字段；pending 格式升级为 schema 3 并拒绝自动迁移旧清单；收紧自启源、对象身份、执行前最终复核及敌对 JSON/文件竞态防护。未发布新版本
 - 2026-08-09 v1.7.0（模块化拆分）：cpu-cleaner.ps1 1539 行 → 主脚本 ~90 行 + src/Core/ 7 个域文件（Utils/ProfileEngine/Scanner/RiskEngine/ReportEngine/ActionEngine/BackupManager），dot-source 保持作用域共享；run-unit/CI analyzer 适配；测试 85+14 项。
 - 2026-08-09 v1.6.0（Schema 3.0 match_type）：detect 从字符串子串升级为显式 match_type（exact/contains/regex/path/publisher/sha256），**执行闸门**——危险动作必须是窄匹配（exact/path）才能自动执行，contains/regex 宽匹配默认降级 investigate（识别保留、执行收紧），实机验证过的规则可显式 execution.allow_auto=true 豁免；旧特征库加载自动迁移 v3（11 条联想实测规则保留自动资格）；测试 85+14 项。
 - 2026-08-09 v1.5.7（CPU 采样升级）：2 秒单次采样 → 5×3 秒多次采样（平均/峰值/持续占用/子进程数），区分「瞬间吃一下」vs「持续后台发疯」；评分新增 +10 持续占用；文本/HTML 报告 Top CPU 表加 平均%/峰值%/持续/子进程 列。
@@ -269,3 +286,9 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 - 2026-08-09 v1.1.1：审查修复 5 处 PowerShell 陷阱——① clean 写回 JSON 用 -InputObject 防管道展开（原会把完整清单写成单对象/空文件）；② 清单读取 null 防御（$null 进管道产生 @($null) 导致空备份）；③ 数组序列化用变量构造（if/else 表达式输出空数组会变 $null 序列化成 {}）；④ 空 manifest 写 []；⑤ restore 对空/损坏备份报错退出。本机回归 scan→clean→clean 幂等全通过。
 - 2026-08-09 v1.1：重构落地——① clean 改用结构化字段（不再拆显示字符串，杜绝错位）；② 特征命中多类型同时列出（同一软件的服务+自启+任务不遗漏）；③ 新增未知高占用进程检测（可疑路径/无签名→人工调查，不进自动清单）；④ clean 可显式输入 PID 结束可疑进程（绝不自动杀）；⑤ 服务触发器提示（Manual 却 Running 的第三方服务单独列出）；⑥ 特征库扩展至 23 条（补 360/鲁大师/驱动精灵/Dell Command Update 等）；⑦ clean 打印 sc 执行结果；⑧ pending done 标记利用（重跑跳过已完成）；⑨ HTML 报告美化（CSS 表格）；⑩ 新增 -Mode update 特征库更新机制。
 - 2026-08-09 v1.0：首个版本。基于联想 AIAgent/LeMcpManager 全家桶清理实战泛化；特征库覆盖联想/华为/戴尔/惠普/华硕/小米/国产流氓；scan/clean/restore 三模式；本机实测通过。
+
+## 自动验证与真实验收边界
+
+自动测试使用 Mock 或非破坏性夹具，不能等同于真实 UAC、真实系统状态变化、实际备份恢复闭环或用户机器上的 mutation 验收。真实 UAC、勾选/二次确认、管理员执行、执行后状态和恢复仍需人工验收；本次文档提交不执行这些操作。
+
+桌面图标和 shortcut 的文件、目标与 Windows 多尺寸视觉检查属于后续视觉任务，不在本次文档提交范围内。
