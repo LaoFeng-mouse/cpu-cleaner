@@ -1122,6 +1122,45 @@ Describe 'manual_impact 精确影响确认' {
         (Get-ManualImpactDigest @($lower, $upper)) | Should -Not -Be (Get-ManualImpactDigest @($lower))
     }
 
+    It 'pending PSObject 属性插入顺序不同仍产生相同 canonical identity key 和 digest' {
+        $forward = New-ManualImpactPending
+        $reverse = [pscustomobject]@{}
+        $propertyNames = @($forward.PSObject.Properties.Name)
+        [array]::Reverse($propertyNames)
+        foreach ($propertyName in $propertyNames) {
+            $reverse | Add-Member -NotePropertyName $propertyName -NotePropertyValue $forward.$propertyName
+        }
+
+        (Get-PendingIdentityKey $reverse) | Should -Be (Get-PendingIdentityKey $forward)
+        (Get-ManualImpactDigest @($reverse)) | Should -Be (Get-ManualImpactDigest @($forward))
+    }
+
+    It 'canonical identity 固定向量在 PS5 和 PS7 输出一致' {
+        $pending = New-ManualImpactPending
+        $expectedKey = '{"id":"rule","hit_type":"service","action":"disable_service","service_name":"Svc","service_display_name":null,"autostart_source":null,"autostart_name":null,"autostart_value":null,"task_name":null,"task_path":null,"process_name":null,"process_id":null,"process_path":null,"matched_pattern":"Svc","matched_type":"exact","matched_field":"service_name"}'
+        $expectedDigest = 'ebfe00aca1a05377b089a2c7ca0792d9525459c12963541dbad74ce59e7941d9'
+
+        Get-PendingIdentityKey $pending | Should -BeExactly $expectedKey
+        Get-ManualImpactDigest @($pending) | Should -BeExactly $expectedDigest
+    }
+
+    It '任一有效授权 identity 字段值变化仍改变 key 和 digest' -TestCases @(
+        @{ property='id'; value='other-rule' }
+        @{ property='service_name'; value='OtherSvc' }
+        @{ property='service_display_name'; value='Other Display' }
+        @{ property='matched_pattern'; value='OtherSvc' }
+        @{ property='matched_field'; value='service_display_name' }
+    ) {
+        param($property, $value)
+        $original = New-ManualImpactPending
+        $changed = New-ManualImpactPending
+        if ($changed.PSObject.Properties.Name -contains $property) { $changed.$property = $value }
+        else { $changed | Add-Member -NotePropertyName $property -NotePropertyValue $value }
+
+        Get-PendingIdentityKey $changed | Should -Not -Be (Get-PendingIdentityKey $original)
+        Get-ManualImpactDigest @($changed) | Should -Not -Be (Get-ManualImpactDigest @($original))
+    }
+
     It 'digest 只纳入严格 manual_impact action，且身份包含 rule/action/target/provenance' {
         $manual = New-ManualImpactPending
         $automatic = New-ServicePending

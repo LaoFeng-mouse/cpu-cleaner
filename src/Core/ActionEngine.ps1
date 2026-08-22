@@ -995,7 +995,7 @@ function Get-CurrentPendingMatchValue($Pending) {
 }
 
 function Get-PendingIdentityKey($Item) {
-    $identity = [ordered]@{
+    $identity = [pscustomobject][ordered]@{
         id                   = $Item.id
         hit_type             = $Item.hit_type
         action               = $Item.action
