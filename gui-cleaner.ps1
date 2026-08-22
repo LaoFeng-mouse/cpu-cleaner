@@ -289,6 +289,11 @@ function Update-GuiExecuteAvailability {
     $window.FindName('BtnExecute').IsEnabled = ($selectedExecutable.Count -gt 0 -and -not $script:ExecutionInProgress -and -not $script:SuspiciousStopInProgress -and -not $restoreBusy -and -not (Test-GuiInventoryBusy) -and -not (Test-GuiNormalScanBusy))
 }
 
+function Update-GuiReviewCounts {
+    param($Items = @())
+    $window.FindName('ReviewCountsText').Text = Format-GuiReviewCountsText (Get-GuiReviewCounts $Items)
+}
+
 function Update-GuiStopProcessAvailability {
     param($List = $window.FindName('SuspiciousList'))
     $selected = @($List.Items | Where-Object {
@@ -610,20 +615,27 @@ function Get-RuleDisplay($rule) {
     return [pscustomobject]@{ risk_label = $riskLabel; evidence_label = $evidenceLabel }
 }
 
-# v1.5.6: 构造勾选展示对象 — actions(可执行, 勾选) / observations(仅观察, checkbox disabled)
-# 数据流: scan → Save-PendingActions 已分流; 这里 actions 只读可执行集, observations 只读观察集
+# 审核页只读投影同一份 reviewed pending snapshot；UI 标签不能影响授权 identity。
 function Get-PendingViewItems {
     param([Parameter(Mandatory=$true)]$Pending)
-    $null = Assert-GuiPendingEnvelopeShape $Pending
+    Assert-GuiPendingPresentationShape -Pending $Pending
     $p = $Pending
     $map = Get-ProfileLookup
     $view = @()
-    # 1) 可执行项: 默认勾选, 可勾选
     foreach ($i in @($p.actions | Where-Object { $_ -and $_.status -cin @('pending','failed') })) {
         $d = Get-RuleDisplay $map[$i.id]
+        $presentation = Get-GuiReviewPresentation -Branch actions -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn
         $view += [pscustomobject]@{
-            IsChecked         = $true
-            CanExecute        = $true
+            IsChecked         = $presentation.IsChecked
+            CanExecute        = $presentation.CanExecute
+            NeedsConfirmation = $presentation.NeedsConfirmation
+            GroupKey          = $presentation.GroupKey
+            GroupLabel        = $presentation.GroupLabel
+            StatusLabel       = $presentation.StatusLabel
+            NecessityLabel    = $presentation.NecessityLabel
+            ImpactText        = $presentation.ImpactText
+            CleanupReasonText = $presentation.CleanupReasonText
+            CurrentStateLabel = $presentation.CurrentStateLabel
             name_cn           = $i.name_cn
             risk_label        = $d.risk_label
             evidence_label    = $d.evidence_label
@@ -637,20 +649,54 @@ function Get-PendingViewItems {
             _raw              = $i
         }
     }
-    # 2) 观察项: 证据不足/仅观察 — checkbox disabled, 全选跳过
+    foreach ($i in @($p.resolved)) {
+        $d = Get-RuleDisplay $map[$i.id]
+        $presentation = Get-GuiReviewPresentation -Branch resolved -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn -CurrentState $i.current_state
+        $view += [pscustomobject]@{
+            IsChecked         = $presentation.IsChecked
+            CanExecute        = $presentation.CanExecute
+            NeedsConfirmation = $presentation.NeedsConfirmation
+            GroupKey          = $presentation.GroupKey
+            GroupLabel        = $presentation.GroupLabel
+            StatusLabel       = $presentation.StatusLabel
+            NecessityLabel    = $presentation.NecessityLabel
+            ImpactText        = $presentation.ImpactText
+            CleanupReasonText = $presentation.CleanupReasonText
+            CurrentStateLabel = $presentation.CurrentStateLabel
+            name_cn           = $i.name_cn
+            risk_label        = $d.risk_label
+            evidence_label    = $d.evidence_label
+            action_label      = Get-ActionLabel $i.action
+            restorable_label  = '已处理'
+            status            = $i.status
+            reason_cn         = $i.reason_cn
+            matcher_detail    = Format-GuiMatcherDetail $i
+            matched_type      = [string]$i.matched_type
+            matched_field     = [string]$i.matched_field
+            _raw              = $i
+        }
+    }
     foreach ($i in @($p.observations)) {
         $d = Get-RuleDisplay $map[$i.id]
-        $obsReason = if ($i.obs_reason) { $i.obs_reason } else { '仅观察, 不允许自动处理' }
+        $presentation = Get-GuiReviewPresentation -Branch observations -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn
         $view += [pscustomobject]@{
-            IsChecked         = $false
-            CanExecute        = $false
+            IsChecked         = $presentation.IsChecked
+            CanExecute        = $presentation.CanExecute
+            NeedsConfirmation = $presentation.NeedsConfirmation
+            GroupKey          = $presentation.GroupKey
+            GroupLabel        = $presentation.GroupLabel
+            StatusLabel       = $presentation.StatusLabel
+            NecessityLabel    = $presentation.NecessityLabel
+            ImpactText        = $presentation.ImpactText
+            CleanupReasonText = $presentation.CleanupReasonText
+            CurrentStateLabel = $presentation.CurrentStateLabel
             name_cn           = $i.name_cn
             risk_label        = $d.risk_label
             evidence_label    = $d.evidence_label
             action_label      = Get-ActionLabel $i.action
             restorable_label  = '不可自动'
             status            = '观察'
-            reason_cn         = $obsReason
+            reason_cn         = $i.obs_reason
             matcher_detail    = Format-GuiMatcherDetail $i
             matched_type      = [string]$i.matched_type
             matched_field     = [string]$i.matched_field
@@ -675,12 +721,44 @@ function Assert-GuiPendingPresentationRow {
     foreach ($propertyName in @('id','name_cn','hit_type','action','matched_pattern','matched_type','matched_field')) {
         $null = Get-GuiReviewScalarString -Item $Item -PropertyName $propertyName -Context $context
     }
+    $executionClass = Get-GuiReviewScalarString -Item $Item -PropertyName 'execution_class' -Context $context
+    $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'necessity' -Context $context
+    $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'impact_cn' -Context $context
+    $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'cleanup_reason_cn' -Context $context
+    foreach ($propertyName in @('default_selected','requires_confirmation')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $property.Value -isnot [bool]) {
+            throw "pending review shape invalid: $context.$propertyName must be a boolean."
+        }
+    }
+    $allowedClasses = switch ($Branch) {
+        'actions'      { @('automatic_safe','manual_impact') }
+        'resolved'     { @('automatic_safe','manual_impact') }
+        'observations' { @('observation') }
+    }
+    if ($executionClass -cnotin $allowedClasses) {
+        throw "pending review shape invalid: $context.execution_class is not valid for $Branch."
+    }
+    if ($executionClass -ceq 'manual_impact' -and ($Item.default_selected -ne $false -or $Item.requires_confirmation -ne $true)) {
+        throw "pending review shape invalid: $context.manual_impact must require confirmation and default to unchecked."
+    }
+    if ($executionClass -ceq 'automatic_safe' -and ($Item.default_selected -ne $true -or $Item.requires_confirmation -ne $false)) {
+        throw "pending review shape invalid: $context.automatic_safe must default to checked without confirmation."
+    }
+    if ($executionClass -ceq 'observation' -and ($Item.default_selected -ne $false -or $Item.requires_confirmation -ne $false)) {
+        throw "pending review shape invalid: $context.observation must be non-executable and unchecked."
+    }
     if ($Branch -eq 'actions') {
         $status = Get-GuiReviewScalarString -Item $Item -PropertyName 'status' -Context $context
         if ($status -cnotin @('pending','failed','success','skipped','manual_required')) {
             throw "pending review shape invalid: $context.status must be an exact known status."
         }
         $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'reason_cn' -Context $context
+    } elseif ($Branch -eq 'resolved') {
+        $status = Get-GuiReviewScalarString -Item $Item -PropertyName 'status' -Context $context
+        if ($status -cne 'success') { throw "pending review shape invalid: $context.status must be success for resolved items." }
+        $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'reason_cn' -Context $context
+        $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'current_state' -Context $context
     } else {
         $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'obs_reason' -Context $context
     }
@@ -726,7 +804,7 @@ function Assert-GuiPendingPresentationRow {
 function Assert-GuiPendingPresentationShape {
     param([Parameter(Mandatory=$true)]$Pending)
     $null = Assert-GuiPendingEnvelopeShape $Pending
-    foreach ($branch in @('actions','observations')) {
+    foreach ($branch in @('actions','resolved','observations')) {
         $property = $Pending.PSObject.Properties[$branch]
         if ($null -eq $property -or $property.Value -isnot [System.Array]) {
             throw "pending review shape invalid: $branch must be an array."
@@ -1002,10 +1080,16 @@ function Restore-GuiPendingBytesToLockedStream {
     $Stream.Flush($true)
 }
 
-# v1.5.6: 全选/清空 — 全选跳过 CanExecute=false (观察项 checkbox disabled 且不可被全选勾上)
+# 全选只包含 automatic_safe；manual_impact 必须保持显式人工勾选。
 function Set-AllChecked($list, $value) {
     foreach ($it in @($list.Items)) {
-        if (-not $value -or $it.CanExecute) { $it.IsChecked = $value }
+        if (-not $value) {
+            $it.IsChecked = $false
+        } elseif ($it.GroupKey -ceq 'automatic') {
+            $it.IsChecked = $true
+        } else {
+            $it.IsChecked = $false
+        }
     }
 }
 
@@ -1470,6 +1554,7 @@ $window.FindName('BtnOpenReview').Add_Click({
         $list.ItemsSource = $null
         $list.ItemsSource = $items
         $list.Items.Refresh()
+        Update-GuiReviewCounts -Items $items
         $script:ReviewedPendingSnapshot = $pending
         $script:ReviewedPendingGenerationSha256 = $reviewSnapshot.Sha256
         $script:ReviewedActionIdentityKeys = $actionAllowlist
@@ -1480,6 +1565,7 @@ $window.FindName('BtnOpenReview').Add_Click({
     } catch {
         $list.ItemsSource = $null
         $list.Items.Clear()
+        Update-GuiReviewCounts -Items @()
         $suspiciousList.ItemsSource = $null
         $suspiciousList.Items.Clear()
         $script:ReviewedPendingSnapshot = $null

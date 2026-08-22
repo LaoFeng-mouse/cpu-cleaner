@@ -88,6 +88,23 @@ Describe 'GUI presentation model' {
         }
     }
 
+    It 'counts the four review groups and formats their stable review summary' {
+        $counts = Get-GuiReviewCounts @(
+            [pscustomobject]@{ GroupKey='automatic' },
+            [pscustomobject]@{ GroupKey='manual' },
+            [pscustomobject]@{ GroupKey='manual' },
+            [pscustomobject]@{ GroupKey='resolved' },
+            [pscustomobject]@{ GroupKey='observation' },
+            [pscustomobject]@{ GroupKey='observation' }
+        )
+
+        $counts.automatic | Should -Be 1
+        $counts.manual | Should -Be 2
+        $counts.resolved | Should -Be 1
+        $counts.observation | Should -Be 2
+        (Format-GuiReviewCountsText $counts) | Should -Be '安全自动 1 项 · 需确认 2 项 · 已处理 1 项 · 仅观察 2 项'
+    }
+
     It 'formats exact matcher provenance without granting authority' {
         $raw = [pscustomobject]@{
             hit_type='service'; service_name='ExactSvc'; action='disable_service'

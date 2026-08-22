@@ -43,6 +43,59 @@ function Get-GuiItemSummary {
     }
 }
 
+function Get-GuiReviewPresentation {
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('actions','resolved','observations')][string]$Branch,
+        [Parameter(Mandatory=$true)][string]$ExecutionClass,
+        [Parameter(Mandatory=$true)][string]$Necessity,
+        [Parameter(Mandatory=$true)][string]$ImpactCn,
+        [Parameter(Mandatory=$true)][string]$CleanupReasonCn,
+        [string]$CurrentState = ''
+    )
+    $groupKey = switch ($Branch) {
+        'actions' {
+            if ($ExecutionClass -ceq 'automatic_safe') { 'automatic' } else { 'manual' }
+        }
+        'resolved' { 'resolved' }
+        default { 'observation' }
+    }
+    $groupLabel = switch ($groupKey) {
+        'automatic'   { '安全自动项' }
+        'manual'      { '需确认项' }
+        'resolved'    { '已处理' }
+        default       { '仅观察' }
+    }
+    return [pscustomobject]@{
+        GroupKey           = $groupKey
+        GroupLabel         = $groupLabel
+        CanExecute         = ($groupKey -in @('automatic','manual'))
+        IsChecked          = ($groupKey -eq 'automatic')
+        NeedsConfirmation  = ($groupKey -eq 'manual')
+        StatusLabel        = if ($groupKey -eq 'resolved') { '已处理' } elseif ($groupKey -eq 'observation') { '仅观察' } elseif ($groupKey -eq 'manual') { '需确认' } else { '可执行' }
+        NecessityLabel     = '必要性：{0}' -f $Necessity
+        ImpactText         = '影响：{0}' -f $ImpactCn
+        CleanupReasonText  = '清理原因：{0}' -f $CleanupReasonCn
+        CurrentStateLabel  = if ($groupKey -eq 'resolved') { '当前状态：{0}' -f $CurrentState } else { '' }
+    }
+}
+
+function Get-GuiReviewCounts {
+    param($Items)
+    $all = @()
+    if ($null -ne $Items) { $all = @($Items) }
+    return [pscustomobject]@{
+        automatic   = @($all | Where-Object { $_.GroupKey -ceq 'automatic' }).Count
+        manual      = @($all | Where-Object { $_.GroupKey -ceq 'manual' }).Count
+        resolved    = @($all | Where-Object { $_.GroupKey -ceq 'resolved' }).Count
+        observation = @($all | Where-Object { $_.GroupKey -ceq 'observation' }).Count
+    }
+}
+
+function Format-GuiReviewCountsText {
+    param([Parameter(Mandatory=$true)]$Counts)
+    return '安全自动 {0} 项 · 需确认 {1} 项 · 已处理 {2} 项 · 仅观察 {3} 项' -f $Counts.automatic, $Counts.manual, $Counts.resolved, $Counts.observation
+}
+
 function Get-GuiScanHealthPresentation {
     param(
         $ScanHealth = $null,

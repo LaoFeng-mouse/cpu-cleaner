@@ -121,7 +121,7 @@ Describe 'GUI 壳 (无窗口)' {
             'ImgStage1','ImgStage2','ImgStage3','ImgStage4',
             'IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel',
             'ExecutingPanel','CompletedPanel','ErrorPanel',
-            'StateTitle','StateSubtitle','PendingList','SuspiciousList','ExecutionList',
+            'StateTitle','StateSubtitle','PendingList','ReviewCountsText','SuspiciousList','ExecutionList',
             'BtnStartScan','BtnOpenReview','BtnExecute','BtnStopProcesses','BtnRescan','BtnRetry','BtnRestore','BtnLang'
         )) {
             $script:Win.FindName($name) | Should -Not -BeNullOrEmpty
@@ -1039,11 +1039,15 @@ Describe '勾选视图 (v1.5.5)' {
                 actions = @([pscustomobject]@{
                     id='action-row'; name_cn='可执行分支'; hit_type='service'; action='disable_service'; status='pending'
                     service_name=$ActionServiceName; matched_pattern='Action'; matched_type=$ActionMatchedType; matched_field='service_name'; reason_cn='action reason'
+                    execution_class='automatic_safe'; necessity='recommended'; default_selected=$true; requires_confirmation=$false
+                    impact_cn='停止非核心 OEM 后台'; cleanup_reason_cn='减少不需要的后台占用'
                 })
                 resolved = @()
                 observations = @([pscustomobject]@{
                     id='observation-row'; name_cn='观察分支'; hit_type='service'; action='investigate'; status='观察'
                     service_name='ObservationService'; matched_pattern='ObservationService'; matched_type=$ObservationMatchedType; matched_field='service_name'; reason_cn='observation reason'; obs_reason='只观察'
+                    execution_class='observation'; necessity='informational'; default_selected=$false; requires_confirmation=$false
+                    impact_cn='证据不足，不能改变系统状态'; cleanup_reason_cn='保留扫描证据供人工判断'
                 })
                 suspicious = @()
             }
@@ -1288,12 +1292,12 @@ Describe '勾选视图 (v1.5.5)' {
             pending_schema_version = [int32]3
             generated = 'x'
             actions = @(
-                [pscustomobject]@{ id='t1'; vendor='T'; name_cn='测试高风险'; action='disable_service'; hit_type='service'; detail=''; reason_cn='r1'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='pending' },
-                [pscustomobject]@{ id='t3'; vendor='T'; name_cn='已完成项'; action='disable_service'; hit_type='service'; detail=''; reason_cn='r3'; service_name='S3'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='success' }
+                [pscustomobject]@{ id='t1'; vendor='T'; name_cn='测试高风险'; action='disable_service'; hit_type='service'; detail=''; reason_cn='r1'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='pending'; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'; execution_class='automatic_safe'; necessity='recommended'; default_selected=$true; requires_confirmation=$false; impact_cn='影响 OEM 非核心后台'; cleanup_reason_cn='减少后台占用' },
+                [pscustomobject]@{ id='t3'; vendor='T'; name_cn='已完成项'; action='disable_service'; hit_type='service'; detail=''; reason_cn='r3'; service_name='S3'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='success'; matched_pattern='S3'; matched_type='exact'; matched_field='service_name'; execution_class='automatic_safe'; necessity='recommended'; default_selected=$true; requires_confirmation=$false; impact_cn='影响 OEM 非核心后台'; cleanup_reason_cn='减少后台占用' }
             )
             resolved = @()
             observations = @(
-                [pscustomobject]@{ id='t2'; vendor='T'; name_cn='测试未实测'; action='investigate'; hit_type='service'; detail=''; reason_cn='r2'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; obs_reason='未实测 (tested=false), 仅观察' }
+                [pscustomobject]@{ id='t2'; vendor='T'; name_cn='测试未实测'; action='investigate'; hit_type='service'; detail=''; reason_cn='r2'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; obs_reason='未实测 (tested=false), 仅观察'; matched_pattern='S2'; matched_type='exact'; matched_field='service_name'; execution_class='observation'; necessity='informational'; default_selected=$false; requires_confirmation=$false; impact_cn='证据不足'; cleanup_reason_cn='保留观察证据' }
             )
             suspicious = @()
         }
@@ -1335,11 +1339,13 @@ Describe '勾选视图 (v1.5.5)' {
             actions = @([pscustomobject]@{
                 id='mixed'; name_cn='精确服务'; hit_type='service'; action='disable_service'; status='pending'
                 service_name='ExactService'; matched_pattern='ExactService'; matched_type='exact'; matched_field='service_name'; reason_cn='narrow'
+                execution_class='automatic_safe'; necessity='recommended'; default_selected=$true; requires_confirmation=$false; impact_cn='影响 OEM 非核心后台'; cleanup_reason_cn='减少后台占用'
             })
             resolved = @()
             observations = @([pscustomobject]@{
                 id='mixed'; name_cn='联想观察项'; hit_type='service'; action='investigate'; status='观察'
                 service_name='LenovoOtherService'; matched_pattern='Lenovo'; matched_type='contains'; matched_field='service_name'; obs_reason='宽匹配，只观察'
+                execution_class='observation'; necessity='informational'; default_selected=$false; requires_confirmation=$false; impact_cn='证据不足'; cleanup_reason_cn='保留观察证据'
             })
             suspicious = @()
         }
@@ -1384,6 +1390,71 @@ Describe '勾选视图 (v1.5.5)' {
         $items[1].IsChecked | Should -BeFalse
     }
 
+    It 'projects automatic manual resolved and observation groups from the reviewed schema snapshot' {
+        $pending = New-GuiReviewPendingFixture
+        $manual = $pending.actions[0].PSObject.Copy()
+        $manual.id = 'manual-row'; $manual.service_name = 'ManualService'; $manual.name_cn = '需确认分支'
+        $manual.execution_class = 'manual_impact'; $manual.necessity = 'optional'; $manual.default_selected = $false; $manual.requires_confirmation = $true
+        $manual.impact_cn = '可能影响 OEM 安全状态'; $manual.cleanup_reason_cn = '不使用该功能时可减少后台'
+        $resolved = $pending.actions[0].PSObject.Copy()
+        $resolved.id = 'resolved-row'; $resolved.service_name = 'ResolvedService'; $resolved.name_cn = '已处理分支'; $resolved.status = 'success'
+        $resolved | Add-Member -NotePropertyName current_state -NotePropertyValue 'disabled'
+        $pending.actions = @($pending.actions[0], $manual)
+        $pending.resolved = @($resolved)
+
+        $items = @(Get-PendingViewItems -Pending $pending)
+        $automatic = @($items | Where-Object GroupKey -eq 'automatic')[0]
+        $manualView = @($items | Where-Object GroupKey -eq 'manual')[0]
+        $resolvedView = @($items | Where-Object GroupKey -eq 'resolved')[0]
+        $observation = @($items | Where-Object GroupKey -eq 'observation')[0]
+
+        $automatic.CanExecute | Should -BeTrue
+        $automatic.IsChecked | Should -BeTrue
+        $manualView.CanExecute | Should -BeTrue
+        $manualView.NeedsConfirmation | Should -BeTrue
+        $manualView.IsChecked | Should -BeFalse
+        $resolvedView.CanExecute | Should -BeFalse
+        $resolvedView.IsChecked | Should -BeFalse
+        $resolvedView.StatusLabel | Should -Be '已处理'
+        $resolvedView.CurrentStateLabel | Should -Be '当前状态：disabled'
+        $observation.CanExecute | Should -BeFalse
+        $observation.IsChecked | Should -BeFalse
+        $manualView.NecessityLabel | Should -Match 'optional'
+        $manualView.ImpactText | Should -Match '可能影响 OEM 安全状态'
+        $manualView.CleanupReasonText | Should -Match '不使用该功能时可减少后台'
+
+        $list = $script:Win.FindName('PendingList')
+        $list.ItemsSource = $items
+        Set-AllChecked $list $true
+        $automatic.IsChecked | Should -BeTrue
+        $manualView.IsChecked | Should -BeFalse
+        $resolvedView.IsChecked | Should -BeFalse
+        $observation.IsChecked | Should -BeFalse
+        (Get-GuiReviewCounts $items).automatic | Should -Be 1
+        (Get-GuiReviewCounts $items).manual | Should -Be 1
+        (Get-GuiReviewCounts $items).resolved | Should -Be 1
+        (Get-GuiReviewCounts $items).observation | Should -Be 1
+        Update-GuiReviewCounts -Items $items
+        $script:Win.FindName('ReviewCountsText').Text | Should -Be '安全自动 1 项 · 需确认 1 项 · 已处理 1 项 · 仅观察 1 项'
+    }
+
+    It 'fails closed for missing or malformed review policy fields and never promotes them to executable rows' {
+        $cases = @(
+            @{ Field='execution_class'; Value='unknown' },
+            @{ Field='necessity'; Value=$null },
+            @{ Field='default_selected'; Value='true' },
+            @{ Field='requires_confirmation'; Value=$null },
+            @{ Field='impact_cn'; Value=@('impact') },
+            @{ Field='cleanup_reason_cn'; Value='' }
+        )
+
+        foreach ($case in $cases) {
+            $pending = New-GuiReviewPendingFixture
+            $pending.actions[0].$($case.Field) = $case.Value
+            { Get-PendingViewItems -Pending $pending } | Should -Throw '*pending review shape*' -Because $case.Field
+        }
+    }
+
     It 'Get-PendingViewItems 强制要求显式 validated Pending object' {
         { Get-PendingViewItems } | Should -Throw '*Pending*'
     }
@@ -1407,7 +1478,7 @@ Describe '勾选视图 (v1.5.5)' {
         $pending = New-GuiReviewPendingFixture
         $base = $pending.actions[0]
         $pending.actions = @()
-        foreach ($status in @('pending','failed','success','skipped','manual_required','PENDING')) {
+        foreach ($status in @('pending','failed','success','skipped','manual_required')) {
             $row = $base.PSObject.Copy()
             $row.id = "action-$status"
             $row.service_name = "Service-$status"
@@ -1419,6 +1490,10 @@ Describe '勾选视图 (v1.5.5)' {
         $actionItems = @($items | Where-Object CanExecute)
 
         @($actionItems.status) | Should -Be @('pending','failed')
+
+        $pending = New-GuiReviewPendingFixture
+        $pending.actions[0].status = 'PENDING'
+        { Get-PendingViewItems -Pending $pending } | Should -Throw '*pending review shape*status*'
     }
 
     It 'review presentation shape 拒绝 null、数组标量和缺失 concrete identity' {
@@ -1577,6 +1652,9 @@ Describe '勾选视图 (v1.5.5)' {
         $collision = $pending.actions[0].PSObject.Copy()
         $collision.name_cn = '伪装观察分支'
         $collision.status = '观察'
+        $collision.execution_class = 'observation'
+        $collision.default_selected = $false
+        $collision.requires_confirmation = $false
         $collision | Add-Member -NotePropertyName obs_reason -NotePropertyValue '只观察'
         $pending.observations = @($collision)
 
@@ -1692,8 +1770,8 @@ Describe '勾选视图 (v1.5.5)' {
 
     It '全选跳过 CanExecute=false (观察项不被全选勾上, v1.5.6)' {
         $items = @(
-            [pscustomobject]@{ CanExecute = $true;  IsChecked = $false },
-            [pscustomobject]@{ CanExecute = $false; IsChecked = $false }
+            [pscustomobject]@{ GroupKey='automatic'; CanExecute = $true;  IsChecked = $false },
+            [pscustomobject]@{ GroupKey='observation'; CanExecute = $false; IsChecked = $false }
         )
         $list = [pscustomobject]@{ Items = $items }
         Set-AllChecked $list $true
@@ -1846,6 +1924,19 @@ Describe '勾选视图 (v1.5.5)' {
 
         $payload.pending_schema_version | Should -Be 3
         $payload.pending_schema_version.GetType() | Should -Be ([int64])
+    }
+
+    It '审核列表保留键盘导航和读屏名称，并为四组决策提供可读高度' {
+        $source = Get-Content (Join-Path $script:GuiRoot 'src\Gui\MainWindow.xaml') -Raw
+
+        $script:Win.FindName('PendingList').MaxHeight | Should -BeGreaterOrEqual 280
+        $source | Should -Match 'KeyboardNavigation.TabNavigation="Continue"'
+        $script:Win.FindName('PendingList').GetValue([System.Windows.Automation.AutomationProperties]::NameProperty) | Should -Not -BeNullOrEmpty
+        $source | Should -Match 'Text="\{Binding GroupLabel\}"'
+        $source | Should -Match 'Text="\{Binding NecessityLabel\}"'
+        $source | Should -Match 'Text="\{Binding CurrentStateLabel\}"'
+        $source | Should -Match 'Text="\{Binding ImpactText\}"'
+        $source | Should -Match 'Text="\{Binding CleanupReasonText\}"'
     }
 
     It 'GUI 严格只接受 schema v3 且四个分支都是真正数组的 envelope' {
