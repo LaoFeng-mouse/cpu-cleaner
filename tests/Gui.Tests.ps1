@@ -3083,36 +3083,90 @@ Describe '勾选视图 (v1.5.5)' {
         } finally { $script:Root = $oldRoot }
     }
 
-    It '非零 exit 进入 error 并提示可能已有部分动作执行且尽量展示状态' {
+    It 'exit 2 可信终态子集合并主清单并明确逐项展示部分失败' {
+        $tempRoot = Join-Path $TestDrive ('verified-partial-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $oldRoot = $script:Root; $script:Root = $tempRoot
+        try {
+            $success = (New-GuiReviewPendingFixture -ActionServiceName 'PartialSuccess').actions[0]
+            $failed = (New-GuiReviewPendingFixture -ActionServiceName 'PartialFailure').actions[0]
+            $failed.id = 'partial-failure'
+            $main = [pscustomobject]@{ pending_schema_version=3; actions=@($success,$failed); resolved=@(); observations=@(); suspicious=@() }
+            $mainPath = Join-Path $tempRoot 'pending_actions.json'
+            [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson $main), [System.Text.UTF8Encoding]::new($false))
+            Set-GuiReviewedGenerationFromFile $mainPath
+
+            $successResult = $success.PSObject.Copy(); $successResult.status = 'success'
+            $failedResult = $failed.PSObject.Copy(); $failedResult.status = 'failed'
+            $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($successResult,$failedResult); resolved=@(); observations=@(); suspicious=@() }
+            $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
+            [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
+            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=2 }
+            $script:ExecutionTimer = New-ExecutionFakeTimer
+            $script:ExecutionTempPath = $subsetPath
+            $script:ExecutionActions = @($success,$failed)
+            $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+            Set-GuiState executing -Force
+
+            Complete-ExecutionPoll | Should -BeTrue
+
+            $script:GuiState | Should -Be 'completed'
+            $rows = @($script:Win.FindName('CompletedList').ItemsSource)
+            @($rows | Where-Object State -eq 'success').Count | Should -Be 1
+            @($rows | Where-Object State -eq 'failed').Count | Should -Be 1
+            $summary = $script:Win.FindName('CompletedSummaryText')
+            $summary.Text | Should -Match '部分项目失败'
+            $summary.Text | Should -Not -Match '可能'
+            $summary.Foreground.ToString() | Should -Be $script:Win.Resources['Danger'].ToString()
+            $merged = Get-Content -LiteralPath $mainPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            @($merged.actions | Where-Object status -eq 'success').Count | Should -Be 1
+            @($merged.actions | Where-Object status -eq 'failed').Count | Should -Be 1
+            Test-Path -LiteralPath $subsetPath | Should -BeFalse
+        } finally { $script:Root = $oldRoot }
+    }
+
+    It '其他非零 exit 进入 error、提示可能部分执行且不合并主清单' {
         $tempRoot = Join-Path $TestDrive ('partial-error-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $oldRoot = $script:Root; $script:Root = $tempRoot
         $action = (New-GuiReviewPendingFixture).actions[0]; $action.status='success'
         $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() }
         $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
-        $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=7 }
-        $script:ExecutionTimer = New-ExecutionFakeTimer
-        $script:ExecutionTempPath = $subsetPath
-        $script:ExecutionActions = @($action)
-        Set-GuiState executing -Force
+        $mainPath = Join-Path $tempRoot 'pending_actions.json'
+        $mainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; marker='must-not-merge'; actions=@($action); resolved=@(); observations=@(); suspicious=@() })))
+        [System.IO.File]::WriteAllBytes($mainPath, $mainBytes)
+        Set-GuiReviewedGenerationFromFile $mainPath
+        try {
+            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=7 }
+            $script:ExecutionTimer = New-ExecutionFakeTimer
+            $script:ExecutionTempPath = $subsetPath
+            $script:ExecutionActions = @($action)
+            Set-GuiState executing -Force
 
-        Complete-ExecutionPoll | Should -BeTrue
+            Complete-ExecutionPoll | Should -BeTrue
 
-        $script:GuiState | Should -Be 'error'
-        $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
-        $script:Win.FindName('ErrorDetailText').Text | Should -Match 'success'
-        Test-Path -LiteralPath $subsetPath | Should -BeFalse
+            $script:GuiState | Should -Be 'error'
+            $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Match 'success'
+            [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $mainBytes
+            Test-Path -LiteralPath $subsetPath | Should -BeFalse
+        } finally { $script:Root = $oldRoot }
     }
 
-    It 'exit 0 结果文件不可读时进入 error 并把原字节保全到 diagnostics' {
-        $tempRoot = Join-Path $TestDrive ('zero-unreadable-' + [guid]::NewGuid().ToString('N'))
+    It 'exit <exitCode> 结果文件不可读时进入 error 并把原字节保全到 diagnostics' -TestCases @(
+        @{ exitCode=0 }
+        @{ exitCode=2 }
+    ) {
+        param($exitCode)
+        $tempRoot = Join-Path $TestDrive ("verified-unreadable-$exitCode-" + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $oldRoot = $script:Root
         $script:Root = $tempRoot
         $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         $brokenBytes = [System.Text.UTF8Encoding]::new($false).GetBytes('{broken json')
         [System.IO.File]::WriteAllBytes($subsetPath, $brokenBytes)
-        $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
+        $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=$exitCode }
         $script:ExecutionTimer = New-ExecutionFakeTimer
         $script:ExecutionTempPath = $subsetPath
         $script:ExecutionActions = @()
@@ -3129,12 +3183,15 @@ Describe '勾选视图 (v1.5.5)' {
         Test-Path -LiteralPath $subsetPath | Should -BeFalse
     }
 
-    It 'exit 0 结果身份漂移或仍为非终态时拒绝 completed 并保全诊断证据' -TestCases @(
-        @{ label='identity'; mutate={ param($a); $a.service_name='DifferentService'; $a.status='success' } }
-        @{ label='nonterminal'; mutate={ param($a); $a.status='pending' } }
+    It 'exit <exitCode> 结果身份、终态或退出契约不可信时拒绝 completed 并保全诊断证据' -TestCases @(
+        @{ exitCode=0; label='identity'; mutate={ param($a); $a.service_name='DifferentService'; $a.status='success' } }
+        @{ exitCode=2; label='identity'; mutate={ param($a); $a.service_name='DifferentService'; $a.status='failed' } }
+        @{ exitCode=0; label='nonterminal'; mutate={ param($a); $a.status='pending' } }
+        @{ exitCode=2; label='nonterminal'; mutate={ param($a); $a.status='pending' } }
+        @{ exitCode=2; label='missing-failure'; mutate={ param($a); $a.status='success' } }
     ) {
-        param($label, $mutate)
-        $tempRoot = Join-Path $TestDrive ("zero-invalid-$label-" + [guid]::NewGuid().ToString('N'))
+        param($exitCode, $label, $mutate)
+        $tempRoot = Join-Path $TestDrive ("verified-invalid-$exitCode-$label-" + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $oldRoot = $script:Root
         $script:Root = $tempRoot
@@ -3145,7 +3202,7 @@ Describe '勾选视图 (v1.5.5)' {
             $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@() }
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
             [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
-            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
+            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=$exitCode }
             $script:ExecutionTimer = New-ExecutionFakeTimer
             $script:ExecutionTempPath = $subsetPath
             $script:ExecutionActions = @($expected)
@@ -3163,8 +3220,12 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It 'exit 0 主 pending generation 已变化时进入 error、保全结果且不覆盖新 scan' {
-        $tempRoot = Join-Path $TestDrive ('zero-merge-conflict-' + [guid]::NewGuid().ToString('N'))
+    It 'exit <exitCode> 主 pending generation 已变化时进入 error、保全结果且不覆盖新 scan' -TestCases @(
+        @{ exitCode=0 }
+        @{ exitCode=2 }
+    ) {
+        param($exitCode)
+        $tempRoot = Join-Path $TestDrive ("verified-merge-conflict-$exitCode-" + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $oldRoot = $script:Root; $script:Root = $tempRoot
         try {
@@ -3174,13 +3235,13 @@ Describe '勾选视图 (v1.5.5)' {
             [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson $reviewedMain), [System.Text.UTF8Encoding]::new($false))
             Set-GuiReviewedGenerationFromFile $mainPath
 
-            $resultAction = $expected.PSObject.Copy(); $resultAction.status='success'
+            $resultAction = $expected.PSObject.Copy(); $resultAction.status=if ($exitCode -eq 2) { 'failed' } else { 'success' }
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
             [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; actions=@($resultAction); resolved=@(); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
             $newAction = (New-GuiReviewPendingFixture -ActionServiceName 'NewScanService').actions[0]
             $newMainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; generated='new'; actions=@($newAction); resolved=@(); observations=@(); suspicious=@(); marker='keep-new-scan' })))
             [System.IO.File]::WriteAllBytes($mainPath, $newMainBytes)
-            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
+            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=$exitCode }
             $script:ExecutionTimer = New-ExecutionFakeTimer
             $script:ExecutionTempPath = $subsetPath
             $script:ExecutionActions = @($expected)

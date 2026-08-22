@@ -41,7 +41,7 @@ $script:I18N = @{
         BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
         ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
         BtnExec='处理已勾选项目（需要管理员）'; ExecEmpty='请先勾选要处理的项目（【2. 处理建议】页勾选）。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
-        ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2} / manual {3}'; ExecCloseBlocked='管理员处理仍在启动、运行或状态未知，暂不能关闭窗口。'; ExecStatusUnknown='管理员进程状态未知'
+        ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2} / manual {3}'; ExecPartialFailed='部分项目失败。'; ExecCloseBlocked='管理员处理仍在启动、运行或状态未知，暂不能关闭窗口。'; ExecStatusUnknown='管理员进程状态未知'
         ExecUnauthorized='未授权、未开始处理。'; ExecNotStarted='管理员授权未完成，未开始处理，系统设置没有变化。'; ExecPartialPossible='执行进程异常结束，可能已有部分动作执行。'; ExecResultReadFailed='无法完整读取逐项结果。'
         BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
         NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复最近的可信备份。'; RestoreNone='没有通过安全验证的可信备份。'; RestoreErr='恢复失败: {0}'; RestorePartial='恢复已执行，但部分条目验证失败。'; RestoreNotStarted='管理员授权未完成，恢复没有开始。'; RestoreStatusUnknown='恢复进程已启动，状态未知，可能已发生部分修改。'; RestoreMayHaveChanged='恢复进程异常结束，部分设置可能已经改变。'; LegacyBackupUnsupported='旧版项目目录备份不可自动恢复，请重新执行一次安全处理生成可信备份。'
@@ -71,7 +71,7 @@ $script:I18N = @{
         BtnLoad='Load Pending Items'; PendingHint='Risk & evidence shown; check items to process (unverified = observe only, unchecked)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Check items, then go to tab 3.'
         ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
         BtnExec='Process Checked Items (admin)'; ExecEmpty='Check items first (tab 2).'; ExecStart='Processing {0} item(s). UAC requested, click YES…'; ExecDone='Processing done. See tab 4 (restart PC recommended).'
-        ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2} / manual {3}'; ExecCloseBlocked='The elevated operation is starting, running, or has unknown status. Keep this window open.'; ExecStatusUnknown='Elevated process status is unknown'
+        ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2} / manual {3}'; ExecPartialFailed='Some items failed.'; ExecCloseBlocked='The elevated operation is starting, running, or has unknown status. Keep this window open.'; ExecStatusUnknown='Elevated process status is unknown'
         ExecUnauthorized='Not authorized; processing did not start.'; ExecNotStarted='Administrator authorization was not completed. Processing did not start and no system settings changed.'; ExecPartialPossible='The execution process ended abnormally; some actions may already have run.'; ExecResultReadFailed='The per-item result could not be read completely.'
         BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
         NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored the latest trusted backup.'; RestoreNone='No backup passed the trust validation.'; RestoreErr='Restore failed: {0}'; RestorePartial='Restore ran, but some items failed verification.'; RestoreNotStarted='Administrator authorization was not completed; restore did not start.'; RestoreStatusUnknown='The restore process started, but its status is unknown; partial changes may already have occurred.'; RestoreMayHaveChanged='The restore process ended abnormally; some settings may already have changed.'; LegacyBackupUnsupported='Legacy project-folder backups cannot be restored automatically. Run one safe cleanup to create a trusted backup.'
@@ -2120,12 +2120,18 @@ function Complete-ExecutionPoll {
     Invoke-GuiTimerStop $script:ExecutionTimer
     $script:ExecutionLifecycle = 'exited'
     $exitCode = $probe.ExitCode
-    if ($exitCode -eq 0) {
+    if ($exitCode -eq 0 -or $exitCode -eq 2) {
         try {
             $result = Read-GuiStrictExecutionResult -Path $script:ExecutionTempPath -ExpectedActions $script:ExecutionActions
+            if ($exitCode -eq 2 -and $result.Summary['failed'] -le 0) {
+                throw 'execution exit 2 result does not contain a failed action.'
+            }
             Merge-PendingStatus $result
             $window.FindName('CompletedList').ItemsSource = @($result.Rows)
             Set-GuiCompletedSummary -Success $result.Summary['success'] -Failed $result.Summary['failed'] -Skipped $result.Summary['skipped'] -Manual $result.Summary['manual_required']
+            if ($exitCode -eq 2) {
+                $window.FindName('CompletedSummaryText').Text += [Environment]::NewLine + (Get-Text 'ExecPartialFailed')
+            }
             Set-GuiState completed
             $null = Clear-GuiExecutionResources -RemoveTemp -ProcessExitConfirmed
         } catch {
