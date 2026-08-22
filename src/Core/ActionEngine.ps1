@@ -477,6 +477,21 @@ function Test-PendingSchemaSupported($Pending) {
     return ([int64]3).Equals([int64]$version)
 }
 
+function Test-PendingEnvelopeShape($Pending) {
+    if (-not (Test-PendingSchemaSupported $Pending)) { return $false }
+    foreach ($name in @('actions','resolved','observations','suspicious')) {
+        $property = $null
+        foreach ($candidate in $Pending.PSObject.Properties) {
+            if ([string]::Equals($candidate.Name, $name, [System.StringComparison]::Ordinal)) {
+                $property = $candidate
+                break
+            }
+        }
+        if ($null -eq $property -or $property.Value -isnot [System.Array]) { return $false }
+    }
+    return $true
+}
+
 function Test-PendingJsonFileLength($Length) {
     $integerTypes = @([byte],[uint16],[uint32],[int16],[int32],[int64])
     $isInteger = $false
@@ -1936,10 +1951,7 @@ function Invoke-StopProcessPending {
         $actualHash = Get-PendingStreamSha256 $stream
         if (-not [string]::Equals($actualHash,$ExpectedSha256,[System.StringComparison]::OrdinalIgnoreCase)) { throw 'stop_process pending SHA-256 不匹配' }
         $pending = ConvertFrom-StrictPendingJson (Read-LimitedPendingJsonStream $stream)
-        if (-not (Test-PendingSchemaSupported $pending)) { throw 'stop_process pending schema 不兼容' }
-        foreach ($name in @('actions','resolved','observations','suspicious')) {
-            if ($pending.PSObject.Properties.Name -notcontains $name -or $pending.$name -isnot [System.Array]) { throw "stop_process $name 必须是数组" }
-        }
+        if (-not (Test-PendingEnvelopeShape $pending)) { throw 'stop_process pending schema 或数组结构不兼容' }
         if (@($pending.actions).Count -ne 0) { throw 'stop_process actions 必须为空' }
         if (@($pending.resolved).Count -ne 0) { throw 'stop_process resolved 必须为空' }
         if (@($pending.observations).Count -ne 0) { throw 'stop_process observations 必须为空' }
@@ -1985,8 +1997,8 @@ function Invoke-Clean {
     }
     $pendingRaw = Read-LimitedPendingJsonStream $pendingStream
     $pending = ConvertFrom-StrictPendingJson $pendingRaw
-    if (-not (Test-PendingSchemaSupported $pending)) {
-        Write-Host '错误: pending 清单版本旧或不兼容。请重新运行 scan 生成新清单。' -ForegroundColor Red
+    if (-not (Test-PendingEnvelopeShape $pending)) {
+        Write-Host '错误: pending 清单版本或数组结构旧或不兼容。请重新运行 scan 生成新清单。' -ForegroundColor Red
         exit 1
     }
     $pendingValidated = $true

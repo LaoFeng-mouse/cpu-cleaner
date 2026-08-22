@@ -165,6 +165,29 @@ Describe '待办清单规则' {
         Test-PendingSchemaSupported ([pscustomobject]@{ pending_schema_version = [int64]3 }) | Should -BeTrue
     }
 
+    It '严格 schema v3 envelope 只接受四个真正数组分支' {
+        $valid = [pscustomobject]@{
+            pending_schema_version = [int32]3
+            actions = @()
+            resolved = @()
+            observations = @()
+            suspicious = @()
+        }
+        Test-PendingEnvelopeShape $valid | Should -BeTrue
+
+        foreach ($branch in @('actions','resolved','observations','suspicious')) {
+            $missing = $valid.PSObject.Copy()
+            $missing.PSObject.Properties.Remove($branch)
+            Test-PendingEnvelopeShape $missing | Should -BeFalse
+
+            foreach ($invalidValue in @($null, 'not-an-array', [pscustomobject]@{ nested = 'object' })) {
+                $invalid = $valid.PSObject.Copy()
+                $invalid.$branch = $invalidValue
+                Test-PendingEnvelopeShape $invalid | Should -BeFalse
+            }
+        }
+    }
+
     It '拒绝缺失、空值、错误版本及非整数标量 pending schema' {
         $unsupported = @(
             [pscustomobject]@{},
@@ -233,7 +256,7 @@ Describe '待办清单规则' {
         { ConvertFrom-StrictPendingJson $raw } | Should -Throw '*重复*'
     }
 
-    It 'Invoke-Clean 在读取 actions 和 Load-Profiles 前拒绝旧 pending envelope' {
+    It 'Invoke-Clean 在读取 actions 和 Load-Profiles 前拒绝非法 pending envelope' {
         $actionEnginePath = Join-Path $projectRoot 'src\Core\ActionEngine.ps1'
         $tokens = $null
         $parseErrors = $null
@@ -246,7 +269,7 @@ Describe '待办清单规则' {
         $body = $invokeClean.Body.Extent.Text
 
         $convertIndex = $body.IndexOf('$pending = ConvertFrom-StrictPendingJson $pendingRaw')
-        $gateIndex = $body.IndexOf('Test-PendingSchemaSupported $pending')
+        $gateIndex = $body.IndexOf('Test-PendingEnvelopeShape $pending')
         $actionsIndex = $body.IndexOf('$pending.actions')
         $profilesIndex = $body.IndexOf('Load-Profiles')
 
@@ -255,15 +278,22 @@ Describe '待办清单规则' {
         $gateIndex | Should -BeLessThan $actionsIndex
         $gateIndex | Should -BeLessThan $profilesIndex
         $body.Substring($gateIndex, $actionsIndex - $gateIndex) | Should -Match '\bexit\s+1\b'
-        $body | Should -Match '旧|不兼容'
+        $body | Should -Match '旧|不兼容|数组结构'
         $body | Should -Match 'scan'
     }
 
-    It '旧 envelope 在隔离子进程中输出错误且不加载特征库或读取系统并以非零退出' {
-        $pendingPath = Join-Path $TestDrive 'legacy-pending.json'
-        $markerPath = Join-Path $TestDrive 'forbidden-calls.txt'
-        $fixturePath = Join-Path $TestDrive 'invoke-clean-fixture.ps1'
-        [System.IO.File]::WriteAllText($pendingPath, '{"pending_schema_version":2,"actions":[],"resolved":[],"observations":[],"suspicious":[]}', [System.Text.UTF8Encoding]::new($false))
+    It '非法 pending envelope 在隔离子进程中输出错误且不加载特征库或读取系统并以非零退出' -TestCases @(
+        @{ Label='legacy v2'; Json='{"pending_schema_version":2,"actions":[],"resolved":[],"observations":[],"suspicious":[]}' }
+        @{ Label='missing actions'; Json='{"pending_schema_version":3,"resolved":[],"observations":[],"suspicious":[]}' }
+        @{ Label='null resolved'; Json='{"pending_schema_version":3,"actions":[],"resolved":null,"observations":[],"suspicious":[]}' }
+        @{ Label='scalar observations'; Json='{"pending_schema_version":3,"actions":[],"resolved":[],"observations":"bad","suspicious":[]}' }
+        @{ Label='object suspicious'; Json='{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[],"suspicious":{}}' }
+    ) {
+        param($Label, $Json)
+        $pendingPath = Join-Path $TestDrive ("invalid-pending-$Label.json")
+        $markerPath = Join-Path $TestDrive ("forbidden-calls-$Label.txt")
+        $fixturePath = Join-Path $TestDrive ("invoke-clean-$Label.ps1")
+        [System.IO.File]::WriteAllText($pendingPath, $Json, [System.Text.UTF8Encoding]::new($false))
         $actionEnginePath = Join-Path $projectRoot 'src\Core\ActionEngine.ps1'
         $fixture = @'
 param([string]$PendingPath, [string]$MarkerPath, [string]$ActionEnginePath)
@@ -301,9 +331,9 @@ exit 0
         $process.WaitForExit()
 
         $process.ExitCode | Should -Not -Be 0
+        Test-Path -LiteralPath $markerPath | Should -BeFalse
         ($stdout + $stderr) | Should -Match 'pending'
         ($stdout + $stderr) | Should -Match 'scan'
-        Test-Path -LiteralPath $markerPath | Should -BeFalse
     }
 
     It '自定义 pending 缺失或错误 SHA-256 时在解析、授权和动作前 fail closed' -TestCases @(

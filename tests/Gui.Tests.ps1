@@ -794,7 +794,7 @@ exit 0
     It 'pending load failure cleans up and enters recoverable error' {
         Mock Read-GuiBackgroundJob { 'scan complete' }
         Mock Invoke-GuiBackgroundJobRemoval {}
-        Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); observations=@()} }
+        Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); resolved=@(); observations=@()} }
         Mock Get-PendingViewItems { throw 'pending parse failed' }
         $checkTimer = New-FakeTimer
         $scanTimer = New-FakeTimer
@@ -811,7 +811,7 @@ exit 0
     It 'results rendering failure rolls back then enters recoverable error' {
         Mock Read-GuiBackgroundJob { 'scan complete' }
         Mock Invoke-GuiBackgroundJobRemoval {}
-        Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); observations=@()} }
+        Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); resolved=@(); observations=@()} }
         Mock Get-PendingViewItems { @() }
         $realWindow = $window
         $failingSummary = New-OneShotFailingControl -RealControl $realWindow.FindName('ResultSummaryText') -PropertyName Text
@@ -862,7 +862,7 @@ exit 0
             Mock Read-GuiBackgroundJob { 'scan complete' }
             Mock Invoke-GuiBackgroundJobRemoval {}
             Mock Read-GuiPendingFile { [pscustomobject]@{
-                actions=@(); observations=@()
+                actions=@(); resolved=@(); observations=@()
                 scan_health=[pscustomobject]@{system_info='complete';services='complete';tasks='complete'}
                 scan_warnings=@()
             } }
@@ -911,7 +911,7 @@ exit 0
     It 'completed scan stops timers, loads result counts, and enters results' {
         Mock Read-GuiBackgroundJob { 'scan complete' }
         Mock Invoke-GuiBackgroundJobRemoval {}
-        Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); observations=@()} }
+        Mock Read-GuiPendingFile { [pscustomobject]@{actions=@(); resolved=@(); observations=@()} }
         Mock Get-PendingViewItems {
             @([pscustomobject]@{CanExecute=$true},[pscustomobject]@{CanExecute=$false})
         }
@@ -932,7 +932,7 @@ exit 0
         Mock Invoke-GuiBackgroundJobRemoval {}
         Mock Read-GuiPendingFile {
             [pscustomobject]@{
-                actions=@(); observations=@()
+                actions=@(); resolved=@(); observations=@()
                 scan_health=[pscustomobject]@{system_info='complete'; services='degraded'; tasks='complete'}
                 scan_warnings=@('服务使用兼容采集')
             }
@@ -1031,12 +1031,13 @@ Describe '勾选视图 (v1.5.5)' {
                 [string]$ActionServiceName = 'ActionService'
             )
             return [pscustomobject]@{
-                pending_schema_version = [int64]2
+                pending_schema_version = [int64]3
                 review_marker = $Marker
                 actions = @([pscustomobject]@{
                     id='action-row'; name_cn='可执行分支'; hit_type='service'; action='disable_service'; status='pending'
                     service_name=$ActionServiceName; matched_pattern='Action'; matched_type=$ActionMatchedType; matched_field='service_name'; reason_cn='action reason'
                 })
+                resolved = @()
                 observations = @([pscustomobject]@{
                     id='observation-row'; name_cn='观察分支'; hit_type='service'; action='investigate'; status='观察'
                     service_name='ObservationService'; matched_pattern='ObservationService'; matched_type=$ObservationMatchedType; matched_field='service_name'; reason_cn='observation reason'; obs_reason='只观察'
@@ -1281,11 +1282,13 @@ Describe '勾选视图 (v1.5.5)' {
         }
         $profiles | ConvertTo-Json -Depth 6 | Out-File (Join-Path $tmpRoot 'bloatware-profiles.json') -Encoding utf8
         $pending = [pscustomobject]@{
+            pending_schema_version = [int32]3
             generated = 'x'
             actions = @(
                 [pscustomobject]@{ id='t1'; vendor='T'; name_cn='测试高风险'; action='disable_service'; hit_type='service'; detail=''; reason_cn='r1'; service_name='S1'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='pending' },
                 [pscustomobject]@{ id='t3'; vendor='T'; name_cn='已完成项'; action='disable_service'; hit_type='service'; detail=''; reason_cn='r3'; service_name='S3'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; status='success' }
             )
+            resolved = @()
             observations = @(
                 [pscustomobject]@{ id='t2'; vendor='T'; name_cn='测试未实测'; action='investigate'; hit_type='service'; detail=''; reason_cn='r2'; service_name='S2'; autostart_source=''; autostart_name=''; task_path=''; process_name=''; safe=$true; obs_reason='未实测 (tested=false), 仅观察' }
             )
@@ -1321,15 +1324,16 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.Directory]::Delete($tmpRoot, $true)
     }
 
-    It '混合 matcher 按 pending v2 provenance 展示且观察项保持不可执行' {
+    It '混合 matcher 按 pending v3 provenance 展示且观察项保持不可执行' {
         $tmpRoot = Join-Path $TestDrive ('gui-mixed-view-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tmpRoot)
         $pending = [pscustomobject]@{
-            pending_schema_version = [int64]2
+            pending_schema_version = [int64]3
             actions = @([pscustomobject]@{
                 id='mixed'; name_cn='精确服务'; hit_type='service'; action='disable_service'; status='pending'
                 service_name='ExactService'; matched_pattern='ExactService'; matched_type='exact'; matched_field='service_name'; reason_cn='narrow'
             })
+            resolved = @()
             observations = @([pscustomobject]@{
                 id='mixed'; name_cn='联想观察项'; hit_type='service'; action='investigate'; status='观察'
                 service_name='LenovoOtherService'; matched_pattern='Lenovo'; matched_type='contains'; matched_field='service_name'; obs_reason='宽匹配，只观察'
@@ -1643,7 +1647,7 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It 'review 加载非 v2 pending 时按 <Lang> 本地化失败并清空 stale state' -TestCases @(
+    It 'review 加载非 v3 pending 时按 <Lang> 本地化失败并清空 stale state' -TestCases @(
         @{ Lang='zh'; Summary='待处理清单已过期，必须重新扫描。'; Mutation='没有执行任何系统修改。' }
         @{ Lang='en'; Summary='The pending review is stale and must be rescanned.'; Mutation='No system settings were changed.' }
     ) {
@@ -1765,6 +1769,7 @@ Describe '勾选视图 (v1.5.5)' {
                 [pscustomobject]@{ id='a'; status='success' },
                 [pscustomobject]@{ id='b'; status='failed' }
             )
+            resolved = @()
             suspicious = @()
         }
         $pending | ConvertTo-Json -Depth 5 | Out-File $tmpFile -Encoding utf8
@@ -1775,19 +1780,19 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.Directory]::Delete($tmpRoot, $true)
     }
 
-    It '勾选子集保留完整 v2 action provenance 和进程身份' {
+    It '勾选子集保留完整 v3 action provenance、resolved 和进程身份' {
         $raw = [pscustomobject]@{
-            id='process-v2'; vendor='T'; name_cn='Process'; action='uninstall'; hit_type='process'; detail='P1 PID=101'; reason_cn='r'
+            id='process-v3'; vendor='T'; name_cn='Process'; action='uninstall'; hit_type='process'; detail='P1 PID=101'; reason_cn='r'
             service_name=''; service_display_name=''; autostart_source=''; autostart_name=''; autostart_value=''; task_name=''; task_path=''
             process_name='P1'; process_id=101; process_path='C:\Apps\P1.exe'; safe=$true; status='failed'
-            matched_pattern='C:\Apps'; matched_type='path'; matched_field='process_path'; future_v2_property='preserve-me'
+            matched_pattern='C:\Apps'; matched_type='path'; matched_field='process_path'; future_v3_property='preserve-me'
         }
         $checked = @([pscustomobject]@{ _raw=$raw })
-        $source = [pscustomobject]@{ pending_schema_version=2; generated='scan'; actions=@($raw); observations=@([pscustomobject]@{ id='observe'; obs_reason='keep' }); suspicious=@([pscustomobject]@{ PID=9; Name='Other' }); safety_nonce='keep-envelope' }
+        $source = [pscustomobject]@{ pending_schema_version=3; generated='scan'; actions=@($raw); resolved=@([pscustomobject]@{ id='resolved'; retained='yes' }); observations=@([pscustomobject]@{ id='observe'; obs_reason='keep' }); suspicious=@([pscustomobject]@{ PID=9; Name='Other' }); safety_nonce='keep-envelope' }
 
         $payload = New-PendingSubsetPayload -Checked $checked -SourcePending $source
 
-        $payload.pending_schema_version | Should -Be 2
+        $payload.pending_schema_version | Should -Be 3
         @($payload.actions).Count | Should -Be 1
         $action = $payload.actions[0]
         $action.status | Should -Be 'pending'
@@ -1796,9 +1801,10 @@ Describe '勾选视图 (v1.5.5)' {
         $action.matched_field | Should -Be 'process_path'
         $action.process_id | Should -Be 101
         $action.process_path | Should -Be 'C:\Apps\P1.exe'
-        $action.future_v2_property | Should -Be 'preserve-me'
+        $action.future_v3_property | Should -Be 'preserve-me'
         $raw.status | Should -Be 'failed'
         @($payload.suspicious).Count | Should -Be 1
+        $payload.resolved[0].retained | Should -Be 'yes'
         @($payload.observations).Count | Should -Be 1
         $payload.observations[0].obs_reason | Should -Be 'keep'
         $payload.safety_nonce | Should -Be 'keep-envelope'
@@ -1808,19 +1814,19 @@ Describe '勾选视图 (v1.5.5)' {
     }
 
     It '缺失 pending schema marker 时拒绝生成勾选子集并要求重新 scan' {
-        $raw = [pscustomobject]@{ id='service-v2'; action='disable_service'; hit_type='service'; status='pending'; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'; process_id=0; process_path='' }
+        $raw = [pscustomobject]@{ id='service-v3'; action='disable_service'; hit_type='service'; status='pending'; matched_pattern='S1'; matched_type='exact'; matched_field='service_name'; process_id=0; process_path='' }
         { New-PendingSubsetPayload -Checked @([pscustomobject]@{ _raw=$raw }) -SourcePending ([pscustomobject]@{ suspicious=@() }) } |
             Should -Throw '*重新运行 scan*'
     }
 
     It '缺失、旧版及非整数标量 pending schema 均失败关闭' {
-        $raw = [pscustomobject]@{ id='service-v2'; action='disable_service'; hit_type='service'; status='pending' }
+        $raw = [pscustomobject]@{ id='service-v3'; action='disable_service'; hit_type='service'; status='pending' }
         $invalidSources = @(
             [pscustomobject]@{ suspicious=@() },
             [pscustomobject]@{ pending_schema_version=[int32]1; suspicious=@() },
-            [pscustomobject]@{ pending_schema_version='2'; suspicious=@() },
-            [pscustomobject]@{ pending_schema_version=@([int32]2); suspicious=@() },
-            [pscustomobject]@{ pending_schema_version=[double]2.0; suspicious=@() }
+            [pscustomobject]@{ pending_schema_version='3'; suspicious=@() },
+            [pscustomobject]@{ pending_schema_version=@([int32]3); suspicious=@() },
+            [pscustomobject]@{ pending_schema_version=[double]3.0; suspicious=@() }
         )
 
         foreach ($source in $invalidSources) {
@@ -1829,12 +1835,28 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It '合法 Int64 pending schema v2 原样保留' {
-        $raw = [pscustomobject]@{ id='service-v2'; action='disable_service'; hit_type='service'; status='pending' }
-        $payload = New-PendingSubsetPayload -Checked @([pscustomobject]@{ _raw=$raw }) -SourcePending ([pscustomobject]@{ pending_schema_version=[int64]2; suspicious=@() })
+    It '合法 Int64 pending schema v3 输出为严格 v3 envelope' {
+        $raw = [pscustomobject]@{ id='service-v3'; action='disable_service'; hit_type='service'; status='pending' }
+        $payload = New-PendingSubsetPayload -Checked @([pscustomobject]@{ _raw=$raw }) -SourcePending ([pscustomobject]@{ pending_schema_version=[int64]3; actions=@(); resolved=@(); observations=@(); suspicious=@() })
 
-        $payload.pending_schema_version | Should -Be 2
+        $payload.pending_schema_version | Should -Be 3
         $payload.pending_schema_version.GetType() | Should -Be ([int64])
+    }
+
+    It 'GUI 严格只接受 schema v3 且四个分支都是真正数组的 envelope' {
+        $valid = [pscustomobject]@{ pending_schema_version=[int32]3; actions=@(); resolved=@(); observations=@(); suspicious=@() }
+        Assert-GuiPendingEnvelopeShape -Pending $valid
+
+        $v2 = $valid.PSObject.Copy(); $v2.pending_schema_version = [int32]2
+        { Assert-GuiPendingEnvelopeShape -Pending $v2 } | Should -Throw '*重新运行 scan*'
+        foreach ($branch in @('actions','resolved','observations','suspicious')) {
+            $missing = $valid.PSObject.Copy(); $missing.PSObject.Properties.Remove($branch)
+            { Assert-GuiPendingEnvelopeShape -Pending $missing } | Should -Throw '*数组*'
+            foreach ($invalidValue in @($null, 'scalar', [pscustomobject]@{ nested='object' })) {
+                $invalid = $valid.PSObject.Copy(); $invalid.$branch = $invalidValue
+                { Assert-GuiPendingEnvelopeShape -Pending $invalid } | Should -Throw '*数组*'
+            }
+        }
     }
 
     It 'GUI subset JSON 无损保留 <Levels> 层扩展字段' -TestCases @(
@@ -1846,7 +1868,7 @@ Describe '勾选视图 (v1.5.5)' {
         for ($i = 0; $i -lt $Levels; $i++) { $deep = [pscustomobject]@{ next = $deep } }
         $raw = [pscustomobject]@{ id='deep'; action='disable_service'; hit_type='service'; status='pending' }
         $source = [pscustomobject]@{
-            pending_schema_version=2; generated='x'; actions=@($raw); observations=@(); suspicious=@(); extension=$deep
+            pending_schema_version=3; generated='x'; actions=@($raw); resolved=@(); observations=@(); suspicious=@(); extension=$deep
         }
 
         $payload = New-PendingSubsetPayload -Checked @([pscustomobject]@{ _raw=$raw }) -SourcePending $source
@@ -2181,7 +2203,7 @@ Describe '勾选视图 (v1.5.5)' {
             Set-GuiState review -Force
             $upper = (New-GuiReviewPendingFixture -ActionServiceName 'CaseService').actions[0]
             $lower = $upper.PSObject.Copy(); $lower.service_name = 'caseservice'; $lower.name_cn = 'lower action'
-            $pending = [pscustomobject]@{ pending_schema_version=[int64]2; actions=@($upper,$lower); observations=@(); suspicious=@() }
+            $pending = [pscustomobject]@{ pending_schema_version=[int64]3; actions=@($upper,$lower); resolved=@(); observations=@(); suspicious=@() }
             $script:ReviewedPendingSnapshot = $pending
             $keys = [System.Collections.Generic.List[string]]::new()
             foreach ($key in @(Get-GuiValidatedActionIdentityKeys -Pending $pending)) { $keys.Add($key) }
@@ -2266,11 +2288,11 @@ Describe '勾选视图 (v1.5.5)' {
         $oldRoot = $script:Root; $script:Root = $tempRoot
         $action = (New-GuiReviewPendingFixture).actions[0]
         $resultAction = $action.PSObject.Copy(); $resultAction.status = 'success'
-        $subset = [pscustomobject]@{ pending_schema_version=2; actions=@($resultAction); observations=@(); suspicious=@() }
+        $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($resultAction); resolved=@(); observations=@(); suspicious=@() }
         $path = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
         $mainPath = Join-Path $tempRoot 'pending_actions.json'
-        [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($action); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
         Set-GuiReviewedGenerationFromFile $mainPath
         $process = [pscustomobject]@{ ExitCode=0; ProbeCalls=0 }
         $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); $this.ProbeCalls++; if ($this.ProbeCalls -eq 1) { throw 'probe method failed' }; return $true }
@@ -2304,7 +2326,7 @@ Describe '勾选视图 (v1.5.5)' {
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $action = (New-GuiReviewPendingFixture).actions[0]; $action.status = 'failed'
         $path = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
-        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($action); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
         $process = [pscustomobject]@{ ExitCode=7; ProbeCalls=0 }
         $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); $this.ProbeCalls++; if ($this.ProbeCalls -eq 1) { throw 'transient getter failure' }; return $true }
         $timer = New-ExecutionFakeTimer
@@ -2366,7 +2388,7 @@ Describe '勾选视图 (v1.5.5)' {
             $skipped = (New-GuiReviewPendingFixture -ActionServiceName 'S3').actions[0].PSObject.Copy(); $skipped.id='skipped-row'; $skipped.status='skipped'
             $manual = (New-GuiReviewPendingFixture -ActionServiceName 'S4').actions[0].PSObject.Copy(); $manual.id='manual-row'; $manual.status='manual_required'
             $success.status='success'
-            $subset = [pscustomobject]@{ pending_schema_version=2; actions=@($success,$failed,$skipped,$manual); observations=@(); suspicious=@() }
+            $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($success,$failed,$skipped,$manual); resolved=@(); observations=@(); suspicious=@() }
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
             [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
             $mainPath = Join-Path $tempRoot 'pending_actions.json'
@@ -2396,7 +2418,7 @@ Describe '勾选视图 (v1.5.5)' {
         try {
             $expected = (New-GuiReviewPendingFixture -ActionServiceName 'SingleReadService').actions[0]
             $mainPath = Join-Path $tempRoot 'pending_actions.json'
-            [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($expected); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; actions=@($expected); resolved=@(); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
             Set-GuiReviewedGenerationFromFile $mainPath
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
             [System.IO.File]::WriteAllText($subsetPath, '{}', [System.Text.UTF8Encoding]::new($false))
@@ -2405,7 +2427,7 @@ Describe '勾选视图 (v1.5.5)' {
                 $script:ExecutionResultReadCount++
                 $action = $expected.PSObject.Copy()
                 $action.status = if ($script:ExecutionResultReadCount -eq 1) { 'success' } else { 'pending' }
-                return [pscustomobject]@{ pending_schema_version=2; actions=@($action); observations=@(); suspicious=@() }
+                return [pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() }
             }
             $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
             $script:ExecutionTimer = New-ExecutionFakeTimer
@@ -2428,7 +2450,7 @@ Describe '勾选视图 (v1.5.5)' {
         $tempRoot = Join-Path $TestDrive ('partial-error-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $action = (New-GuiReviewPendingFixture).actions[0]; $action.status='success'
-        $subset = [pscustomobject]@{ pending_schema_version=2; actions=@($action); observations=@(); suspicious=@() }
+        $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() }
         $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
         $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=7 }
@@ -2483,7 +2505,7 @@ Describe '勾选视图 (v1.5.5)' {
             $expected = (New-GuiReviewPendingFixture).actions[0]
             $actual = $expected.PSObject.Copy()
             & $mutate $actual
-            $subset = [pscustomobject]@{ pending_schema_version=2; actions=@($actual); observations=@(); suspicious=@() }
+            $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@() }
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
             [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
             $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
@@ -2510,16 +2532,16 @@ Describe '勾选视图 (v1.5.5)' {
         $oldRoot = $script:Root; $script:Root = $tempRoot
         try {
             $expected = (New-GuiReviewPendingFixture -ActionServiceName 'ReviewedService').actions[0]
-            $reviewedMain = [pscustomobject]@{ pending_schema_version=2; generated='reviewed'; actions=@($expected); observations=@(); suspicious=@() }
+            $reviewedMain = [pscustomobject]@{ pending_schema_version=3; generated='reviewed'; actions=@($expected); resolved=@(); observations=@(); suspicious=@() }
             $mainPath = Join-Path $tempRoot 'pending_actions.json'
             [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson $reviewedMain), [System.Text.UTF8Encoding]::new($false))
             Set-GuiReviewedGenerationFromFile $mainPath
 
             $resultAction = $expected.PSObject.Copy(); $resultAction.status='success'
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
-            [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($resultAction); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; actions=@($resultAction); resolved=@(); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
             $newAction = (New-GuiReviewPendingFixture -ActionServiceName 'NewScanService').actions[0]
-            $newMainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; generated='new'; actions=@($newAction); observations=@(); suspicious=@(); marker='keep-new-scan' })))
+            $newMainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; generated='new'; actions=@($newAction); resolved=@(); observations=@(); suspicious=@(); marker='keep-new-scan' })))
             [System.IO.File]::WriteAllBytes($mainPath, $newMainBytes)
             $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
             $script:ExecutionTimer = New-ExecutionFakeTimer
@@ -2565,22 +2587,24 @@ Describe '勾选视图 (v1.5.5)' {
         $tmpRoot = Join-Path $env:TEMP ("gui_merge_" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
         $main = [pscustomobject]@{
-            pending_schema_version = 2
+            pending_schema_version = 3
             generated = 'x'
             actions = @(
                 [pscustomobject]@{ id='t1'; hit_type='service'; service_name='S1'; autostart_name=''; task_path=''; process_name=''; status='pending' },
                 [pscustomobject]@{ id='t2'; hit_type='service'; service_name='S2'; autostart_name=''; task_path=''; process_name=''; status='pending' }
             )
+            resolved = @()
             suspicious = @()
             observations = @()
         }
         $main | ConvertTo-Json -Depth 5 | Out-File (Join-Path $tmpRoot 'pending_actions.json') -Encoding utf8
         $subset = [pscustomobject]@{
-            pending_schema_version = 2
+            pending_schema_version = 3
             generated = 'x'
             actions = @(
                 [pscustomobject]@{ id='t1'; hit_type='service'; service_name='S1'; autostart_name=''; task_path=''; process_name=''; status='success' }
             )
+            resolved = @()
             suspicious = @()
             observations = @()
         }
@@ -2603,22 +2627,24 @@ Describe '勾选视图 (v1.5.5)' {
         New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
         # 同 id lenovo-serviceas 两条: 服务 + 自启, target 不同
         $main = [pscustomobject]@{
-            pending_schema_version = 2
+            pending_schema_version = 3
             generated = 'x'
             actions = @(
                 [pscustomobject]@{ id='lenovo-serviceas'; hit_type='service'; service_name='LenovoServiceAS'; autostart_name=''; task_path=''; process_name=''; status='pending' },
                 [pscustomobject]@{ id='lenovo-serviceas'; hit_type='autostart'; service_name=''; autostart_name='LenovoAppStore'; task_path=''; process_name=''; status='pending' }
             )
+            resolved = @()
             suspicious = @()
             observations = @()
         }
         $main | ConvertTo-Json -Depth 5 | Out-File (Join-Path $tmpRoot 'pending_actions.json') -Encoding utf8
         $subset = [pscustomobject]@{
-            pending_schema_version = 2
+            pending_schema_version = 3
             generated = 'x'
             actions = @(
                 [pscustomobject]@{ id='lenovo-serviceas'; hit_type='service'; service_name='LenovoServiceAS'; autostart_name=''; task_path=''; process_name=''; status='failed' }
             )
+            resolved = @()
             suspicious = @()
             observations = @()
         }
@@ -2641,9 +2667,9 @@ Describe '勾选视图 (v1.5.5)' {
         [void][System.IO.Directory]::CreateDirectory($tmpRoot)
         $upper = (New-GuiReviewPendingFixture -ActionServiceName 'CaseService').actions[0]
         $lower = $upper.PSObject.Copy(); $lower.service_name='caseservice'; $lower.name_cn='lower action'
-        $main = [pscustomobject]@{ pending_schema_version=2; actions=@($upper,$lower); observations=@(); suspicious=@() }
+        $main = [pscustomobject]@{ pending_schema_version=3; actions=@($upper,$lower); resolved=@(); observations=@(); suspicious=@() }
         $subsetUpper = $upper.PSObject.Copy(); $subsetUpper.status='success'
-        $subset = [pscustomobject]@{ pending_schema_version=2; actions=@($subsetUpper); observations=@(); suspicious=@() }
+        $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($subsetUpper); resolved=@(); observations=@(); suspicious=@() }
         $mainPath = Join-Path $tmpRoot 'pending_actions.json'
         $subsetPath = Join-Path $tmpRoot 'subset.json'
         [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson $main), [System.Text.UTF8Encoding]::new($false))
@@ -2668,11 +2694,11 @@ Describe '勾选视图 (v1.5.5)' {
         $deep = [pscustomobject]@{ terminal = "merge-$Levels" }
         for ($i = 0; $i -lt $Levels; $i++) { $deep = [pscustomobject]@{ next = $deep } }
         $action = [pscustomobject]@{ id='deep'; hit_type='service'; action='disable_service'; service_name='Svc'; status='pending' }
-        $main = [pscustomobject]@{ pending_schema_version=2; generated='x'; actions=@($action); observations=@(); suspicious=@(); extension=$deep }
+        $main = [pscustomobject]@{ pending_schema_version=3; generated='x'; actions=@($action); resolved=@(); observations=@(); suspicious=@(); extension=$deep }
         $mainPath = Join-Path $tmpRoot 'pending_actions.json'
         [System.IO.File]::WriteAllText($mainPath, (ConvertTo-Json -InputObject $main -Depth 100), [System.Text.UTF8Encoding]::new($false))
         $subsetAction = $action.PSObject.Copy(); $subsetAction.status = 'success'
-        $subset = [pscustomobject]@{ pending_schema_version=2; generated='x'; actions=@($subsetAction); observations=@(); suspicious=@() }
+        $subset = [pscustomobject]@{ pending_schema_version=3; generated='x'; actions=@($subsetAction); resolved=@(); observations=@(); suspicious=@() }
         $subsetPath = Join-Path $tmpRoot 'subset.json'
         [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-Json -InputObject $subset -Depth 100), [System.Text.UTF8Encoding]::new($false))
         $oldRoot = $script:Root
@@ -2694,12 +2720,12 @@ Describe '勾选视图 (v1.5.5)' {
         $pid101 = [pscustomobject]$common; $pid101 | Add-Member process_id 101
         $pid202 = $pid101.PSObject.Copy(); $pid202.process_id = 202
         $pathEvidence = $pid101.PSObject.Copy(); $pathEvidence.matched_pattern='C:\Apps'; $pathEvidence.matched_type='path'; $pathEvidence.matched_field='process_path'
-        $main = [pscustomobject]@{ pending_schema_version=2; generated='x'; actions=@($pid101,$pid202,$pathEvidence); observations=@(); suspicious=@() }
+        $main = [pscustomobject]@{ pending_schema_version=3; generated='x'; actions=@($pid101,$pid202,$pathEvidence); resolved=@(); observations=@(); suspicious=@() }
         $main | ConvertTo-Json -Depth 6 | Out-File (Join-Path $tmpRoot 'pending_actions.json') -Encoding utf8
         $subsetAction = [pscustomobject]@{}
         $pid101.PSObject.Properties | ForEach-Object { $subsetAction | Add-Member -NotePropertyName $_.Name -NotePropertyValue $_.Value }
         $subsetAction.status = 'success'
-        $subset = [pscustomobject]@{ pending_schema_version=2; generated='x'; actions=@($subsetAction); observations=@(); suspicious=@() }
+        $subset = [pscustomobject]@{ pending_schema_version=3; generated='x'; actions=@($subsetAction); resolved=@(); observations=@(); suspicious=@() }
         $subsetFile = Join-Path $tmpRoot 'subset.json'
         $subset | ConvertTo-Json -Depth 6 | Out-File $subsetFile -Encoding utf8
 
@@ -2719,18 +2745,18 @@ Describe '勾选视图 (v1.5.5)' {
         $tmpRoot = Join-Path $TestDrive ('gui-merge-generation-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tmpRoot)
         $reviewedAction = (New-GuiReviewPendingFixture -ActionServiceName 'ReviewedService').actions[0]
-        $reviewed = [pscustomobject]@{ pending_schema_version=2; generated='reviewed'; actions=@($reviewedAction); observations=@(); suspicious=@() }
+        $reviewed = [pscustomobject]@{ pending_schema_version=3; generated='reviewed'; actions=@($reviewedAction); resolved=@(); observations=@(); suspicious=@() }
         $mainPath = Join-Path $tmpRoot 'pending_actions.json'
         [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson $reviewed), [System.Text.UTF8Encoding]::new($false))
         Set-GuiReviewedGenerationFromFile $mainPath
 
         $newAction = (New-GuiReviewPendingFixture -ActionServiceName 'NewScanService').actions[0]
-        $replacement = [pscustomobject]@{ pending_schema_version=2; generated='new-scan'; actions=@($newAction); observations=@(); suspicious=@(); marker='must-survive' }
+        $replacement = [pscustomobject]@{ pending_schema_version=3; generated='new-scan'; actions=@($newAction); resolved=@(); observations=@(); suspicious=@(); marker='must-survive' }
         $replacementBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson $replacement))
         [System.IO.File]::WriteAllBytes($mainPath, $replacementBytes)
         $subsetAction = $reviewedAction.PSObject.Copy(); $subsetAction.status='success'
         $subsetPath = Join-Path $tmpRoot 'subset.json'
-        [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($subsetAction); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; actions=@($subsetAction); resolved=@(); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
         $oldRoot = $script:Root; $script:Root = $tmpRoot
         try {
             { Merge-GuiPendingStatusFromFile $subsetPath } | Should -Throw '*generation*'
@@ -2743,12 +2769,12 @@ Describe '勾选视图 (v1.5.5)' {
         [void][System.IO.Directory]::CreateDirectory($tmpRoot)
         $action = (New-GuiReviewPendingFixture).actions[0]
         $mainPath = Join-Path $tmpRoot 'pending_actions.json'
-        $mainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($action); observations=@(); suspicious=@() })))
+        $mainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() })))
         [System.IO.File]::WriteAllBytes($mainPath, $mainBytes)
         Set-GuiReviewedGenerationFromFile $mainPath
         $subsetAction = $action.PSObject.Copy(); $subsetAction.status='success'
         $subsetPath = Join-Path $tmpRoot 'subset.json'
-        [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; actions=@($subsetAction); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; actions=@($subsetAction); resolved=@(); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
         $lock = [System.IO.File]::Open($mainPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         $oldRoot = $script:Root; $script:Root = $tmpRoot
         try {
@@ -2764,7 +2790,7 @@ Describe '勾选视图 (v1.5.5)' {
         [void][System.IO.Directory]::CreateDirectory($tmpRoot)
         $action = (New-GuiReviewPendingFixture -ActionServiceName 'RollbackService').actions[0]
         $mainPath = Join-Path $tmpRoot 'pending_actions.json'
-        $mainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=2; generated='original'; actions=@($action); observations=@(); suspicious=@(); marker='restore-me' })))
+        $mainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; generated='original'; actions=@($action); resolved=@(); observations=@(); suspicious=@(); marker='restore-me' })))
         [System.IO.File]::WriteAllBytes($mainPath, $mainBytes)
         Set-GuiReviewedGenerationFromFile $mainPath
         $resultAction = $action.PSObject.Copy(); $resultAction.status = 'success'

@@ -616,9 +616,9 @@ Describe 'pending JSON 重复属性预检' {
     }
 
     It '接受合法嵌套 JSON 并由严格入口转换' {
-        $json = '{"pending_schema_version":2,"actions":[{"id":"a","status":"pending"}],"observations":[]}'
+        $json = '{"pending_schema_version":3,"actions":[{"id":"a","status":"pending"}],"observations":[]}'
         Test-JsonPropertyNamesUnique $json | Should -BeTrue
-        (ConvertFrom-StrictPendingJson $json).pending_schema_version | Should -Be 2
+        (ConvertFrom-StrictPendingJson $json).pending_schema_version | Should -Be 3
     }
 
     It '严格入口在 ConvertFrom-Json 前拒绝重复键' {
@@ -635,11 +635,11 @@ Describe 'pending JSON 重复属性预检' {
 
     It 'pending 读取入口不再使用 Get-Item 与 Get-Content 分离检查和读取' {
         $path = Join-Path $TestDrive 'single-stream.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         Mock Get-Item { throw 'Get-Item must not run' }
         Mock Get-Content { throw 'Get-Content must not run' }
 
-        (Read-StrictPendingJsonFile $path).pending_schema_version | Should -Be 2
+        (Read-StrictPendingJsonFile $path).pending_schema_version | Should -Be 3
         Assert-MockCalled Get-Item -Times 0 -Exactly
         Assert-MockCalled Get-Content -Times 0 -Exactly
     }
@@ -675,7 +675,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '精确 5 MiB 的合法 JSON 位于允许边界' {
         $path = Join-Path $TestDrive 'max-pending.json'
-        $prefix = '{"pending_schema_version":2,"actions":[]}'
+        $prefix = '{"pending_schema_version":3,"actions":[]}'
         $prefixBytes = [System.Text.Encoding]::UTF8.GetBytes($prefix)
         $json = $prefix + [string]::new([char]' ', (5MB - $prefixBytes.Length))
         [System.IO.File]::WriteAllBytes($path, [System.Text.Encoding]::UTF8.GetBytes($json))
@@ -691,12 +691,12 @@ Describe 'pending JSON 重复属性预检' {
     ) {
         param($label, $bom)
         $path = Join-Path $TestDrive ("utf8-$label.json")
-        $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes('{"pending_schema_version":2,"name":"测试","actions":[]}')
+        $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes('{"pending_schema_version":3,"name":"测试","actions":[]}')
         $bytes = if ($bom) { [byte[]]([System.Text.Encoding]::UTF8.GetPreamble() + $jsonBytes) } else { $jsonBytes }
         [System.IO.File]::WriteAllBytes($path, $bytes)
 
         $pending = Read-StrictPendingJsonFile $path
-        $pending.pending_schema_version | Should -Be 2
+        $pending.pending_schema_version | Should -Be 3
         $pending.name | Should -Be '测试'
     }
 
@@ -723,7 +723,7 @@ Describe 'pending JSON 重复属性预检' {
         $path = Join-Path $TestDrive 'locked-read-write.json'
         $replacement = Join-Path $TestDrive 'locked-replacement.json'
         $backup = Join-Path $TestDrive 'locked-backup.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         [System.IO.File]::WriteAllText($replacement, '{"replacement":true}', [System.Text.UTF8Encoding]::new($false))
         $stream = $null
         try {
@@ -734,7 +734,7 @@ Describe 'pending JSON 重复属性预检' {
             { [System.IO.File]::Delete($path) } | Should -Throw
             { [System.IO.File]::Replace($replacement, $path, $backup) } | Should -Throw
 
-            $payload = [pscustomobject]@{ pending_schema_version=2; generated='locked'; actions=@(); observations=@(); suspicious=@() }
+            $payload = [pscustomobject]@{ pending_schema_version=3; generated='locked'; actions=@(); resolved=@(); observations=@(); suspicious=@() }
             Write-PendingToLockedStream -Stream $stream -Pending $payload
         } finally {
             if ($null -ne $stream) { $stream.Dispose() }
@@ -748,7 +748,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '普通文件的已打开句柄最终路径与输入身份一致' {
         $path = Join-Path $TestDrive 'identity-normal.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         try {
             Test-OpenedPendingFileIdentity -Stream $stream -Path $path | Should -BeTrue
@@ -759,7 +759,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '普通临时文件的已打开句柄 link count 严格为 1' {
         $path = Join-Path $TestDrive 'single-link.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         try {
             Test-OpenedPendingFileHasSingleLink -Stream $stream | Should -BeTrue
@@ -771,7 +771,7 @@ Describe 'pending JSON 重复属性预检' {
     It '存在第二个硬链接时 Open-LockedPendingFile 在读取前关闭并拒绝' {
         $target = Join-Path $TestDrive 'hardlink-target.json'
         $link = Join-Path $TestDrive 'hardlink-alias.json'
-        [System.IO.File]::WriteAllText($target, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($target, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $null = New-Item -ItemType HardLink -Path $link -Target $target
         Mock Read-LimitedPendingJsonStream { throw 'must not parse hardlink' }
         $script:UnexpectedHardlinkStream = $null
@@ -789,7 +789,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It 'GetFileInformationByHandle API 失败或 link count 非 1 时 fail closed' {
         $path = Join-Path $TestDrive 'link-api-failure.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         try {
             Mock Invoke-GetFileInformationByHandleNative { return [pscustomobject]@{ success=$false; nNumberOfLinks=[uint32]0 } }
@@ -807,7 +807,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '已打开句柄返回不同最终目标时失败关闭且路径换回不改变结论' {
         $path = Join-Path $TestDrive 'identity-input.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         Mock Invoke-GetFinalPathNameByHandleNative {
             $null = $Builder.Append('\\?\C:\Different\target.json')
@@ -824,7 +824,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '最终路径 Windows API 失败时句柄身份校验 fail closed' {
         $path = Join-Path $TestDrive 'identity-api-failure.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         Mock Invoke-GetFinalPathNameByHandleNative { return [uint32]0 }
         try {
@@ -836,7 +836,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '句柄身份不一致时 Invoke-Clean 不进入 JSON 解析或写回并释放句柄' {
         $path = Join-Path $TestDrive 'identity-block-clean.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $oldPendingFile = $script:PendingFile
         $script:PendingFile = $path
         Mock Is-Admin { $true }
@@ -862,7 +862,7 @@ Describe 'pending JSON 重复属性预检' {
         $junctionPath = Join-Path $TestDrive 'identity-junction'
         $null = New-Item -ItemType Directory -Path $targetDirectory
         $null = New-Item -ItemType Junction -Path $junctionPath -Target $targetDirectory
-        [System.IO.File]::WriteAllText((Join-Path $targetDirectory 'pending.json'), '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $targetDirectory 'pending.json'), '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $pendingPath = Join-Path $junctionPath 'pending.json'
         Mock Assert-PendingPathIsNotReparsePoint {}
         $script:UnexpectedIdentityStream = $null
@@ -879,7 +879,7 @@ Describe 'pending JSON 重复属性预检' {
         $null = New-Item -ItemType Directory -Path $targetDirectory
         $null = New-Item -ItemType Junction -Path $junctionPath -Target $targetDirectory
         $pendingPath = Join-Path $junctionPath 'pending.json'
-        [System.IO.File]::WriteAllText((Join-Path $targetDirectory 'pending.json'), '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $targetDirectory 'pending.json'), '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
 
         $script:UnexpectedReparseStream = $null
         try {
@@ -891,7 +891,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It 'Invoke-Clean 严格 JSON 异常后释放 pending 独占写句柄' {
         $path = Join-Path $TestDrive 'invalid-locked-pending.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[],"Actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[],"Actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $oldPendingFile = $script:PendingFile
         $script:PendingFile = $path
         Mock Is-Admin { $true }
@@ -905,7 +905,7 @@ Describe 'pending JSON 重复属性预检' {
     }
 }
 
-Describe 'clean pending v2 状态持久化' {
+Describe 'clean pending v3 状态持久化' {
     It 'CLI 同句柄写回无损保留 <Levels> 层 envelope 扩展字段' -TestCases @(
         @{ Levels = 12 }
         @{ Levels = 55 }
@@ -916,15 +916,16 @@ Describe 'clean pending v2 状态持久化' {
             $deep = [pscustomobject]@{ next = $deep }
         }
         $payload = [pscustomobject]@{
-            pending_schema_version = 2
+            pending_schema_version = 3
             generated = 'deep'
             actions = @()
+            resolved = @()
             observations = @()
             suspicious = @()
             extension = $deep
         }
         $path = Join-Path $TestDrive "deep-cli-$Levels.json"
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[],"suspicious":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = $null
         try {
             $stream = Open-LockedPendingFile $path
@@ -941,11 +942,12 @@ Describe 'clean pending v2 状态持久化' {
     }
 
     It '初始授权全部拒绝也写回 skipped 并保留完整安全 envelope' {
-        $path = Join-Path $TestDrive 'rejected-v2.json'
+        $path = Join-Path $TestDrive 'rejected-v3.json'
         $pending = [pscustomobject]@{
-            pending_schema_version = 2
+            pending_schema_version = 3
             generated = 'scan-time'
             actions = @([pscustomobject]@{ id='reject'; status='pending'; action='disable_service'; hit_type='service' })
+            resolved = @([pscustomobject]@{ id='resolved'; status='success'; retained='yes' })
             observations = @([pscustomobject]@{ id='observe'; obs_reason='keep' })
             suspicious = @([pscustomobject]@{ PID=42; Name='suspect' })
             safety_nonce = 'preserve-me'
@@ -965,21 +967,23 @@ Describe 'clean pending v2 状态持久化' {
             $script:PendingFile = $oldPendingFile
         }
 
-        $after.pending_schema_version | Should -Be 2
+        $after.pending_schema_version | Should -Be 3
         $after.generated | Should -Be 'scan-time'
         $after.actions[0].status | Should -Be 'skipped'
+        $after.resolved[0].retained | Should -Be 'yes'
         $after.observations[0].obs_reason | Should -Be 'keep'
         $after.suspicious[0].PID | Should -Be 42
         $after.safety_nonce | Should -Be 'preserve-me'
     }
 
-    It '集中 payload builder 保留 envelope 扩展字段但强制 v2 和当前数组' {
-        $source = [pscustomobject]@{ pending_schema_version=2; generated='g'; actions=@('old'); observations=@('obs'); suspicious=@('sus'); safety_nonce='n' }
-        $built = Build-PendingV2Payload -Source $source -Actions @('new')
+    It '集中 payload builder 保留 envelope 扩展字段但强制 v3 和当前数组' {
+        $source = [pscustomobject]@{ pending_schema_version=3; generated='g'; actions=@('old'); resolved=@('done'); observations=@('obs'); suspicious=@('sus'); safety_nonce='n' }
+        $built = Build-PendingPayload -Source $source -Actions @('new')
 
-        $built.pending_schema_version | Should -Be 2
+        $built.pending_schema_version | Should -Be 3
         $built.generated | Should -Be 'g'
         @($built.actions) | Should -Be @('new')
+        @($built.resolved) | Should -Be @('done')
         @($built.observations) | Should -Be @('obs')
         @($built.suspicious) | Should -Be @('sus')
         $built.safety_nonce | Should -Be 'n'

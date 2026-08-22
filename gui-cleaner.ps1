@@ -493,15 +493,33 @@ function Get-GuiPendingSchemaVersion($Pending) {
     }
     if ($null -eq $schemaProperty -or
         ($schemaProperty.Value -isnot [int32] -and $schemaProperty.Value -isnot [int64]) -or
-        -not ([int64]2).Equals([int64]$schemaProperty.Value)) {
+        -not ([int64]3).Equals([int64]$schemaProperty.Value)) {
         throw 'pending 清单版本旧或不兼容。请重新运行 scan 生成新清单。'
     }
     return $schemaProperty.Value
 }
 
+function Assert-GuiPendingEnvelopeShape {
+    param([Parameter(Mandatory=$true)]$Pending)
+    $version = Get-GuiPendingSchemaVersion $Pending
+    foreach ($name in @('actions','resolved','observations','suspicious')) {
+        $property = $null
+        foreach ($candidate in $Pending.PSObject.Properties) {
+            if ([string]::Equals($candidate.Name, $name, [System.StringComparison]::Ordinal)) {
+                $property = $candidate
+                break
+            }
+        }
+        if ($null -eq $property -or $property.Value -isnot [System.Array]) {
+            throw "pending review shape invalid: $name 必须是数组。请重新运行 scan 生成新清单。"
+        }
+    }
+    return $version
+}
+
 function New-PendingSubsetPayload {
     param($Checked, $SourcePending)
-    $pendingVersion = Get-GuiPendingSchemaVersion $SourcePending
+    $pendingVersion = Assert-GuiPendingEnvelopeShape $SourcePending
     $actions = @()
     foreach ($checkedItem in @($Checked)) {
         if ($checkedItem -and $checkedItem._raw) {
@@ -510,17 +528,20 @@ function New-PendingSubsetPayload {
     }
     $observations = @()
     if ($SourcePending -and $SourcePending.observations) { $observations = @($SourcePending.observations) }
+    $resolved = @()
+    if ($SourcePending -and $SourcePending.resolved) { $resolved = @($SourcePending.resolved) }
     $suspicious = @()
     if ($SourcePending -and $SourcePending.suspicious) { $suspicious = @($SourcePending.suspicious) }
     $properties = [ordered]@{
         pending_schema_version = $pendingVersion
         generated = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         actions = @($actions)
+        resolved = @($resolved)
         observations = @($observations)
         suspicious = @($suspicious)
     }
     foreach ($property in $SourcePending.PSObject.Properties) {
-        if ($property.Name -notin @('pending_schema_version','generated','actions','observations','suspicious')) {
+        if ($property.Name -notin @('pending_schema_version','generated','actions','resolved','observations','suspicious')) {
             $properties[$property.Name] = $property.Value
         }
     }
@@ -529,7 +550,7 @@ function New-PendingSubsetPayload {
 
 function New-GuiSuspiciousSubsetPayload {
     param($Selected, $SourcePending)
-    $pendingVersion = Get-GuiPendingSchemaVersion $SourcePending
+    $pendingVersion = Assert-GuiPendingEnvelopeShape $SourcePending
     $rows = @()
     foreach ($selectedRow in @($Selected)) {
         $raw = if ($selectedRow.PSObject.Properties['_raw'] -and $null -ne $selectedRow._raw) { $selectedRow._raw } else { $selectedRow }
@@ -539,6 +560,7 @@ function New-GuiSuspiciousSubsetPayload {
         pending_schema_version = $pendingVersion
         generated = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         actions = @()
+        resolved = @()
         observations = @()
         suspicious = @($rows)
     })
@@ -699,7 +721,7 @@ function Assert-GuiPendingPresentationRow {
 
 function Assert-GuiPendingPresentationShape {
     param([Parameter(Mandatory=$true)]$Pending)
-    if ($null -eq $Pending) { throw 'pending review shape invalid: pending object is null.' }
+    $null = Assert-GuiPendingEnvelopeShape $Pending
     foreach ($branch in @('actions','observations')) {
         $property = $Pending.PSObject.Properties[$branch]
         if ($null -eq $property -or $property.Value -isnot [System.Array]) {
@@ -835,7 +857,7 @@ function Merge-PendingStatus($ExecutionResult) {
             throw 'pending review generation changed; refusing to overwrite a newer scan.'
         }
         $main = ConvertFrom-GuiPendingBytes $mainBytes
-        $null = Get-GuiPendingSchemaVersion $main
+        $null = Assert-GuiPendingEnvelopeShape $main
         if ($null -eq $main.actions -or $null -eq $ExecutionResult.Items) { throw 'pending merge actions are missing.' }
 
         $mainByKey = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
@@ -1264,7 +1286,7 @@ $window.FindName('BtnOpenReview').Add_Click({
         $pendingPath = Join-Path $script:Root 'pending_actions.json'
         $reviewSnapshot = Read-GuiPendingByteSnapshot -Path $pendingPath
         $pending = $reviewSnapshot.Pending
-        $null = Get-GuiPendingSchemaVersion $pending
+        $null = Assert-GuiPendingEnvelopeShape $pending
         Assert-GuiPendingPresentationShape -Pending $pending
         $validatedActionKeys = @(Get-GuiValidatedActionIdentityKeys -Pending $pending)
         $validatedSuspiciousKeys = @(Get-GuiValidatedSuspiciousIdentityKeys -Pending $pending)
@@ -1383,11 +1405,8 @@ function Clear-GuiSuspiciousStopResources {
 function Read-GuiStrictSuspiciousStopResult {
     param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)]$ExpectedRows)
     $pending = Read-GuiPendingFile -Path $Path
-    $null = Get-GuiPendingSchemaVersion $pending
-    foreach ($name in @('actions','observations','suspicious')) {
-        if ($pending.PSObject.Properties.Name -notcontains $name -or $pending.$name -isnot [System.Array]) { throw "suspicious stop result $name is not an array." }
-    }
-    if (@($pending.actions).Count -ne 0 -or @($pending.observations).Count -ne 0) { throw 'suspicious stop result crossed the OEM action boundary.' }
+    $null = Assert-GuiPendingEnvelopeShape $pending
+    if (@($pending.actions).Count -ne 0 -or @($pending.resolved).Count -ne 0 -or @($pending.observations).Count -ne 0) { throw 'suspicious stop result crossed the OEM action boundary.' }
     $items = @($pending.suspicious)
     $expected = @($ExpectedRows)
     if ($items.Count -ne $expected.Count) { throw 'suspicious stop result identity count changed.' }
@@ -1592,7 +1611,7 @@ function Resolve-GuiReviewedActions {
     if ($null -eq $script:ReviewedPendingSnapshot -or $null -eq $script:ReviewedActionIdentityKeys) {
         throw '没有有效的 reviewed pending snapshot。请重新运行 scan 并审核。'
     }
-    $null = Get-GuiPendingSchemaVersion $script:ReviewedPendingSnapshot
+    $null = Assert-GuiPendingEnvelopeShape $script:ReviewedPendingSnapshot
     Assert-GuiPendingPresentationShape -Pending $script:ReviewedPendingSnapshot
     $validatedKeys = @(Get-GuiValidatedActionIdentityKeys -Pending $script:ReviewedPendingSnapshot)
     if ($validatedKeys.Count -ne $script:ReviewedActionIdentityKeys.Count) {
@@ -1663,7 +1682,7 @@ function Get-GuiExecutionProcessStatus {
 function Read-GuiStrictExecutionResult {
     param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)]$ExpectedActions)
     $pending = Read-GuiPendingFile -Path $Path
-    $null = Get-GuiPendingSchemaVersion $pending
+    $null = Assert-GuiPendingEnvelopeShape $pending
     Assert-GuiPendingPresentationShape -Pending $pending
     $items = @($pending.actions)
     $expected = @($ExpectedActions)
@@ -1757,7 +1776,7 @@ function Complete-ExecutionPoll {
         }
         try {
             $pending = Read-GuiPendingFile -Path $script:ExecutionTempPath
-            $null = Get-GuiPendingSchemaVersion $pending
+            $null = Assert-GuiPendingEnvelopeShape $pending
             Assert-GuiPendingPresentationShape -Pending $pending
             $items = @($pending.actions)
             $expected = @($script:ExecutionActions)
