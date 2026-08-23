@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the low-resolution shortcut icon with an original Swag Cat-inspired symmetric orange-cat icon and apply it consistently to the desktop shortcut, WPF window, taskbar and GUI launch entry.
+**Goal:** Replace the low-resolution shortcut icon with an original `鼠鼠的幻想` derivative based on the project's established vertically symmetrical cat-face meme language, and apply it consistently to the desktop shortcut, WPF window, taskbar and GUI launch entry.
 
-**Architecture:** Generate one original transparent 1024×1024 master, review it visually, then derive a multi-frame ICO deterministically. A repository-owned PowerShell installer creates the shortcut with fixed target, arguments, working directory, description and icon; the GUI loads the same ICO after XAML creation.
+**Architecture:** Generate one original square master with the same warm-cream background used by the GUI, review it visually, then derive a multi-frame ICO deterministically. A repository-owned PowerShell installer creates the shortcut with fixed target, arguments, working directory, description and icon; the GUI loads the same ICO after XAML creation.
 
 **Tech Stack:** OpenAI image generation, PNG, Python Pillow or ImageMagick for ICO packaging, Windows PowerShell COM shortcut API, WPF BitmapFrame, Pester/GUI tests.
 
@@ -31,12 +31,12 @@
 Use the image-generation skill with this prompt:
 
 ```text
-Create an original square app icon character, not a copy of any existing meme photo. A photorealistic warm orange tabby cat in an extreme close-up, its face deliberately mirrored along the vertical center so it has the charming odd symmetry and deadpan wide-eyed expression associated with absurd internet cat memes. Rounded cheeks, tiny centered pink nose, subtle low-resolution meme texture but clean enough for a Windows icon. Transparent background. Add a small high-contrast circular cleaning badge at the lower-right containing a simple mint-green broom; the badge occupies no more than 24 percent of the canvas and does not cover the eyes, nose, or mouth. No text, no logos, no weapons, no game branding, no watermark. Strong silhouette readable at 16 pixels, centered with safe padding.
+Create an original square app icon derived from the project's established `鼠鼠的幻想` visual language, not a literal mouse and not a copy of any single meme photo. Use a beige-gray tabby cat in an extreme close-up, with its face deliberately mirrored along the vertical center, huge dark eyes, a centered pink nose, rounded cheeks, and the blank daydream expression used by the four-stage GUI. Keep a subtle low-resolution meme texture but make the silhouette clean enough for a Windows icon. Use a clean warm-cream background matching the GUI. Add a small mint-green cleaning broom at the lower-right, occupying no more than 20 percent of the canvas and not covering the eyes, nose, or mouth. No text, logos, weapons, game branding, or watermark. Keep both ears and the chin visible with safe padding.
 ```
 
 - [ ] **Step 2: Inspect the generated master visually**
 
-Reject it if the face is not symmetric, the badge covers facial features, the background is opaque, or small-size silhouette is unclear. Present the actual image to the user and obtain approval before deriving the ICO.
+Reject it if the face is not symmetric, the broom covers facial features, the background contains a checkerboard pattern, or the small-size silhouette is unclear. Present the actual image to the user before deriving the ICO.
 
 - [ ] **Step 3: Save only the approved image and commit**
 
@@ -53,7 +53,7 @@ git commit -m "art: add original mouse-cat cleaner icon master"
 
 - [ ] **Step 1: Write a failing ICO contract test**
 
-Parse the ICO directory header as binary and assert exact embedded dimensions `16,20,24,32,40,48,64,128,256`, at least one 256×256 PNG-compressed entry, file length greater than 10 KiB, and transparent corners in the source PNG.
+Parse the ICO directory header as binary and assert exact embedded dimensions `16,20,24,32,40,48,64,128,256`, at least one 256×256 PNG-compressed entry, file length greater than 10 KiB, and an RGB/RGBA square source PNG at least 1024 pixels wide.
 
 - [ ] **Step 2: Run RED test**
 
