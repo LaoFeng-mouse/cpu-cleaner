@@ -22,7 +22,7 @@ $backupPath = $null
 # 回读快捷方式的关键字段，确保幂等判断和安装后验证使用同一套标准。
 function Test-CleanerShortcut {
     param([Parameter(Mandatory=$true)]$Shortcut)
-    return [string]::Equals([string]$Shortcut.TargetPath, $powershellPath, [StringComparison]::OrdinalIgnoreCase) -and
+    return ([string]$Shortcut.TargetPath -match '(?i)\\WindowsPowerShell\\v1\.0\\powershell\.exe$') -and
         [string]::Equals([string]$Shortcut.Arguments, $expectedArguments, [StringComparison]::Ordinal) -and
         [string]::Equals([string]$Shortcut.WorkingDirectory, $root, [StringComparison]::OrdinalIgnoreCase) -and
         [string]::Equals([string]$Shortcut.IconLocation, ($iconPath + ',0'), [StringComparison]::OrdinalIgnoreCase) -and
