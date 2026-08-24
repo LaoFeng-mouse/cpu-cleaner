@@ -1532,12 +1532,20 @@ function Test-SelectedPendingActionAuthorized($Pending, $Profiles, $ImpactConfir
         ($null -eq $ImpactConfirmation -or $ImpactConfirmation.HasManualImpact -isnot [bool] -or
             $ImpactConfirmation.HasManualImpact -ne $true -or $ImpactConfirmation.IsApproved -isnot [bool] -or
             $ImpactConfirmation.IsApproved -ne $true)) {
-        if ($null -ne $Pending) { $Pending.status = 'skipped' }
+        if ($null -ne $Pending) {
+            Set-PendingTransactionResult -Pending $Pending -Result ([pscustomobject]@{
+                status='skipped'; result_reason='手动影响确认摘要无效或与最终选择不一致'; failure_stage=''
+            })
+        }
         Write-Host '  跳过: 手动影响确认摘要无效或与最终选择不一致。' -ForegroundColor Red
         return $false
     }
     if (Test-PendingActionEligible $Pending $Profiles) { return $true }
-    if ($null -ne $Pending) { $Pending.status = 'skipped' }
+    if ($null -ne $Pending) {
+        Set-PendingTransactionResult -Pending $Pending -Result ([pscustomobject]@{
+            status='skipped'; result_reason='执行前最终授权失败，当前系统状态或特征证据已变化，需要重新扫描'; failure_stage=''
+        })
+    }
     Write-Host '  跳过: 执行前最终授权失败，当前系统状态或特征证据已变化。' -ForegroundColor Red
     return $false
 }
@@ -2380,11 +2388,15 @@ function Invoke-ServiceProcessStopAction {
         return New-ServiceProcessStopResult 'failed' 'could not verify service restart state' 'verification'
     }
     if ($services.Count -gt 1) { return New-ServiceProcessStopResult 'failed' 'service restart identity is not unique' 'verification' }
-    if ($services.Count -eq 1 -and $services[0].State -is [string] -and
-        [string]::Equals($services[0].State, 'Running', [System.StringComparison]::OrdinalIgnoreCase) -and
-        (Test-PositiveScalarProcessId $services[0].ProcessId)) {
+    if ($services.Count -eq 1 -and (Test-PositiveScalarProcessId $services[0].ProcessId)) {
         $replacementPid = [int]$services[0].ProcessId
-        return New-ServiceProcessStopResult 'failed' "current instance ended but service restarted with replacement PID $replacementPid" 'verification'
+        $serviceState = [string]$services[0].State
+        $reason = if ([string]::Equals($serviceState, 'Running', [System.StringComparison]::OrdinalIgnoreCase)) {
+            "current instance ended but service restarted with replacement PID $replacementPid"
+        } else {
+            "current instance ended but service state '$serviceState' reports replacement PID $replacementPid"
+        }
+        return New-ServiceProcessStopResult 'failed' $reason 'verification'
     }
     return New-ServiceProcessStopResult 'success' "ended current service process PID $targetPid; no replacement PID is bound"
 }
@@ -2532,11 +2544,34 @@ function Test-PersistentCleanupAction($Action) {
     return $Action -is [string] -and @('disable_service','remove_autostart','disable_task') -ccontains $Action
 }
 
+function Get-PendingHelperFailureStage($ResultReason) {
+    if ($ResultReason -isnot [string] -or [string]::IsNullOrWhiteSpace($ResultReason)) { return $null }
+    if ($ResultReason -match 'manifest 状态更新失败') { return 'result_persistence' }
+    if ($ResultReason -match '备份|backup|manifest write-ahead|ACL') { return 'backup' }
+    if ($ResultReason -match '后置验证|仍存在|仍在运行|状态=|目标不存在') { return 'verification' }
+    return 'mutation'
+}
+
 function Set-PendingTransactionResult {
     param($Pending, $Result)
-    $Pending.status = [string]$Result.status
-    $Pending | Add-Member NoteProperty result_reason ([string]$Result.result_reason) -Force
-    $Pending | Add-Member NoteProperty failure_stage ([string]$Result.failure_stage) -Force
+    if ($null -eq $Pending -or $null -eq $Result) { throw 'pending transaction result is missing' }
+    $status = [string]$Result.status
+    if ($status -cnotin @('success','failed','skipped','manual_required')) { throw 'pending transaction status is invalid' }
+    $reason = if ($Result.PSObject.Properties.Name -contains 'result_reason') { [string]$Result.result_reason } else { [string]$Result.reason }
+    if ([string]::IsNullOrWhiteSpace($reason)) { throw 'pending transaction result_reason is blank' }
+    $failureStage = ''
+    if ($status -ceq 'failed') {
+        $providedStage = if ($Result.PSObject.Properties.Name -contains 'failure_stage') { [string]$Result.failure_stage } else { '' }
+        $failureStage = if (@('backup','mutation','verification','result_persistence') -ccontains $providedStage) {
+            $providedStage
+        } else {
+            Get-PendingHelperFailureStage $reason
+        }
+        if ($failureStage -cnotin @('backup','mutation','verification','result_persistence')) { throw 'failed transaction failure_stage is invalid' }
+    }
+    $Pending.status = $status
+    $Pending | Add-Member NoteProperty result_reason $reason -Force
+    $Pending | Add-Member NoteProperty failure_stage ([string]$failureStage) -Force
 }
 
 function Invoke-Clean {
@@ -2551,6 +2586,7 @@ function Invoke-Clean {
     $pendingStream = $null
     $pending = $null
     $pendingValidated = $false
+    $pendingSha256Verified = $false
     $cleanExitCode = 0
     try {
     $pendingStream = Open-LockedPendingFile $script:PendingFile
@@ -2562,6 +2598,7 @@ function Invoke-Clean {
         if (-not [string]::Equals($actualPendingSha256, $script:PendingSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw '自定义 pending 文件 SHA-256 不匹配，拒绝执行'
         }
+        $pendingSha256Verified = $true
     }
     $pendingRaw = Read-LimitedPendingJsonStream $pendingStream
     $pending = ConvertFrom-StrictPendingJson $pendingRaw
@@ -2586,8 +2623,21 @@ function Invoke-Clean {
     $rejected = @()
     foreach ($a in $actions) {
         # Manual rows must be displayed before the user can supply a digest for the final selected subset.
-        if (Test-PendingActionEligible $a $profiles) { $authorized += $a }
-        else { $rejected += $a; $a.status = 'skipped' }
+        if ($a.action -ceq 'stop_service_process' -and -not $pendingSha256Verified) {
+            $rejected += $a
+            Set-PendingTransactionResult -Pending $a -Result ([pscustomobject]@{
+                status='skipped'
+                result_reason='stop_service_process requires a SHA-256-bound pending file verified in this clean invocation'
+                failure_stage=''
+            })
+        }
+        elseif (Test-PendingActionEligible $a $profiles) { $authorized += $a }
+        else {
+            $rejected += $a
+            Set-PendingTransactionResult -Pending $a -Result ([pscustomobject]@{
+                status='skipped'; result_reason='初始管理员授权失败，当前特征库或目标身份不匹配，需要重新扫描'; failure_stage=''
+            })
+        }
     }
     if ($rejected.Count -gt 0) {
         Write-Host ('拒绝 {0} 条未授权动作 (与当前特征库不一致, 清单可能被修改, 已标 skipped 不执行):' -f $rejected.Count) -ForegroundColor Red
@@ -2657,7 +2707,9 @@ function Invoke-Clean {
             # selection-bound digest and its current policy instead of treating safe=false as permission.
             if ($p.execution_class -ceq 'automatic_safe' -and $p.safe -ne $true) {
                 Write-Host '  拒绝: safe=false 条目禁止自动执行, 只做人工调查。' -ForegroundColor Red
-                $p.status = 'skipped'
+                Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
+                    status='skipped'; result_reason='automatic_safe 动作要求 safe=true，授权被拒绝'; failure_stage=''
+                })
                 continue
             }
 
@@ -2680,7 +2732,9 @@ function Invoke-Clean {
             if ((Test-PersistentCleanupAction $p.action) -and -not $backupDirReady) {
                 try { $backupDir = Initialize-ProtectedBackupDirectory $backupDir } catch {
                     Write-Host ('  安全备份目录创建/ACL 验证失败，拒绝执行任何 mutation: ' + $_.Exception.Message) -ForegroundColor Red
-                    $p.status = 'failed'
+                    Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
+                        status='failed'; result_reason=('安全备份目录创建或 ACL 验证失败: ' + $_.Exception.Message); failure_stage='backup'
+                    })
                     continue
                 }
                 $backupDirReady = $true
@@ -2689,7 +2743,7 @@ function Invoke-Clean {
             switch ($p.action) {
                 'disable_service' {
                     $serviceResult = Invoke-ServiceDisableAction -Pending $p -BackupDir $backupDir -Tag $tag
-                    $p.status = $serviceResult.status
+                    Set-PendingTransactionResult -Pending $p -Result $serviceResult
                     if ($serviceResult.status -eq 'success') { Write-Host "  验证通过: $($serviceResult.reason)" -ForegroundColor Green }
                     elseif ($serviceResult.status -eq 'skipped') { Write-Host "  跳过: $($serviceResult.reason)" -ForegroundColor DarkYellow }
                     else { Write-Host "  失败: $($serviceResult.reason)" -ForegroundColor Red }
@@ -2698,7 +2752,7 @@ function Invoke-Clean {
                     $rp = $p.autostart_source
                     $nm = $p.autostart_name
                     $removal = Invoke-LiteralAutostartRemoval -Source $rp -Name $nm -ExpectedValue $p.autostart_value -BackupDir $backupDir -Tag $tag
-                    $p.status = $removal.status
+                    Set-PendingTransactionResult -Pending $p -Result $removal
                     if ($removal.status -eq 'success') {
                         Write-Host "  验证通过: 自启项已删除: $nm (备份: $($removal.backup))" -ForegroundColor Green
                     } elseif ($removal.status -eq 'skipped') {
@@ -2709,18 +2763,22 @@ function Invoke-Clean {
                 }
                 'disable_task' {
                     $taskResult = Invoke-TaskDisableAction -Pending $p -BackupDir $backupDir -Tag $tag
-                    $p.status = $taskResult.status
+                    Set-PendingTransactionResult -Pending $p -Result $taskResult
                     if ($taskResult.status -eq 'success') { Write-Host "  验证通过: 已禁用计划任务: $($p.task_path) (备份: $($taskResult.backup))" -ForegroundColor Green }
                     elseif ($taskResult.status -eq 'skipped') { Write-Host "  跳过: $($taskResult.reason)" -ForegroundColor DarkYellow }
                     else { Write-Host "  失败: $($taskResult.reason)" -ForegroundColor Red }
                 }
                 'uninstall' {
                     Write-Host '  uninstall 动作需要人工确认, 请到 设置 -> 应用 -> 已安装的应用 手动卸载。' -ForegroundColor Yellow
-                    $p.status = 'manual_required'
+                    Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
+                        status='manual_required'; result_reason='需要在系统设置中人工确认并卸载'; failure_stage=''
+                    })
                 }
                 default {
                     Write-Host "  未知动作: $($p.action), 跳过" -ForegroundColor DarkYellow
-                    $p.status = 'skipped'
+                    Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
+                        status='skipped'; result_reason=("未知或不支持的动作: $($p.action)"); failure_stage=''
+                    })
                 }
             }
         }

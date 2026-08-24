@@ -596,6 +596,47 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         }
     }
 
+    It 'valid manual digest without a verified pending SHA skips stop_service_process before mutation or backup' {
+        $pendingAction = New-ServiceStopCleanAction
+        $profiles = [pscustomobject]@{ profiles=@([pscustomobject]@{
+            id='lenovo-hrwscctrl'; safe=$false; evidence=[pscustomobject]@{tested=$true}
+            actions=[pscustomobject]@{service='none'}; manual_actions=[pscustomobject]@{service='stop_service_process'}
+            cleanup_policy=[pscustomobject]@{
+                execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
+            }
+            detect=[pscustomobject]@{services=@([pscustomobject]@{match='HRWSCCtrl';type='exact'});autostarts=@();tasks=@();processes=@()}
+        }) }
+        $path = Write-CleanExitPending 'unbound-one-time.json' @($pendingAction)
+        $oldPendingFile = $script:PendingFile
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $script:RequirePendingSha256 = $false
+        $script:PendingSha256 = ''
+        $script:ConfirmedImpactSha256 = Get-ManualImpactDigest @($pendingAction)
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { $profiles }
+        Mock Get-Service { [pscustomobject]@{Name='HRWSCCtrl';DisplayName='HRWSCCtrl'} } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+        Mock Invoke-ServiceProcessStopAction { throw 'unbound one-time action must not reach mutation helper' }
+        Mock Initialize-ProtectedBackupDirectory { throw 'unbound one-time action must not create backup' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        $saved.actions[0].result_reason | Should -Match 'SHA-256|hash|绑定'
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Invoke-ServiceProcessStopAction -Times 0 -Exactly
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+    }
+
     It '重复选择 index 对 <executionClass> 只形成一个最终 action 且只授权和执行一次' -TestCases @(
         @{ executionClass='automatic_safe'; safe=$true }
         @{ executionClass='manual_impact'; safe=$false }
@@ -704,15 +745,118 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         } finally { $script:PendingFile = $oldPendingFile }
 
         $exitCode | Should -Be 0
-        @($saved.actions | Where-Object status -ceq 'skipped').Count | Should -Be 1
-        @($saved.actions | Where-Object status -ceq 'manual_required').Count | Should -Be 1
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        [string]::IsNullOrWhiteSpace([string]$saved.actions[0].result_reason) | Should -BeFalse
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        $saved.actions[1].status | Should -BeExactly 'manual_required'
+        [string]::IsNullOrWhiteSpace([string]$saved.actions[1].result_reason) | Should -BeFalse
+        $saved.actions[1].failure_stage | Should -BeOfType [string]
+        $saved.actions[1].failure_stage | Should -BeNullOrEmpty
         Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+    }
+
+    It 'persists authorization rejection and final identity drift as skipped metadata' -TestCases @(
+        @{ label='initial'; finalDrift=$false }
+        @{ label='final-drift'; finalDrift=$true }
+    ) {
+        param($label, $finalDrift)
+        $action = New-CleanExitAction "Auth-$label"
+        $path = Write-CleanExitPending ("auth-$label.json") @($action)
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        $script:eligibilityCalls = 0
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible {
+            $script:eligibilityCalls++
+            if ($finalDrift) { return $script:eligibilityCalls -eq 1 }
+            return $false
+        }
+        Mock Initialize-ProtectedBackupDirectory { throw 'authorization rejection must precede backup' }
+        Mock Invoke-ServiceDisableAction { throw 'authorization rejection must precede mutation' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        [string]::IsNullOrWhiteSpace([string]$saved.actions[0].result_reason) | Should -BeFalse
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+    }
+
+    It 'persists backup initialization failure as failed backup metadata' {
+        $path = Write-CleanExitPending 'backup-init-failed.json' @((New-CleanExitAction 'BackupSvc'))
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { throw 'ACL denied' }
+        Mock Invoke-ServiceDisableAction { throw 'backup failure must precede mutation' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 2
+        $saved.actions[0].status | Should -BeExactly 'failed'
+        $saved.actions[0].result_reason | Should -Match '备份|backup|ACL'
+        $saved.actions[0].failure_stage | Should -BeExactly 'backup'
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+    }
+
+    It 'persists <action> helper <status> with truthful terminal metadata' -TestCases @(
+        @{ action='disable_service'; status='success'; reason='已禁用并停止'; expectedStage='' }
+        @{ action='disable_service'; status='skipped'; reason='服务名无效'; expectedStage='' }
+        @{ action='disable_service'; status='failed'; reason='服务禁用后置验证失败: Status=Running'; expectedStage='verification' }
+        @{ action='disable_task'; status='success'; reason='计划任务已禁用'; expectedStage='' }
+        @{ action='disable_task'; status='skipped'; reason='计划任务不存在'; expectedStage='' }
+        @{ action='disable_task'; status='failed'; reason='计划任务禁用或验证失败: Access denied'; expectedStage='mutation' }
+        @{ action='remove_autostart'; status='success'; reason='自启项已完成单值备份并删除'; expectedStage='' }
+        @{ action='remove_autostart'; status='skipped'; reason='自启 Value 已变化，拒绝删除'; expectedStage='' }
+        @{ action='remove_autostart'; status='failed'; reason='单值备份失败: export failed'; expectedStage='backup' }
+    ) {
+        param($action, $status, $reason, $expectedStage)
+        $pendingAction = New-CleanExitAction ("helper-$action-$status") $action
+        $path = Write-CleanExitPending ("helper-$action-$status.json") @($pendingAction)
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        $script:helperResult = [pscustomobject]@{status=$status;reason=$reason}
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { $BackupDir }
+        Mock Invoke-ServiceDisableAction { $script:helperResult }
+        Mock Invoke-TaskDisableAction { $script:helperResult }
+        Mock Invoke-LiteralAutostartRemoval { $script:helperResult }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be $(if ($status -ceq 'failed') { 2 } else { 0 })
+        $saved.actions[0].status | Should -BeExactly $status
+        $saved.actions[0].result_reason | Should -BeExactly $reason
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeExactly $expectedStage
     }
 
     It 'one-time service stop persists truthful success metadata without creating a backup package' {
         $path = Write-CleanExitPending 'one-time-stop.json' @((New-ServiceStopCleanAction))
         $oldPendingFile = $script:PendingFile
         $script:PendingFile = $path
+        $script:RequirePendingSha256 = $true
+        $script:PendingSha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         $YesToAll = $true
         Mock Is-Admin { $true }
         Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
@@ -739,6 +883,8 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         $path = Write-CleanExitPending 'one-time-stop-failed.json' @((New-ServiceStopCleanAction))
         $oldPendingFile = $script:PendingFile
         $script:PendingFile = $path
+        $script:RequirePendingSha256 = $true
+        $script:PendingSha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         $YesToAll = $true
         Mock Is-Admin { $true }
         Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
@@ -771,6 +917,8 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         $path = Write-CleanExitPending ("mixed-$stopFirst.json") $ordered
         $oldPendingFile = $script:PendingFile
         $script:PendingFile = $path
+        $script:RequirePendingSha256 = $true
+        $script:PendingSha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         $YesToAll = $true
         $script:executionOrder = [System.Collections.ArrayList]::new()
         Mock Is-Admin { $true }
@@ -780,10 +928,19 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         Mock Initialize-ProtectedBackupDirectory { $null = $script:executionOrder.Add('backup'); $BackupDir }
         Mock Invoke-ServiceDisableAction { $null = $script:executionOrder.Add('persistent'); [pscustomobject]@{status='success';reason='done'} }
         Mock Invoke-ServiceProcessStopAction { $null = $script:executionOrder.Add('one-time'); [pscustomobject]@{status='success';result_reason='done';failure_stage=''} }
-        try { $exitCode = Invoke-Clean } finally { $script:PendingFile = $oldPendingFile }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
 
         $exitCode | Should -Be 0
         @($script:executionOrder) | Should -Be $expected
+        foreach ($item in @($saved.actions)) {
+            $item.status | Should -BeExactly 'success'
+            [string]::IsNullOrWhiteSpace([string]$item.result_reason) | Should -BeFalse
+            $item.failure_stage | Should -BeOfType [string]
+            $item.failure_stage | Should -BeNullOrEmpty
+        }
         Should -Invoke Initialize-ProtectedBackupDirectory -Times 1 -Exactly
     }
 

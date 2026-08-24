@@ -247,6 +247,23 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         $result.failure_stage | Should -BeExactly 'verification'
     }
 
+    It 'fails verification for any positive replacement PID even when service state is not Running' -TestCases @(
+        @{ state='Start Pending'; replacementPid=[int]9877 }
+        @{ state='Stop Pending'; replacementPid=[int]9878 }
+        @{ state='Stopped'; replacementPid=[int]9879 }
+    ) {
+        param($state, $replacementPid)
+        Mock Get-CimInstance {
+            [pscustomobject]@{ Name='HRWSCCtrl'; State=$state; ProcessId=$replacementPid; PathName=$script:servicePathName }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'failed'
+        $result.result_reason | Should -Match ([string]$replacementPid)
+        $result.failure_stage | Should -BeExactly 'verification'
+    }
+
     It 'succeeds only when the old PID is absent and no replacement PID is bound' {
         $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
 
