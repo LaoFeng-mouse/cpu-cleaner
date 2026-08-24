@@ -669,25 +669,47 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
     It 'HRWSCCtrl exact 身份优先于 broad 回退并锁定 manual_impact 策略' {
         $profile = @((Load-Profiles -Path $script:ProfileFile).profiles | Where-Object { $_.id -eq 'lenovo-hrwscctrl' }) | Select-Object -First 1
         $services = @($profile.detect.services)
+        $binaryDir = Join-Path $TestDrive 'Program Files\Lenovo Security Center'
+        [System.IO.Directory]::CreateDirectory($binaryDir) | Out-Null
+        $binary = Join-Path $binaryDir 'wsctrl11.exe'
+        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
+        $pathName = '"' + $binary + '" -service'
+        Mock Get-CimInstance {
+            if ($ClassName -ceq 'Win32_Service') { return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=$pathName } }
+            return [pscustomobject]@{ ProcessId=[int]4321; Name='wsctrl11.exe'; ExecutablePath=$binary; CreationDate=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03',[DateTimeKind]::Utc) }
+        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+        $hit = @(Match-Profiles -Services @([pscustomobject]@{
+            Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=$pathName; ProcessId=[int]4321
+        }) -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
 
         $profile | Should -Not -BeNullOrEmpty
         $profile.safe | Should -BeFalse
-        $profile.reason_cn | Should -BeExactly '联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需禁用'
+        $profile.reason_cn | Should -BeExactly '联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需结束当前进程'
         $services.Count | Should -Be 2
         $services[0].match | Should -BeExactly 'HRWSCCtrl'
         $services[0].type | Should -BeExactly 'exact'
         $services[1].match | Should -BeExactly 'HRWSCCtrl'
         $services[1].type | Should -BeExactly 'contains'
         Get-ActionFor $profile.actions 'service' | Should -BeExactly 'none'
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'disable_service'
+        Get-ActionFor $profile.actions 'process' | Should -BeExactly 'none'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_process'
 
         $policy = Get-CleanupPolicy $profile
         $policy.execution_class | Should -BeExactly 'manual_impact'
         $policy.necessity | Should -BeExactly 'optional'
         $policy.default_selected | Should -BeFalse
         $policy.requires_confirmation | Should -BeTrue
-        $policy.impact_cn | Should -BeExactly '可能影响联想电脑管家的安全状态、主动防护和通知'
-        $policy.cleanup_reason_cn | Should -BeExactly '不使用联想电脑管家时可减少常驻后台'
+        $policy.impact_cn | Should -BeExactly '只结束当前 wsctrl11.exe 实例；不可恢复；联想服务可能自动重新拉起'
+        $policy.cleanup_reason_cn | Should -BeExactly '不使用联想电脑管家时可结束当前安全中心后台进程'
+
+        $hit.action | Should -BeExactly 'stop_service_process'
+        $hit.execution_class | Should -BeExactly 'manual_impact'
+        $hit.matched_type | Should -BeExactly 'exact'
+        $hit.service_binary_path | Should -BeExactly $binary
+        $hit.process_id | Should -Be 4321
+        $hit.process_name | Should -BeExactly 'wsctrl11.exe'
+        $hit.process_path | Should -BeExactly $binary
+        $hit.process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.0000000Z'
     }
 
     It '七个已验证 Lenovo 清理规则使用 exact 内部服务名且 evidence.tested=true' {

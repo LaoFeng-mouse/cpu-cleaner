@@ -499,7 +499,11 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
         ($script:PersistentDangerousActions -cnotcontains $declaredAction) -and
         ($script:ManualImpactActions -ccontains $manualAction) -and
         $isTested -and
-        $hasNarrowEvidence -and
+        $(if ($manualAction -ceq 'stop_service_process') {
+            $hitType -ceq 'service' -and $matchedType -ceq 'exact'
+        } else {
+            $hasNarrowEvidence
+        }) -and
         $null -ne $policy -and
         $policy.execution_class -ceq 'manual_impact' -and
         $policy.default_selected -is [bool] -and $policy.default_selected -eq $false -and
@@ -565,8 +569,9 @@ function Match-Profiles {
                     $processStartTimeUtc = ''
                     $obsReason = ''
                     if ($decision.Action -ceq 'stop_service_process') {
-                        $identity = Get-ServiceProcessExecutionIdentity $s
-                        if ($identity.Success -eq $true) {
+                        $identityReason = ''
+                        $identity = Get-ServiceProcessExecutionIdentity -Service $s -FailureReason ([ref]$identityReason)
+                        if ($null -ne $identity) {
                             $serviceBinaryPath = $identity.service_binary_path
                             $processId = $identity.process_id
                             $processName = $identity.process_name
@@ -577,7 +582,7 @@ function Match-Profiles {
                             $decision.ExecutionClass = 'observation'
                             $decision.DefaultSelected = $false
                             $decision.RequiresConfirmation = $false
-                            $obsReason = [string]$identity.Reason
+                            $obsReason = $identityReason
                         }
                     }
                     $hits += New-Hit -p $p -hitType 'service' -detail "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)" -srvName $s.Name -autostartSource '' -autostartName '' -taskPath '' -procName $processName -decision $decision -matchEvidence $matchEvidence -serviceBinaryPath $serviceBinaryPath -processId $processId -processPath $processPath -processStartTimeUtc $processStartTimeUtc -obsReason $obsReason

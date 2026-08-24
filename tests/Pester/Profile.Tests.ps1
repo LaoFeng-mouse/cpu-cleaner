@@ -207,9 +207,9 @@ Describe 'Profile 加载' {
         finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It 'stop_service_process 只由 exact 或 path 实际 matcher 授权' -TestCases @(
+    It 'stop_service_process 只由 service exact 实际 matcher 授权' -TestCases @(
         @{ matcher = 'exact'; expectedAction = 'stop_service_process'; expectedClass = 'manual_impact' }
-        @{ matcher = 'path'; expectedAction = 'stop_service_process'; expectedClass = 'manual_impact' }
+        @{ matcher = 'path'; expectedAction = 'investigate'; expectedClass = 'observation' }
         @{ matcher = 'contains'; expectedAction = 'investigate'; expectedClass = 'observation' }
         @{ matcher = 'regex'; expectedAction = 'investigate'; expectedClass = 'observation' }
     ) {
@@ -226,6 +226,20 @@ Describe 'Profile 加载' {
         $decision.ExecutionClass | Should -BeExactly $expectedClass
     }
 
+    It 'stop_service_process 即使 exact 命中也不授权非 service hitType' {
+        $profile = & $script:NewDecisionTestProfile -Safe $false -Action 'none' -CleanupPolicy ([pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
+        })
+        $profile | Add-Member -NotePropertyName manual_actions -NotePropertyValue ([pscustomobject]@{ process = 'stop_service_process' })
+
+        $decision = Get-HitExecutionDecision $profile 'process' ([pscustomobject]@{ matched_type = 'exact' })
+
+        $decision.Action | Should -BeExactly 'investigate'
+        $decision.ExecutionClass | Should -BeExactly 'observation'
+    }
+
     It '完整且一致的服务进程快照生成 stop_service_process 五字段执行身份' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $binary = Join-Path $TestDrive 'wsctrl11.exe'
@@ -238,11 +252,14 @@ Describe 'Profile 加载' {
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
         $script:ProfileFile = $tmp
         Mock Get-CimInstance {
+            if ($ClassName -ceq 'Win32_Service') {
+                return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=4321; PathName=('"' + $binary + '" -service') }
+            }
             [pscustomobject]@{
                 ProcessId = 4321; Name = 'wsctrl11.exe'; ExecutablePath = $binary
                 CreationDate = [datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03.4567890', [DateTimeKind]::Utc)
             }
-        } -ParameterFilter { $ClassName -eq 'Win32_Process' }
+        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
         try {
             $hits = @(Match-Profiles -Services @([pscustomobject]@{
                 Name = 'HRWSCCtrl'; DisplayName = 'Lenovo Security Center'; State = 'Running'; StartMode = 'Manual'
@@ -263,6 +280,8 @@ Describe 'Profile 加载' {
         @{ label = 'non-positive-pid'; processId = 0; binaryExists = $true; processMode = 'valid' }
         @{ label = 'missing-binary'; processId = 4321; binaryExists = $false; processMode = 'valid' }
         @{ label = 'missing-process'; processId = 4321; binaryExists = $true; processMode = 'missing' }
+        @{ label = 'multiple-processes'; processId = 4321; binaryExists = $true; processMode = 'multiple' }
+        @{ label = 'process-pid-mismatch'; processId = 4321; binaryExists = $true; processMode = 'pid-mismatch' }
         @{ label = 'name-mismatch'; processId = 4321; binaryExists = $true; processMode = 'name-mismatch' }
         @{ label = 'path-mismatch'; processId = 4321; binaryExists = $true; processMode = 'path-mismatch' }
         @{ label = 'missing-start'; processId = 4321; binaryExists = $true; processMode = 'missing-start' }
@@ -281,14 +300,19 @@ Describe 'Profile 加载' {
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
         $script:ProfileFile = $tmp
         Mock Get-CimInstance {
+            if ($ClassName -ceq 'Win32_Service') {
+                return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=4321; PathName=('"' + $binary + '" -service') }
+            }
             if ($processMode -ceq 'missing') { return @() }
-            [pscustomobject]@{
-                ProcessId = 4321
+            $record = [pscustomobject]@{
+                ProcessId = if ($processMode -ceq 'pid-mismatch') { 9876 } else { 4321 }
                 Name = if ($processMode -ceq 'name-mismatch') { 'other.exe' } else { [System.IO.Path]::GetFileName($binary) }
                 ExecutablePath = if ($processMode -ceq 'path-mismatch') { $otherBinary } else { $binary }
                 CreationDate = if ($processMode -ceq 'missing-start') { $null } else { [datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03', [DateTimeKind]::Utc) }
             }
-        } -ParameterFilter { $ClassName -eq 'Win32_Process' }
+            if ($processMode -ceq 'multiple') { return @($record, $record.PSObject.Copy()) }
+            return $record
+        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
         try {
             $hits = @(Match-Profiles -Services @([pscustomobject]@{
                 Name = 'HRWSCCtrl'; DisplayName = 'Lenovo Security Center'; State = 'Running'; StartMode = 'Manual'
@@ -302,6 +326,153 @@ Describe 'Profile 加载' {
             [string]::IsNullOrWhiteSpace([string]$hits[0].obs_reason) | Should -BeFalse
             $hits[0].obs_reason | Should -Match '身份|PID|路径|进程|启动时间'
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It '服务进程身份在进程读取前后发生 <drift> 漂移时降级为 observation' -TestCases @(
+        @{ drift = 'PID' }
+        @{ drift = 'PathName' }
+        @{ drift = 'State' }
+    ) {
+        param($drift)
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $binary = Join-Path $TestDrive ("drift-$drift-wsctrl11.exe")
+        $otherBinary = Join-Path $TestDrive ("drift-$drift-other.exe")
+        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
+        [System.IO.File]::WriteAllBytes($otherBinary, [byte[]](2))
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
+        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_process' })
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        $script:ProfileFile = $tmp
+        $script:serviceReadCount = 0
+        Mock Get-CimInstance {
+            if ($ClassName -ceq 'Win32_Service') {
+                $script:serviceReadCount++
+                $snapshot = [ordered]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=4321; PathName=('"' + $binary + '" -service') }
+                if ($script:serviceReadCount -eq 2) {
+                    if ($drift -ceq 'PID') { $snapshot.ProcessId = 9876 }
+                    if ($drift -ceq 'PathName') { $snapshot.PathName = ('"' + $otherBinary + '" -service') }
+                    if ($drift -ceq 'State') { $snapshot.State = 'Stopped' }
+                }
+                return [pscustomobject]$snapshot
+            }
+            return [pscustomobject]@{
+                ProcessId=4321; Name=[System.IO.Path]::GetFileName($binary); ExecutablePath=$binary
+                CreationDate=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03', [DateTimeKind]::Utc)
+            }
+        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+        try {
+            $hit = @(Match-Profiles -Services @([pscustomobject]@{
+                Name='HRWSCCtrl'; DisplayName='Lenovo Security Center'; State='Running'; StartMode='Manual'
+                PathName=('"' + $binary + '" -service'); ProcessId=4321
+            }) -AutoStarts @() -Tasks @() -TopProcs @())[0]
+
+            $script:serviceReadCount | Should -Be 2
+            $hit.action | Should -BeExactly 'investigate'
+            $hit.execution_class | Should -BeExactly 'observation'
+            $hit.obs_reason | Should -Match '服务|PID|路径|状态|快照'
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It '扫描服务对象与首次当前服务读取的 <drift> 不一致时返回 null' -TestCases @(
+        @{ drift='Name' }
+        @{ drift='State' }
+        @{ drift='PID' }
+        @{ drift='PathName' }
+    ) {
+        param($drift)
+        $binary = Join-Path $TestDrive ("original-$drift-wsctrl11.exe")
+        $other = Join-Path $TestDrive ("original-$drift-other.exe")
+        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
+        [System.IO.File]::WriteAllBytes($other, [byte[]](2))
+        $current = [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=('"' + $binary + '" -service') }
+        $original = $current.PSObject.Copy()
+        if ($drift -ceq 'Name') { $original.Name = 'hrwscctrl' }
+        if ($drift -ceq 'State') { $original.State = 'Stopped' }
+        if ($drift -ceq 'PID') { $original.ProcessId = [int]9876 }
+        if ($drift -ceq 'PathName') { $original.PathName = ('"' + $other + '" -service') }
+        Mock Get-CimInstance {
+            if ($ClassName -ceq 'Win32_Service') { return $current.PSObject.Copy() }
+            throw 'process lookup must not occur when original and current service differ'
+        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+
+        $reason = ''
+        $identity = Get-ServiceProcessExecutionIdentity -Service $original -FailureReason ([ref]$reason)
+
+        $identity | Should -BeNullOrEmpty
+        [string]::IsNullOrWhiteSpace($reason) | Should -BeFalse
+    }
+
+    It 'UTC 启动时间采用明确语义并拒绝模糊或非法值: <label>' -TestCases @(
+        @{ label='utc-datetime'; value=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03.4567890',[DateTimeKind]::Utc); expected='2026-08-24T01:02:03.4567890Z' }
+        @{ label='offset-normalized'; value=[datetimeoffset]::Parse('2026-08-24T09:02:03.4567890+08:00'); expected='2026-08-24T01:02:03.4567890Z' }
+        @{ label='unspecified'; value=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03',[DateTimeKind]::Unspecified); expected=$null }
+        @{ label='local'; value=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03',[DateTimeKind]::Local); expected=$null }
+        @{ label='malformed'; value='2026-08-24T01:02:03Z'; expected=$null }
+        @{ label='pre-1970'; value=[datetime]::SpecifyKind([datetime]'1969-12-31T23:59:59',[DateTimeKind]::Utc); expected=$null }
+        @{ label='null'; value=$null; expected=$null }
+        @{ label='non-date'; value=12345; expected=$null }
+    ) {
+        param($label, $value, $expected)
+        ConvertTo-ServiceProcessStartTimeUtc $value | Should -BeExactly $expected
+    }
+
+    It '服务 PathName/PID/进程身份矩阵严格失败关闭: <label>' -TestCases @(
+        @{ label='quoted-spaces'; pathMode='quoted'; pidMode='valid'; processMode='valid'; expectSuccess=$true }
+        @{ label='unquoted-ambiguous'; pathMode='unquoted'; pidMode='valid'; processMode='valid'; expectSuccess=$false }
+        @{ label='relative-path'; pathMode='relative'; pidMode='valid'; processMode='valid'; expectSuccess=$false }
+        @{ label='environment-path'; pathMode='environment'; pidMode='valid'; processMode='valid'; expectSuccess=$false }
+        @{ label='pid-string'; pathMode='quoted'; pidMode='string'; processMode='valid'; expectSuccess=$false }
+        @{ label='pid-negative'; pathMode='quoted'; pidMode='negative'; processMode='valid'; expectSuccess=$false }
+        @{ label='pid-range'; pathMode='quoted'; pidMode='range'; processMode='valid'; expectSuccess=$false }
+        @{ label='multiple-processes'; pathMode='quoted'; pidMode='valid'; processMode='multiple'; expectSuccess=$false }
+        @{ label='case-equivalent'; pathMode='quoted'; pidMode='valid'; processMode='case'; expectSuccess=$true }
+        @{ label='canonical-mismatch'; pathMode='quoted'; pidMode='valid'; processMode='mismatch'; expectSuccess=$false }
+    ) {
+        param($label, $pathMode, $pidMode, $processMode, $expectSuccess)
+        $dir = Join-Path $TestDrive 'Program Files\Lenovo Security'
+        [System.IO.Directory]::CreateDirectory($dir) | Out-Null
+        $binary = Join-Path $dir 'wsctrl11.exe'
+        $otherDir = Join-Path $TestDrive 'Other'
+        [System.IO.Directory]::CreateDirectory($otherDir) | Out-Null
+        $other = Join-Path $otherDir 'wsctrl11.exe'
+        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
+        [System.IO.File]::WriteAllBytes($other, [byte[]](2))
+        $pathName = switch ($pathMode) {
+            'quoted' { '"' + $binary + '" -service' }
+            'unquoted' { $binary + ' -service' }
+            'relative' { '.\wsctrl11.exe -service' }
+            'environment' { '%ProgramFiles%\Lenovo Security\wsctrl11.exe -service' }
+        }
+        $pidValue = switch ($pidMode) {
+            'valid' { [int]4321 }
+            'string' { '4321' }
+            'negative' { [int]-1 }
+            'range' { [int64]2147483648 }
+        }
+        $original = [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=$pidValue; PathName=$pathName }
+        Mock Get-CimInstance {
+            if ($ClassName -ceq 'Win32_Service') { return $original.PSObject.Copy() }
+            $record = [pscustomobject]@{
+                ProcessId=4321; Name='wsctrl11.exe'
+                ExecutablePath=if ($processMode -ceq 'case') { $binary.ToUpperInvariant() } elseif ($processMode -ceq 'mismatch') { Join-Path $dir '..\..\Other\wsctrl11.exe' } else { $binary }
+                CreationDate=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03',[DateTimeKind]::Utc)
+            }
+            if ($processMode -ceq 'multiple') { return @($record, $record.PSObject.Copy()) }
+            return $record
+        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+
+        $reason = ''
+        $identity = Get-ServiceProcessExecutionIdentity -Service $original -FailureReason ([ref]$reason)
+
+        ($null -ne $identity) | Should -Be $expectSuccess
+        if ($expectSuccess) {
+            $identity.process_id | Should -Be 4321
+        } else {
+            [string]::IsNullOrWhiteSpace($reason) | Should -BeFalse
+        }
     }
 
     It '缺少 manual_actions 时 Get-ManualActionFor 返回 none' {
