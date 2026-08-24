@@ -43,7 +43,7 @@ function Test-ActionMatchesHitType($Action, $HitType) {
         return @('service','process','autostart','task') -ccontains $HitType
     }
     switch -CaseSensitive ($HitType) {
-        'service'   { return $Action -ceq 'disable_service' }
+        'service'   { return @('disable_service','stop_service_process') -ccontains $Action }
         'autostart' { return $Action -ceq 'remove_autostart' }
         'task'      { return $Action -ceq 'disable_task' }
         default     { return $false }
@@ -494,6 +494,31 @@ function Test-PendingSchemaSupported($Pending) {
     $version = $schemaProperty.Value
     if ($version -isnot [int32] -and $version -isnot [int64]) { return $false }
     return ([int64]3).Equals([int64]$version)
+}
+
+function Test-ServiceProcessActionShape($Action) {
+    if ($null -eq $Action -or
+        (Get-StrictNonBlankStringProperty $Action 'action') -cne 'stop_service_process' -or
+        (Get-StrictNonBlankStringProperty $Action 'hit_type') -cne 'service' -or
+        (Get-StrictNonBlankStringProperty $Action 'matched_type') -cne 'exact' -or
+        -not (Test-HitMatcherEvidenceShape $Action -AllowedMatchTypes @('exact')) -or
+        (Get-StrictNonBlankStringProperty $Action 'service_name') -eq $null -or
+        (Get-StrictNonBlankStringProperty $Action 'service_binary_path') -eq $null -or
+        (Get-StrictNonBlankStringProperty $Action 'process_name') -eq $null -or
+        (Get-StrictNonBlankStringProperty $Action 'process_path') -eq $null -or
+        $Action.PSObject.Properties.Name -notcontains 'process_id' -or
+        -not (Test-PositiveScalarProcessId $Action.process_id) -or
+        -not (Test-StrictUtcProcessStartTime (Get-PendingHitProperty $Action 'process_start_time_utc'))) {
+        return $false
+    }
+    try {
+        if (-not [System.IO.Path]::IsPathRooted([string]$Action.service_binary_path) -or
+            -not [System.IO.Path]::IsPathRooted([string]$Action.process_path)) { return $false }
+    } catch { return $false }
+    $policy = Get-ValidPendingDisplayPolicy $Action
+    return $Action.safe -is [bool] -and $Action.safe -eq $false -and
+        $null -ne $policy -and $policy.execution_class -ceq 'manual_impact' -and
+        $policy.default_selected -eq $false -and $policy.requires_confirmation -eq $true
 }
 
 function Test-PendingEnvelopeShape($Pending) {
@@ -1014,6 +1039,10 @@ function Get-PendingIdentityKey($Item) {
         matched_type         = $Item.matched_type
         matched_field        = $Item.matched_field
     }
+    if ($Item.action -ceq 'stop_service_process') {
+        $identity | Add-Member NoteProperty service_binary_path $Item.service_binary_path
+        $identity | Add-Member NoteProperty process_start_time_utc $Item.process_start_time_utc
+    }
     return ConvertTo-Json -InputObject $identity -Compress -Depth 4
 }
 
@@ -1037,7 +1066,10 @@ function Test-ManualImpactDigestActionShape($Action) {
         -not (Test-HitMatcherEvidenceShape $Action -AllowedMatchTypes @('exact','path','contains','regex','publisher','sha256')) -or
         -not (Test-ActionMatchesHitType $Action.action $Action.hit_type)) { return $false }
     switch -CaseSensitive ($Action.hit_type) {
-        'service' { return $null -ne (Get-StrictNonBlankStringProperty $Action 'service_name') }
+        'service' {
+            if ($Action.action -ceq 'stop_service_process') { return Test-ServiceProcessActionShape $Action }
+            return $null -ne (Get-StrictNonBlankStringProperty $Action 'service_name')
+        }
         'autostart' {
             return $null -ne (Get-StrictNonBlankStringProperty $Action 'autostart_source') -and
                 $null -ne (Get-StrictNonBlankStringProperty $Action 'autostart_name') -and
@@ -1119,6 +1151,13 @@ function Get-PendingExecutableTargetIdentityKey($Item) {
     switch -CaseSensitive ($hitType) {
         'SERVICE' {
             $identity.service_name = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'service_name')
+            if ((Get-PendingHitProperty $Item 'action') -ceq 'stop_service_process') {
+                $identity.service_binary_path = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'service_binary_path')
+                $identity.process_id = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_id')
+                $identity.process_name = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_name')
+                $identity.process_path = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_path')
+                $identity.process_start_time_utc = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_start_time_utc')
+            }
         }
         'TASK' {
             $identity.task_path = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'task_path')
@@ -1211,6 +1250,8 @@ function New-PendingPersistedHit($Hit, $Policy, [string]$Status = '', [string]$C
         process_name         = Get-PendingHitProperty $Hit 'process_name'
         process_id           = Get-PendingHitProperty $Hit 'process_id'
         process_path         = Get-PendingHitProperty $Hit 'process_path'
+        service_binary_path  = Get-PendingHitProperty $Hit 'service_binary_path'
+        process_start_time_utc = [string](Get-PendingHitProperty $Hit 'process_start_time_utc')
         matched_pattern      = Get-PendingHitProperty $Hit 'matched_pattern'
         matched_type         = Get-PendingHitProperty $Hit 'matched_type'
         matched_field        = Get-PendingHitProperty $Hit 'matched_field'
@@ -1301,6 +1342,9 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             $actionHitTypeAllowed -and
             ($null -ne $displayPolicy) -and
             $categoryComplete
+        if ($executable -and $h.action -ceq 'stop_service_process') {
+            $executable = Test-ServiceProcessActionShape $h
+        }
 
         # observations 保持 rule/action/provenance 身份，防止宽匹配观察压制同目标的窄匹配动作。
         $dedupeKey = Get-PendingIdentityKey $h
@@ -1408,6 +1452,7 @@ function Test-PendingActionEligible($p, $profiles) {
     if ($p.status -cnotin @('pending','failed')) { return $false }
     if ($p.action -cnotin $script:DangerousActions) { return $false }
     if (-not (Test-HitMatcherEvidenceShape $p)) { return $false }
+    if ($p.action -ceq 'stop_service_process' -and -not (Test-ServiceProcessActionShape $p)) { return $false }
 
     if ($profiles.PSObject.Properties.Name -notcontains 'profiles') { return $false }
     $rules = @($profiles.profiles | Where-Object {
@@ -2199,6 +2244,151 @@ function Resolve-LatestTrustedRestorePackage {
     throw (New-RestoreNoTrustedBackupException '没有通过 owner、DACL、manifest、哈希和身份验证的可信备份')
 }
 
+function Get-CurrentServiceProcessIdentity {
+    param([string]$ServiceName)
+    if ($ServiceName -isnot [string] -or [string]::IsNullOrWhiteSpace($ServiceName)) {
+        return [pscustomobject]@{ Identity=$null; Reason='service name is invalid; rescan required' }
+    }
+    $snapshotReason = ''
+    $first = Get-CurrentServiceExecutionSnapshot -ServiceName $ServiceName -FailureReason ([ref]$snapshotReason)
+    if ($null -eq $first) {
+        return [pscustomobject]@{ Identity=$null; Reason='current service identity is missing or not unique; rescan required' }
+    }
+    try {
+        $processes = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $first.ProcessId) -ErrorAction Stop)
+    } catch {
+        return [pscustomobject]@{ Identity=$null; Reason='current process identity could not be read; rescan required' }
+    }
+    if ($processes.Count -ne 1 -or $null -eq $processes[0]) {
+        return [pscustomobject]@{ Identity=$null; Reason='current process identity is missing or not unique; rescan required' }
+    }
+    $process = $processes[0]
+    $processId = Get-StrictServiceProcessId $process.ProcessId
+    $processName = Get-StrictNonBlankStringProperty $process 'Name'
+    $processPath = Get-StrictNonBlankStringProperty $process 'ExecutablePath'
+    $startTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
+    if ($null -eq $processId -or $processId -ne $first.ProcessId -or $null -eq $processName -or
+        $null -eq $processPath -or -not [System.IO.Path]::IsPathRooted($processPath) -or
+        [string]::IsNullOrWhiteSpace([string]$startTimeUtc)) {
+        return [pscustomobject]@{ Identity=$null; Reason='current process identity is incomplete; rescan required' }
+    }
+    try { $processPath = [System.IO.Path]::GetFullPath($processPath) } catch {
+        return [pscustomobject]@{ Identity=$null; Reason='current process path is invalid; rescan required' }
+    }
+
+    $snapshotReason = ''
+    $second = Get-CurrentServiceExecutionSnapshot -ServiceName $ServiceName -FailureReason ([ref]$snapshotReason)
+    if ($null -eq $second -or
+        -not [string]::Equals($first.Name, $second.Name, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $second.State -cne 'Running' -or $first.ProcessId -ne $second.ProcessId -or
+        -not [string]::Equals($first.PathName, $second.PathName, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($first.BinaryPath, $second.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Identity=$null; Reason='service identity changed during validation; rescan required' }
+    }
+    return [pscustomobject]@{
+        Identity=[pscustomobject]@{
+            service_name=$first.Name; service_binary_path=$first.BinaryPath; process_id=[int]$first.ProcessId
+            process_name=$processName; process_path=$processPath; process_start_time_utc=$startTimeUtc
+        }
+        Reason=''
+    }
+}
+
+function Get-NormalizedServiceProcessPath($Value) {
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value) -or -not [System.IO.Path]::IsPathRooted($Value)) { return $null }
+    try { return [System.IO.Path]::GetFullPath($Value) } catch { return $null }
+}
+
+function Get-NormalizedStrictUtcProcessStartTime($Value) {
+    if (-not (Test-StrictUtcProcessStartTime $Value)) { return $null }
+    $parsed = [datetime]::ParseExact($Value, 'o', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+    return $parsed.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Test-ServiceProcessIdentityEqual {
+    param($Pending, $Current)
+    if ($null -eq $Pending -or $null -eq $Current) { return [pscustomobject]@{ Equal=$false; Reason='current identity is unavailable; rescan required' } }
+    $comparisons = @(
+        @('service name','service_name'),
+        @('process name','process_name')
+    )
+    foreach ($comparison in $comparisons) {
+        $field = $comparison[1]
+        $expected = Get-StrictNonBlankStringProperty $Pending $field
+        $actual = Get-StrictNonBlankStringProperty $Current $field
+        if ($null -eq $expected -or $null -eq $actual -or
+            -not [string]::Equals($expected, $actual, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{ Equal=$false; Reason=("$($comparison[0]) changed; rescan required") }
+        }
+    }
+    if (-not (Test-PositiveScalarProcessId $Pending.process_id) -or -not (Test-PositiveScalarProcessId $Current.process_id) -or
+        [int]$Pending.process_id -ne [int]$Current.process_id) {
+        return [pscustomobject]@{ Equal=$false; Reason='PID changed; rescan required' }
+    }
+    foreach ($comparison in @(@('service binary path','service_binary_path'),@('process path','process_path'))) {
+        $field = $comparison[1]
+        $expected = Get-NormalizedServiceProcessPath (Get-PendingHitProperty $Pending $field)
+        $actual = Get-NormalizedServiceProcessPath (Get-PendingHitProperty $Current $field)
+        if ($null -eq $expected -or $null -eq $actual -or
+            -not [string]::Equals($expected, $actual, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{ Equal=$false; Reason=("$($comparison[0]) changed; rescan required") }
+        }
+    }
+    $expectedStart = Get-NormalizedStrictUtcProcessStartTime (Get-PendingHitProperty $Pending 'process_start_time_utc')
+    $actualStart = Get-NormalizedStrictUtcProcessStartTime (Get-PendingHitProperty $Current 'process_start_time_utc')
+    if ($null -eq $expectedStart -or $null -eq $actualStart -or
+        -not [string]::Equals($expectedStart, $actualStart, [System.StringComparison]::Ordinal)) {
+        return [pscustomobject]@{ Equal=$false; Reason='start time changed; rescan required' }
+    }
+    return [pscustomobject]@{ Equal=$true; Reason='' }
+}
+
+function New-ServiceProcessStopResult([string]$Status, [string]$Reason, [string]$FailureStage = '') {
+    return [pscustomobject]@{ status=$Status; result_reason=$Reason; failure_stage=$FailureStage }
+}
+
+function Invoke-ServiceProcessStopAction {
+    param($Pending)
+    if (-not (Test-ServiceProcessActionShape $Pending)) {
+        return New-ServiceProcessStopResult 'skipped' 'pending service process identity is invalid; rescan required'
+    }
+    $capture = Get-CurrentServiceProcessIdentity -ServiceName $Pending.service_name
+    if ($null -eq $capture -or $null -eq $capture.Identity) {
+        $reason = if ($capture -and $capture.Reason -is [string] -and -not [string]::IsNullOrWhiteSpace($capture.Reason)) { $capture.Reason } else { 'current identity is unavailable; rescan required' }
+        return New-ServiceProcessStopResult 'skipped' $reason
+    }
+    $comparison = Test-ServiceProcessIdentityEqual -Pending $Pending -Current $capture.Identity
+    if (-not $comparison.Equal) { return New-ServiceProcessStopResult 'skipped' $comparison.Reason }
+
+    $targetPid = [int]$capture.Identity.process_id
+    try { Stop-Process -Id $targetPid -Force -ErrorAction Stop } catch {
+        $kind = $_.Exception.GetType().Name
+        $denied = $_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.Message -match '(?i)access.+denied|拒绝访问|权限'
+        $reason = if ($denied) { "Stop-Process access denied for recorded PID $targetPid" } else { "Stop-Process failed for recorded PID $targetPid ($kind)" }
+        return New-ServiceProcessStopResult 'failed' $reason 'mutation'
+    }
+
+    try { $oldProcesses = @(Get-Process -Id $targetPid -ErrorAction SilentlyContinue) } catch {
+        return New-ServiceProcessStopResult 'failed' "could not verify exit of old PID $targetPid" 'verification'
+    }
+    if (@($oldProcesses | Where-Object { $_ -and $_.Id -eq $targetPid }).Count -gt 0) {
+        return New-ServiceProcessStopResult 'failed' "old PID $targetPid remains alive after Stop-Process" 'verification'
+    }
+
+    $escapedName = ([string]$Pending.service_name).Replace("'", "''")
+    try { $services = @(Get-CimInstance -ClassName Win32_Service -Filter ("Name = '{0}'" -f $escapedName) -ErrorAction Stop) } catch {
+        return New-ServiceProcessStopResult 'failed' 'could not verify service restart state' 'verification'
+    }
+    if ($services.Count -gt 1) { return New-ServiceProcessStopResult 'failed' 'service restart identity is not unique' 'verification' }
+    if ($services.Count -eq 1 -and $services[0].State -is [string] -and
+        [string]::Equals($services[0].State, 'Running', [System.StringComparison]::OrdinalIgnoreCase) -and
+        (Test-PositiveScalarProcessId $services[0].ProcessId)) {
+        $replacementPid = [int]$services[0].ProcessId
+        return New-ServiceProcessStopResult 'failed' "current instance ended but service restarted with replacement PID $replacementPid" 'verification'
+    }
+    return New-ServiceProcessStopResult 'success' "ended current service process PID $targetPid; no replacement PID is bound"
+}
+
 function Get-CurrentProcessIdentity($ProcessId) {
     if (-not (Test-PositiveScalarProcessId $ProcessId)) { return $null }
     try { $processes = @(Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue) } catch { return $null }
@@ -2338,6 +2528,17 @@ function Invoke-StopProcessPending {
     }
 }
 
+function Test-PersistentCleanupAction($Action) {
+    return $Action -is [string] -and @('disable_service','remove_autostart','disable_task') -ccontains $Action
+}
+
+function Set-PendingTransactionResult {
+    param($Pending, $Result)
+    $Pending.status = [string]$Result.status
+    $Pending | Add-Member NoteProperty result_reason ([string]$Result.result_reason) -Force
+    $Pending | Add-Member NoteProperty failure_stage ([string]$Result.failure_stage) -Force
+}
+
 function Invoke-Clean {
     if (-not (Is-Admin)) {
         Write-Host '错误: clean 模式需要管理员权限。请右键以管理员身份运行 PowerShell 再执行。' -ForegroundColor Red
@@ -2400,7 +2601,7 @@ function Invoke-Clean {
     if ($actions.Count -eq 0) {
         Write-Host '待办动作已全部完成或为空。' -ForegroundColor Green
     } else {
-        Write-Step '以下动作将被处理, 每个动作都会先备份:'
+        Write-Step '以下动作将被处理；持久化修改会先备份，一次性进程操作不生成恢复包:'
         for ($i = 0; $i -lt $actions.Count; $i++) {
             $p = $actions[$i]
             Write-Host ('  [{0}] {1} | 动作: {2} | 命中: {3}' -f $i, $p.name_cn, $p.action, $p.hit_type) -ForegroundColor Yellow
@@ -2462,9 +2663,21 @@ function Invoke-Clean {
 
             # 用户作出最终选择后，在任何备份或系统变更前完整重读并重放保存的 matcher。
             if (-not (Test-SelectedPendingActionAuthorized $p $profiles $impactConfirmation)) { continue }
+
+            # stop_service_process 是不生成恢复包的一次性当前实例动作。它仍在最终授权后执行，
+            # 但必须先于持久化动作的备份目录初始化分流，避免留下空备份包。
+            if ($p.action -ceq 'stop_service_process') {
+                $stopResult = Invoke-ServiceProcessStopAction -Pending $p
+                Set-PendingTransactionResult -Pending $p -Result $stopResult
+                if ($stopResult.status -ceq 'success') { Write-Host "  验证通过: $($stopResult.result_reason)" -ForegroundColor Green }
+                elseif ($stopResult.status -ceq 'skipped') { Write-Host "  跳过: $($stopResult.result_reason)" -ForegroundColor DarkYellow }
+                else { Write-Host "  失败: $($stopResult.result_reason)" -ForegroundColor Red }
+                continue
+            }
+
             # 安全顺序不变量：下方分支或其事务 helper 才能调用 Backup-RegistryKey、
             # sc.exe config、sc.exe stop、Disable-ScheduledTask 等 mutation 原语。
-            if (-not $backupDirReady) {
+            if ((Test-PersistentCleanupAction $p.action) -and -not $backupDirReady) {
                 try { $backupDir = Initialize-ProtectedBackupDirectory $backupDir } catch {
                     Write-Host ('  安全备份目录创建/ACL 验证失败，拒绝执行任何 mutation: ' + $_.Exception.Message) -ForegroundColor Red
                     $p.status = 'failed'

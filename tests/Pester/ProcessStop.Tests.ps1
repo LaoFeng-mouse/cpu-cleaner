@@ -136,3 +136,125 @@ Describe 'one-time suspicious process stop' {
         $source | Should -Match '\$null\s*=\s*\$process\.Handle'
     }
 }
+
+Describe 'identity-bound HRWSCCtrl service process stop' {
+    BeforeEach {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        $src = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
+        $idx = $src.IndexOf("switch (`$Mode)")
+        if ($idx -lt 0) { throw 'main switch not found' }
+        $defs = $src.Substring(0, $idx)
+        $defs = $defs.Replace('$script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path', '$script:Root = $projectRoot')
+        Invoke-Expression $defs
+
+        $script:binaryDir = Join-Path $TestDrive 'Lenovo Security Center'
+        [System.IO.Directory]::CreateDirectory($script:binaryDir) | Out-Null
+        $script:binary = Join-Path $script:binaryDir 'wsctrl11.exe'
+        [System.IO.File]::WriteAllBytes($script:binary, [byte[]](1))
+        $script:servicePathName = '"' + $script:binary + '" -service'
+        $script:pendingStop = [pscustomobject]@{
+            id='lenovo-hrwscctrl'; name_cn='HRWSCCtrl'; detail='HRWSCCtrl'; reason_cn='manual'
+            hit_type='service'; action='stop_service_process'; status='pending'; service_name='HRWSCCtrl'
+            service_binary_path=$script:binary; process_id=[int]4321; process_name='wsctrl11.exe'
+            process_path=$script:binary; process_start_time_utc='2026-08-24T01:02:03.0000000Z'
+            matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
+        }
+        $script:currentIdentity = [pscustomobject]@{
+            service_name='HRWSCCtrl'; service_binary_path=$script:binary; process_id=[int]4321
+            process_name='wsctrl11.exe'; process_path=$script:binary
+            process_start_time_utc='2026-08-24T01:02:03.0000000Z'
+        }
+        Mock Get-CurrentServiceProcessIdentity { [pscustomobject]@{ Identity=$script:currentIdentity; Reason='' } }
+        Mock Stop-Process {}
+        Mock Get-Process { $null }
+        Mock Get-CimInstance {
+            [pscustomobject]@{ Name='HRWSCCtrl'; State='Stopped'; ProcessId=[int]0; PathName=$script:servicePathName }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+    }
+
+    It 'skips every recorded identity drift without mutation' -TestCases @(
+        @{ field='service_name'; value='OtherSvc'; reason='service name' }
+        @{ field='service_binary_path'; value='C:\Other\wsctrl11.exe'; reason='service binary path' }
+        @{ field='process_id'; value=[int]4322; reason='PID' }
+        @{ field='process_name'; value='other.exe'; reason='process name' }
+        @{ field='process_path'; value='C:\Other\wsctrl11.exe'; reason='process path' }
+        @{ field='process_start_time_utc'; value='2026-08-24T01:02:04.0000000Z'; reason='start time' }
+    ) {
+        param($field, $value, $reason)
+        $current = $script:currentIdentity.PSObject.Copy()
+        $current.$field = $value
+        Mock Get-CurrentServiceProcessIdentity { [pscustomobject]@{ Identity=$current; Reason='' } }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'skipped'
+        $result.result_reason | Should -Match $reason
+        $result.failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Stop-Process -Times 0 -Exactly
+    }
+
+    It 'skips missing or non-unique current service/process identities and requests rescan' -TestCases @(
+        @{ mode='missing-service' }
+        @{ mode='multiple-service' }
+        @{ mode='missing-process' }
+        @{ mode='multiple-process' }
+        @{ mode='service-drift' }
+    ) {
+        param($mode)
+        Mock Get-CurrentServiceProcessIdentity { [pscustomobject]@{ Identity=$null; Reason=("$mode current identity is not stable; rescan required") } }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'skipped'
+        $result.result_reason | Should -Match 'rescan'
+        $result.failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Stop-Process -Times 0 -Exactly
+    }
+
+    It 'records a sanitized mutation failure when Stop-Process is denied' {
+        Mock Stop-Process { throw 'Access denied for C:\secret\command line --token=abc' }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'failed'
+        $result.result_reason | Should -Match 'denied|权限|拒绝'
+        $result.result_reason | Should -Not -Match 'token=abc'
+        $result.failure_stage | Should -BeExactly 'mutation'
+    }
+
+    It 'fails verification when the original PID remains alive' {
+        Mock Get-Process { [pscustomobject]@{ Id=[int]4321 } } -ParameterFilter { $Id -eq 4321 }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'failed'
+        $result.result_reason | Should -Match 'old PID|原 PID|仍'
+        $result.failure_stage | Should -BeExactly 'verification'
+    }
+
+    It 'fails verification and records the replacement PID when the service restarts' {
+        Mock Get-CimInstance {
+            [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]9876; PathName=$script:servicePathName }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'failed'
+        $result.result_reason | Should -Match 'restarted|重新拉起|重启'
+        $result.result_reason | Should -Match '9876'
+        $result.failure_stage | Should -BeExactly 'verification'
+    }
+
+    It 'succeeds only when the old PID is absent and no replacement PID is bound' {
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'success'
+        [string]::IsNullOrWhiteSpace([string]$result.result_reason) | Should -BeFalse
+        $result.failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Stop-Process -Times 1 -Exactly -ParameterFilter {
+            $Id -eq 4321 -and $Force -eq $true -and $ErrorAction -eq 'Stop'
+        }
+    }
+}

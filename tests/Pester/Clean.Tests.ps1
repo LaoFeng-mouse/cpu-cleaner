@@ -481,6 +481,18 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
                 impact_cn='test impact'; cleanup_reason_cn='test reason'
             }
         }
+        function New-ServiceStopCleanAction {
+            return [pscustomobject]@{
+                id='lenovo-hrwscctrl'; name_cn='HRWSCCtrl'; detail='HRWSCCtrl'; reason_cn='manual'
+                hit_type='service'; action='stop_service_process'; status='pending'; service_name='HRWSCCtrl'
+                service_binary_path='C:\Program Files\Lenovo Security Center\wsctrl11.exe'; process_id=[int]4321
+                process_name='wsctrl11.exe'; process_path='C:\Program Files\Lenovo Security Center\wsctrl11.exe'
+                process_start_time_utc='2026-08-24T01:02:03.0000000Z'
+                matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+                execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
+            }
+        }
         function Write-CleanExitPending([string]$Name, $Actions) {
             $path = Join-Path $TestDrive $Name
             $payload = [pscustomobject]@{pending_schema_version=3;generated='scan';actions=@($Actions);resolved=@();observations=@();suspicious=@()}
@@ -695,6 +707,84 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         @($saved.actions | Where-Object status -ceq 'skipped').Count | Should -Be 1
         @($saved.actions | Where-Object status -ceq 'manual_required').Count | Should -Be 1
         Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+    }
+
+    It 'one-time service stop persists truthful success metadata without creating a backup package' {
+        $path = Write-CleanExitPending 'one-time-stop.json' @((New-ServiceStopCleanAction))
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { throw 'one-time action must not create backup' }
+        Mock Invoke-ServiceProcessStopAction {
+            [pscustomobject]@{status='success';result_reason='current instance ended';failure_stage=''}
+        }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'success'
+        $saved.actions[0].result_reason | Should -BeExactly 'current instance ended'
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceProcessStopAction -Times 1 -Exactly
+    }
+
+    It 'one-time failure metadata is persisted and keeps clean exit code 2' {
+        $path = Write-CleanExitPending 'one-time-stop-failed.json' @((New-ServiceStopCleanAction))
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { throw 'one-time action must not create backup' }
+        Mock Invoke-ServiceProcessStopAction {
+            [pscustomobject]@{status='failed';result_reason='old PID remains';failure_stage='verification'}
+        }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 2
+        $saved.actions[0].status | Should -BeExactly 'failed'
+        $saved.actions[0].result_reason | Should -BeExactly 'old PID remains'
+        $saved.actions[0].failure_stage | Should -BeExactly 'verification'
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+    }
+
+    It 'mixed actions lazily create backup immediately before the first persistent mutation' -TestCases @(
+        @{ stopFirst=$true; expected=@('one-time','backup','persistent') }
+        @{ stopFirst=$false; expected=@('backup','persistent','one-time') }
+    ) {
+        param($stopFirst, $expected)
+        $stop = New-ServiceStopCleanAction
+        $persistent = New-CleanExitAction 'PersistentSvc'
+        $ordered = if ($stopFirst) { @($stop,$persistent) } else { @($persistent,$stop) }
+        $path = Write-CleanExitPending ("mixed-$stopFirst.json") $ordered
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        $script:executionOrder = [System.Collections.ArrayList]::new()
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { $null = $script:executionOrder.Add('backup'); $BackupDir }
+        Mock Invoke-ServiceDisableAction { $null = $script:executionOrder.Add('persistent'); [pscustomobject]@{status='success';reason='done'} }
+        Mock Invoke-ServiceProcessStopAction { $null = $script:executionOrder.Add('one-time'); [pscustomobject]@{status='success';result_reason='done';failure_stage=''} }
+        try { $exitCode = Invoke-Clean } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 0
+        @($script:executionOrder) | Should -Be $expected
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 1 -Exactly
     }
 
     It 'cpu-cleaner clean 分支显式使用 Invoke-Clean 返回码退出' {

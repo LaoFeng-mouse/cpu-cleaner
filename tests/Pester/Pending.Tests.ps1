@@ -803,7 +803,7 @@ Invoke-Clean
         $p.resolved[0].task_path | Should -BeExactly '\Lenovo\LenovoMachineFixUser_OOBE_AUTO_Notification'
     }
 
-    It 'preserves complete running HRWSCCtrl hit identity without promoting before executor contract' {
+    It 'promotes a complete running HRWSCCtrl exact identity to a one-time action' {
         $profiles = Load-Profiles -Path $script:ProfileFile
         $profile = @($profiles.profiles | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
         $binaryDir = Join-Path $TestDrive 'Program Files\Lenovo Security Center'
@@ -833,15 +833,29 @@ Invoke-Clean
         $hit.process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.0000000Z'
 
         Save-PendingActions -Hits @($hit) -Suspicious @()
-        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $pendingJson = Get-Content $script:PendingFile -Raw -Encoding UTF8
+        $p = $pendingJson | ConvertFrom-Json -DateKind String
 
-        @($p.actions).Count | Should -Be 0
+        @($p.actions).Count | Should -Be 1
         @($p.resolved).Count | Should -Be 0
-        @($p.observations).Count | Should -Be 1
-        $p.observations[0].execution_class | Should -BeExactly 'observation'
-        $p.observations[0].action | Should -BeExactly 'stop_service_process'
-        $p.observations[0].default_selected | Should -BeFalse
-        $p.observations[0].requires_confirmation | Should -BeFalse
+        @($p.observations).Count | Should -Be 0
+        $p.actions[0].execution_class | Should -BeExactly 'manual_impact'
+        $p.actions[0].action | Should -BeExactly 'stop_service_process'
+        $p.actions[0].service_name | Should -BeExactly 'HRWSCCtrl'
+        $p.actions[0].service_binary_path | Should -BeExactly $binary
+        $p.actions[0].process_id | Should -Be 4321
+        $p.actions[0].process_name | Should -BeExactly 'wsctrl11.exe'
+        $p.actions[0].process_path | Should -BeExactly $binary
+        $p.actions[0].process_start_time_utc | Should -BeOfType [string]
+        $p.actions[0].process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.0000000Z'
+        $p.actions[0].default_selected | Should -BeFalse
+        $p.actions[0].requires_confirmation | Should -BeTrue
+    }
+
+    It 'accepts stop_service_process only for service hits with exact provenance' {
+        Test-ActionMatchesHitType 'stop_service_process' 'service' | Should -BeTrue
+        Test-ActionMatchesHitType 'stop_service_process' 'process' | Should -BeFalse
+        Test-ActionMatchesHitType 'stop_service_process' 'task' | Should -BeFalse
     }
 
     It 'persists stopped HRWSCCtrl exact hit as observation rather than resolved disabled' {
