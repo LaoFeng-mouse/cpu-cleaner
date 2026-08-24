@@ -481,11 +481,16 @@ function Get-GuiSuspiciousViewItems($Pending) {
     if (-not $Pending.suspicious) { return @() }
     foreach ($item in @($Pending.suspicious)) {
         $canStop = ($item.CanStop -is [bool]) -and $item.CanStop -and ([string]$item.status -cin @('pending','failed'))
+        $necessity = [string]$item.Necessity
+        if ([string]::IsNullOrWhiteSpace($necessity)) { $necessity = '按需结束' }
+        $impact = [string]$item.Impact
+        if ([string]::IsNullOrWhiteSpace($impact)) { $impact = '只结束当前进程实例；正在使用的功能可能中断，后台也可能自动重启。' }
         $rows += [pscustomobject]@{
             IsChecked = $false; CanStop = [bool]$canStop; PID = $item.PID
             PidLabel = 'PID ' + [string]$item.PID; Name = [string]$item.Name
             Path = [string]$item.Path; StartTimeUtc = [string]$item.StartTimeUtc
-            Reason = [string]$item.Reason; StopBlockReason = [string]$item.StopBlockReason
+            Necessity = $necessity; Reason = [string]$item.Reason; Impact = $impact
+            StopBlockReason = [string]$item.StopBlockReason
             status = [string]$item.status; _raw = $item
         }
     }

@@ -1347,6 +1347,7 @@ Invoke-Clean
         $s = [pscustomobject]@{
             PID=42; Name='suspect'; 'CPU%'=8; MemMB=50; Path='C:\Temp\suspect.exe'; Reason='temp'
             StartTimeUtc='2026-08-11T00:00:00.0000000Z'; CanStop=$true; StopBlockReason=''
+            Necessity='按需结束'; Impact='只结束当前进程，正在使用的功能可能中断'
         }
 
         Save-PendingActions -Hits @() -Suspicious @($s)
@@ -1355,6 +1356,8 @@ Invoke-Clean
         $pending.suspicious[0].status | Should -BeExactly 'pending'
         $pending.suspicious[0].StartTimeUtc | Should -BeExactly $s.StartTimeUtc
         $pending.suspicious[0].CanStop | Should -BeTrue
+        $pending.suspicious[0].Necessity | Should -BeExactly '按需结束'
+        $pending.suspicious[0].Impact | Should -BeExactly '只结束当前进程，正在使用的功能可能中断'
     }
     It '选择的可疑进程拒绝数组 PID 和缺失身份字段' {
         $arrayPid = [pscustomobject]@{PID=@(42);Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;status='pending'}
@@ -1364,7 +1367,7 @@ Invoke-Clean
         { Assert-SuspiciousPendingRow $missingPath -RequireStoppable } | Should -Throw '*Path*'
     }
     It '可疑停止子集保持与 OEM actions resolved observations 完全分离' {
-        $row = [pscustomobject]@{PID=42;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;StopBlockReason='';status='pending';Reason='temp';'CPU%'=8;MemMB=50}
+        $row = [pscustomobject]@{PID=42;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z';CanStop=$true;StopBlockReason='';status='pending';Reason='temp';Necessity='按需结束';Impact='只结束当前进程';'CPU%'=8;MemMB=50}
 
         $subset = Build-SuspiciousSubsetPayload @($row)
 
@@ -1375,5 +1378,7 @@ Invoke-Clean
         @($subset.observations).Count | Should -Be 0
         @($subset.suspicious).Count | Should -Be 1
         $subset.suspicious[0].PID | Should -Be 42
+        $subset.suspicious[0].Necessity | Should -BeExactly '按需结束'
+        $subset.suspicious[0].Impact | Should -BeExactly '只结束当前进程'
     }
 }

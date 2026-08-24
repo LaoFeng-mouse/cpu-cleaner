@@ -44,14 +44,25 @@ Describe 'one-time suspicious process stop' {
         }
     }
 
-    It 'never stops a protected process name or the current Pester PID' {
+    It 'never stops a protected process in a trusted Windows path or the current Pester PID' {
         Mock Get-BoundProcessTarget { throw 'must not inspect protected target' }
         Mock Stop-BoundProcessTarget { $true }
-        $protected = $script:selectedRow.PSObject.Copy(); $protected.Name='lsass'
+        $protected = $script:selectedRow.PSObject.Copy(); $protected.Name='lsass'; $protected.Path='C:\Windows\System32\lsass.exe'
         (Invoke-OneTimeProcessStop $protected).status | Should -BeExactly 'skipped'
         $self = $script:selectedRow.PSObject.Copy(); $self.PID=$PID
         (Invoke-OneTimeProcessStop $self).status | Should -BeExactly 'skipped'
         Should -Invoke Stop-BoundProcessTarget -Times 0 -Exactly
+    }
+
+    It 'allows an exact reviewed process that only masquerades under a protected name outside Windows' {
+        $masquerader = $script:selectedRow.PSObject.Copy(); $masquerader.Name='svchost'; $masquerader.Path='C:\Users\Public\Downloads\svchost.exe'
+        Mock Get-BoundProcessTarget { New-TestBoundTarget ([pscustomobject]@{PID=4242;Name='svchost';Path='C:\Users\Public\Downloads\svchost.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'}) }
+        Mock Stop-BoundProcessTarget { $true }
+
+        $result = Invoke-OneTimeProcessStop $masquerader
+
+        $result.status | Should -BeExactly 'success'
+        Should -Invoke Stop-BoundProcessTarget -Times 1 -Exactly
     }
 
     It 'skips when the PID has disappeared' {

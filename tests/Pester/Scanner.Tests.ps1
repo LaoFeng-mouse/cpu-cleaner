@@ -84,6 +84,56 @@ Describe '扫描器与评分' {
         $row.CanStop | Should -BeFalse
         $row.StopBlockReason | Should -Match '身份不完整'
     }
+    It '有效签名的第三方高 CPU 进程仍进入按需停止清单' {
+        Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status='Valid'; SignerCertificate=[pscustomobject]@{ Subject='CN=Vendor' } } }
+        $top = [pscustomobject]@{
+            PID=4301; Name='VendorAgent'; 'CPU%'=6.5; CPUPeak=9.2; SamplesHigh=4; Samples=5; MemMB=120
+            Path='C:\Program Files\Vendor\VendorAgent.exe'; StartTimeUtc='2026-08-24T00:00:00.0000000Z'
+        }
+
+        $row = @(Get-SuspiciousProcesses @($top))[0]
+
+        $row.Name | Should -BeExactly 'VendorAgent'
+        $row.CanStop | Should -BeTrue
+        $row.Necessity | Should -BeExactly '按需结束'
+        $row.Reason | Should -Match '高 CPU'
+        $row.Impact | Should -Match '当前进程'
+    }
+    It '系统进程名若运行在可疑路径不能冒充受保护进程' {
+        Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status='NotSigned' } }
+        $top = [pscustomobject]@{
+            PID=4302; Name='svchost'; 'CPU%'=7; CPUPeak=8; SamplesHigh=4; Samples=5; MemMB=30
+            Path='C:\Users\Public\Downloads\svchost.exe'; StartTimeUtc='2026-08-24T00:00:00.0000000Z'
+        }
+
+        $row = @(Get-SuspiciousProcesses @($top))[0]
+
+        $row.Name | Should -BeExactly 'svchost'
+        $row.Reason | Should -Match '路径可疑'
+        $row.CanStop | Should -BeTrue
+    }
+    It '低 CPU 的普通第三方进程不进入停止清单' {
+        Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status='Valid' } }
+        $top = [pscustomobject]@{
+            PID=4303; Name='QuietAgent'; 'CPU%'=0.4; CPUPeak=0.8; SamplesHigh=0; Samples=5; MemMB=80
+            Path='C:\Program Files\Vendor\QuietAgent.exe'; StartTimeUtc='2026-08-24T00:00:00.0000000Z'
+        }
+
+        @(Get-SuspiciousProcesses @($top)).Count | Should -Be 0
+    }
+    It '高 CPU 进程命中特征规则时解释具体 OEM 原因' {
+        Mock Get-AuthenticodeSignature { [pscustomobject]@{ Status='Valid' } }
+        $top = [pscustomobject]@{
+            PID=4304; Name='mcpman'; 'CPU%'=8; CPUPeak=11; SamplesHigh=5; Samples=5; MemMB=90
+            Path='C:\ProgramData\Lenovo\LeMcpManager\mcpman.exe'; StartTimeUtc='2026-08-24T00:00:00.0000000Z'
+        }
+        $hits = @([pscustomobject]@{ hit_type='process'; process_id=4304; name_cn='联想 AI MCP 管理器'; reason_cn='联想 AI 全家桶核心后台' })
+
+        $row = @(Get-SuspiciousProcesses @($top) $hits)[0]
+
+        $row.Reason | Should -Match '联想 AI MCP 管理器'
+        $row.Reason | Should -Match '联想 AI 全家桶核心后台'
+    }
     It 'CIM 服务采集被拒时 Get-Service fallback 保留观察身份但标记降级' {
         Mock Get-CimInstance { throw [System.UnauthorizedAccessException]::new('CIM denied') }
         Mock Get-Service {

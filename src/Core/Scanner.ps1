@@ -169,41 +169,82 @@ function Get-TopProcesses([int]$TopN = 12, [int]$Samples = 5, [int]$IntervalSec 
 }
 
 # ---------- 3. 未知高占用进程检测 (B3) ----------
-function Get-SuspiciousProcesses($TopProcs) {
+function Get-SuspiciousProcesses($TopProcs, $ProfileHits = @()) {
     $sysNames = @('System','System Idle Process','svchost','dwm','lsass','services','winlogon','csrss','conhost','explorer','fontdrvhost','registry','smss','wininit','Memory Compression','MsMpEng','audiodg','SearchIndexer','WmiPrvSE','spoolsv','taskhostw','ShellExperienceHost','RuntimeBroker','sihost','dllhost','ctfmon','schedsvc','winlogon','SecurityHealthSystray','powershell','cmd')
     $susp = @()
     foreach ($p in $TopProcs) {
-        if ($p.'CPU%' -lt 3) { continue }              # 只查高占用
-        if ($sysNames -contains $p.Name) { continue }  # 排除系统进程
-        $path = $p.Path
-        $reason = ''
-        if (-not $path) {
-            $reason = '无路径(可能是服务进程或已退出)'
-        } elseif ($path -match '\\Temp\\|\\AppData\\Roaming\\|\\AppData\\Local\\Temp\\|\\Downloads\\') {
-            $reason = '路径可疑: ' + $path
-        } else {
+        $averageCpu = if ($p.'CPU%' -is [ValueType]) { [double]$p.'CPU%' } else { 0.0 }
+        $peakCpu = if ($p.PSObject.Properties.Name -contains 'CPUPeak' -and $p.CPUPeak -is [ValueType]) { [double]$p.CPUPeak } else { $averageCpu }
+        $samples = if ($p.PSObject.Properties.Name -contains 'Samples' -and $p.Samples -is [ValueType]) { [int]$p.Samples } else { 0 }
+        $samplesHigh = if ($p.PSObject.Properties.Name -contains 'SamplesHigh' -and $p.SamplesHigh -is [ValueType]) { [int]$p.SamplesHigh } else { 0 }
+        $sustained = $samples -ge 3 -and $samplesHigh -ge [math]::Ceiling($samples / 2.0)
+        if ($averageCpu -lt 3 -and $peakCpu -lt 5 -and -not $sustained) { continue }
+
+        $path = [string]$p.Path
+        $pathLooksSuspicious = -not [string]::IsNullOrWhiteSpace($path) -and $path -match '\\Temp\\|\\AppData\\Roaming\\|\\AppData\\Local\\Temp\\|\\Downloads\\'
+        $signatureStatus = 'Unknown'
+        $signerSubject = ''
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
             try {
                 $sig = Get-AuthenticodeSignature $path -ErrorAction Stop
-                if ($sig.Status -ne 'Valid') { $reason = '无有效数字签名: ' + $path }
-            } catch { $reason = '签名检查失败: ' + $path }
+                $signatureStatus = [string]$sig.Status
+                if ($sig.PSObject.Properties.Name -contains 'SignerCertificate' -and $null -ne $sig.SignerCertificate) {
+                    $signerSubject = [string]$sig.SignerCertificate.Subject
+                }
+            } catch { $signatureStatus = 'CheckFailed' }
         }
-        if ($reason) {
-            $completeIdentity = [int64]$p.PID -gt 0 -and
-                -not [string]::IsNullOrWhiteSpace([string]$p.Name) -and
-                -not [string]::IsNullOrWhiteSpace([string]$p.Path) -and
-                [System.IO.Path]::IsPathRooted([string]$p.Path) -and
-                -not [string]::IsNullOrWhiteSpace([string]$p.StartTimeUtc)
-            $susp += [pscustomobject]@{
-                PID = $p.PID
-                Name = $p.Name
-                'CPU%' = $p.'CPU%'
-                MemMB = $p.MemMB
-                Path = $path
-                Reason = $reason
-                StartTimeUtc = [string]$p.StartTimeUtc
-                CanStop = [bool]$completeIdentity
-                StopBlockReason = if ($completeIdentity) { '' } else { '进程身份不完整，不能安全停止' }
-            }
+
+        # 仅保护可信位置/微软签名的系统进程；可疑目录中的同名程序不能借名称逃过扫描。
+        if ($sysNames -contains $p.Name) {
+            $underWindows = -not [string]::IsNullOrWhiteSpace($path) -and
+                $path.StartsWith(([Environment]::GetFolderPath('Windows') + '\\'), [System.StringComparison]::OrdinalIgnoreCase)
+            $microsoftSigned = $signatureStatus -eq 'Valid' -and $signerSubject -match 'Microsoft'
+            if ([string]::IsNullOrWhiteSpace($path) -or $underWindows -or ($microsoftSigned -and -not $pathLooksSuspicious)) { continue }
+        }
+
+        $matchedProfile = @($ProfileHits | Where-Object {
+            $_.hit_type -eq 'process' -and (
+                (($_.process_id -is [ValueType]) -and [int64]$_.process_id -eq [int64]$p.PID) -or
+                (-not [string]::IsNullOrWhiteSpace([string]$_.process_name) -and [string]$_.process_name -ieq [string]$p.Name)
+            )
+        } | Select-Object -First 1)
+        $reasonParts = @('高 CPU: 平均 {0}% / 峰值 {1}% / 持续 {2}/{3}' -f $averageCpu, $peakCpu, $samplesHigh, $samples)
+        if ($matchedProfile.Count -gt 0) {
+            $profileName = [string]$matchedProfile[0].name_cn
+            $profileReason = [string]$matchedProfile[0].reason_cn
+            if (-not [string]::IsNullOrWhiteSpace($profileName)) { $reasonParts += ('命中规则: ' + $profileName) }
+            if (-not [string]::IsNullOrWhiteSpace($profileReason)) { $reasonParts += $profileReason }
+        }
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            $reasonParts += '无路径(可能是服务进程或已退出)'
+        } elseif ($pathLooksSuspicious) {
+            $reasonParts += ('路径可疑: ' + $path)
+        } elseif ($signatureStatus -ne 'Valid') {
+            $reasonParts += ('无有效数字签名: ' + $path)
+        } else {
+            $reasonParts += '有效签名的第三方进程；是否结束取决于你是否正在使用对应功能'
+        }
+
+        $completeIdentity = [int64]$p.PID -gt 0 -and
+            -not [string]::IsNullOrWhiteSpace([string]$p.Name) -and
+            -not [string]::IsNullOrWhiteSpace($path) -and
+            [System.IO.Path]::IsPathRooted($path) -and
+            -not [string]::IsNullOrWhiteSpace([string]$p.StartTimeUtc)
+        $susp += [pscustomobject]@{
+            PID = $p.PID
+            Name = $p.Name
+            'CPU%' = $averageCpu
+            CPUPeak = $peakCpu
+            SamplesHigh = $samplesHigh
+            Samples = $samples
+            MemMB = $p.MemMB
+            Path = $path
+            Necessity = '按需结束'
+            Reason = ($reasonParts -join '；')
+            Impact = '只结束当前进程实例；正在使用的功能可能中断，未保存的数据可能丢失，后台也可能自动重启。'
+            StartTimeUtc = [string]$p.StartTimeUtc
+            CanStop = [bool]$completeIdentity
+            StopBlockReason = if ($completeIdentity) { '' } else { '进程身份不完整，不能安全停止' }
         }
     }
     return $susp
@@ -581,12 +622,12 @@ function Invoke-ScanMode {
     Reset-ScanDiagnostics
     Write-Step '读取系统信息...';             $sys = Get-SystemInfo
     Write-Step '检查高占用进程...';           $procs = Get-TopProcesses 12
-    $susp = Get-SuspiciousProcesses $procs
     Write-Step '检查系统服务与计划任务...';   $inventory = Get-ScanServiceTaskInventory -InventoryNonce $InventoryNonce -AllowLimited:$AllowLimited
     $svcs = [object[]]@($inventory.Services)
     $tasks = [object[]]@($inventory.Tasks)
     Write-Step '检查启动项...';               $autos = Get-AutoStart
     Write-Step '匹配安全规则...';             $hits = Match-Profiles -Services $svcs -AutoStarts $autos -Tasks $tasks -TopProcs $procs
+    $susp = Get-SuspiciousProcesses $procs $hits
     $autoStartNames = Get-AutoStartProcessNames $autos
 
     Write-Step '生成扫描报告...'

@@ -1216,6 +1216,7 @@ Describe '勾选视图 (v1.5.5)' {
         $pending.suspicious = @([pscustomobject]@{
             PID=[int64]42; Name='suspect'; Path='C:\Temp\suspect.exe'
             StartTimeUtc='2026-08-11T00:00:00.0000000Z'; Reason='temp'
+            Necessity='按需结束'; Impact='只结束当前进程，正在使用的功能可能中断'
             CanStop=$true; StopBlockReason=''; status='pending'
         })
         $rows = @(Get-GuiSuspiciousViewItems $pending)
@@ -1223,6 +1224,8 @@ Describe '勾选视图 (v1.5.5)' {
         $rows.Count | Should -Be 1
         $rows[0].IsChecked | Should -BeFalse
         $rows[0].CanStop | Should -BeTrue
+        $rows[0].Necessity | Should -BeExactly '按需结束'
+        $rows[0].Impact | Should -Match '当前进程'
         $script:ReviewedPendingSnapshot = $pending
         $emptyKeys = [System.Collections.Generic.List[string]]::new()
         $script:ReviewedActionIdentityKeys = $emptyKeys.AsReadOnly()

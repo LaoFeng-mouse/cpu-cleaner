@@ -139,6 +139,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 - **敌对清单防护：管理员 clean 拒绝重复 JSON 键、超过 5 MiB、容器深度超过 64、非法 UTF-8 或读取期间变化的 pending 文件，并在同一受保护文件句柄上完成检查与读取**
 - **执行后验证：每个动作执行完重新读取真实状态确认（服务 StartType / 注册表值 / 任务 State），验证通过才标记 success，否则 failed**
 - **状态机：** `actions` 中的项目按 `pending → success / failed / skipped / manual_required` 流转；已完成项目进入 `resolved`，重跑不会重复清理，观察项目保留在 `observations`
+- **高 CPU 可选处理：** 多次采样达到高占用条件且不是可信 Windows 核心身份的进程会进入独立 `suspicious` 列表，即使它带有效第三方签名；默认不勾选，并逐条显示是否必要、列出原因和处理影响。执行只结束当前进程实例，不删除文件、不关闭自启，并按 PID、名称、绝对路径和 UTC 启动时间重新绑定验证；可信 Windows 路径中的核心进程继续拒绝处理，可疑目录中的冒名系统进程不能只凭名称绕过扫描
 - **自动备份与恢复：** 每个处理动作在系统变更前备份原状态到 `backups\时间戳\`；restore 只接受本工具创建且校验通过的备份，恢复后重新读取并核对状态
 - 卸载动作不自动执行：只提示，人工去"设置-应用"卸载（卸载是重操作，交给用户）
 

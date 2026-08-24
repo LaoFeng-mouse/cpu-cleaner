@@ -260,7 +260,8 @@ function Build-SuspiciousSubsetPayload($Rows) {
         $selected += [pscustomobject]@{
             PID=[int]$row.PID; Name=[string]$row.Name; Path=[string]$row.Path; StartTimeUtc=[string]$row.StartTimeUtc
             CanStop=$true; StopBlockReason=''; status=[string]$row.status; Reason=[string]$row.Reason
-            'CPU%'=$row.'CPU%'; MemMB=$row.MemMB
+            Necessity=[string]$row.Necessity; Impact=[string]$row.Impact
+            'CPU%'=$row.'CPU%'; CPUPeak=$row.CPUPeak; SamplesHigh=$row.SamplesHigh; Samples=$row.Samples; MemMB=$row.MemMB
         }
     }
     return [pscustomobject]@{
@@ -1375,6 +1376,8 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             $stopBlockReason = if ($_.StopBlockReason -is [string]) { $_.StopBlockReason } else { '' }
             [pscustomobject]@{
                 PID=$_.PID; Name=$_.Name; 'CPU%'=$_.'CPU%'; MemMB=$_.MemMB; Path=$_.Path; Reason=$_.Reason
+                CPUPeak=$_.CPUPeak; SamplesHigh=$_.SamplesHigh; Samples=$_.Samples
+                Necessity=$_.Necessity; Impact=$_.Impact
                 StartTimeUtc=$_.StartTimeUtc; CanStop=[bool]$canStop; StopBlockReason=$stopBlockReason; status='pending'
             }
         })
@@ -2282,7 +2285,12 @@ function Invoke-OneTimeProcessStop($Row) {
     if ($Row.status -cnotin @('pending','failed')) { return New-ProcessStopResult $Row 'skipped' '该条目已是终态' }
     $protectedNames = @('system','system idle process','registry','smss','csrss','wininit','services','lsass','winlogon','svchost','fontdrvhost','dwm')
     $normalizedName = Normalize-ProcessName ([string]$Row.Name)
-    if ($protectedNames -contains $normalizedName -or [int]$Row.PID -eq [int]$PID) {
+    $windowsPrefix = ([Environment]::GetFolderPath('Windows').TrimEnd('\') + '\')
+    $trustedWindowsPath = -not [string]::IsNullOrWhiteSpace([string]$Row.Path) -and
+        ([string]$Row.Path).StartsWith($windowsPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    $protectedSystemIdentity = $protectedNames -contains $normalizedName -and
+        ([string]::IsNullOrWhiteSpace([string]$Row.Path) -or $trustedWindowsPath)
+    if ($protectedSystemIdentity -or [int]$Row.PID -eq [int]$PID) {
         return New-ProcessStopResult $Row 'skipped' '受保护进程或当前执行进程，拒绝停止'
     }
     $target = Get-BoundProcessTarget ([int]$Row.PID)
