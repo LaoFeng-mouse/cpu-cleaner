@@ -3,6 +3,7 @@
 $script:ValidRisks   = @('high','medium','low')
 $script:ValidActions = @('disable_service','remove_autostart','disable_task','uninstall','investigate','none')
 $script:DangerousActions = @('disable_service','remove_autostart','disable_task','uninstall')
+$script:ValidCleanupExecutionClasses = @('automatic_safe','manual_impact')
 
 # 旧格式 v1 → v2 转换 (type/match/action → detect/actions)
 function Convert-ProfilesV1ToV2($old) {
@@ -74,7 +75,12 @@ function Test-DetectMatch($target, $pattern, $Context = $null) {
             $sig = $null
             if ($Context -and $Context.Signature) { $sig = $Context.Signature }
             elseif ($Context -and $Context.Path) { try { $sig = Get-AuthenticodeSignature $Context.Path -ErrorAction SilentlyContinue } catch {} }
-            return $sig -and $sig.SignerCertificate -and ($sig.SignerCertificate.Subject -match $n.match)
+            $certificate = if ($sig) { $sig.SignerCertificate } else { $null }
+            if (-not $certificate) { return $false }
+            $subjectText = [string]$certificate.Subject
+            try { [void][regex]::new($n.match) }
+            catch [System.ArgumentException] { return $false }
+            return ($subjectText -match $n.match)
         }
         'sha256'   {
             $hash = ''
@@ -96,9 +102,23 @@ function Test-ProcessDetectMatch($target, $pattern, $Context = $null) {
     return Test-DetectMatch $normalizedTarget $matchPattern -Context $Context
 }
 
-# 按规则声明顺序和候选字段顺序寻找首个命中，并返回该命中的可审计证据
+function Get-DetectMatchStrength([string]$Type) {
+    switch ($Type) {
+        'exact' { return 0 }
+        'path' { return 1 }
+        'contains' { return 2 }
+        'regex' { return 3 }
+        default { return 4 }
+    }
+}
+
+# 收集真实命中并优先返回最强证据; 同强度保持规则声明和候选字段顺序
 function Find-DetectMatch($Patterns, $Candidates, [switch]$NormalizeProcessName) {
-    foreach ($pattern in @($Patterns)) {
+    $actualMatches = @()
+    $patternList = @($Patterns)
+    $candidateList = @($Candidates)
+    for ($patternIndex = 0; $patternIndex -lt $patternList.Count; $patternIndex++) {
+        $pattern = $patternList[$patternIndex]
         $n = Normalize-DetectItem $pattern
         $processField = ''
         if ($NormalizeProcessName) {
@@ -112,10 +132,12 @@ function Find-DetectMatch($Patterns, $Candidates, [switch]$NormalizeProcessName)
                 'path'      { $processField = 'process_path' }
                 'publisher' { $processField = 'process_path' }
                 'sha256'    { $processField = 'process_path' }
-                default     { continue }
+                default     { $processField = '' }
             }
+            if (-not $processField) { continue }
         }
-        foreach ($candidate in @($Candidates)) {
+        for ($candidateIndex = 0; $candidateIndex -lt $candidateList.Count; $candidateIndex++) {
+            $candidate = $candidateList[$candidateIndex]
             if (-not $candidate) { continue }
             $field = [string]$candidate.field
             if ($NormalizeProcessName -and $field -ne $processField) { continue }
@@ -126,15 +148,24 @@ function Find-DetectMatch($Patterns, $Candidates, [switch]$NormalizeProcessName)
                 $matched = Test-DetectMatch $candidate.value $n -Context $candidate.context
             }
             if ($matched) {
-                return [pscustomobject]@{
+                $actualMatches += [pscustomobject]@{
                     matched_pattern = $n.match
                     matched_type = $n.type
                     matched_field = $field
+                    strength = Get-DetectMatchStrength $n.type
+                    declaration_index = $patternIndex
+                    candidate_index = $candidateIndex
                 }
             }
         }
     }
-    return $null
+    $bestMatch = $actualMatches | Sort-Object -Property strength, declaration_index, candidate_index | Select-Object -First 1
+    if (-not $bestMatch) { return $null }
+    return [pscustomobject]@{
+        matched_pattern = $bestMatch.matched_pattern
+        matched_type = $bestMatch.matched_type
+        matched_field = $bestMatch.matched_field
+    }
 }
 
 # v1.6.0: v2 → v3 迁移 — detect 字符串对象化 + 保留历史 execution 审计字段
@@ -226,13 +257,13 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
             else {
                 foreach ($ak in Get-ActionKeys $p.actions) {
                     $av = Get-ActionFor $p.actions $ak
-                    if ($script:ValidActions -notcontains $av) { $errors += "id=$($p.id) actions.$ak 非法: $av" }
+                    if ($av -isnot [string] -or $script:ValidActions -cnotcontains $av) { $errors += "id=$($p.id) actions.$ak 非法: $av" }
                 }
                 # safe=false 只能配 none/investigate
                 if ($p.safe -eq $false) {
                     foreach ($ak in Get-ActionKeys $p.actions) {
                         $av = Get-ActionFor $p.actions $ak
-                        if ($script:DangerousActions -contains $av) {
+                        if ($script:DangerousActions -ccontains $av) {
                             $errors += "id=$($p.id) safe=false 但 actions.$ak=$av (危险动作禁止)"
                         }
                     }
@@ -241,7 +272,7 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                 if ($hasTested -and $p.evidence.tested -is [bool] -and $p.evidence.tested -eq $false) {
                     foreach ($ak in Get-ActionKeys $p.actions) {
                         $av = Get-ActionFor $p.actions $ak
-                        if ($script:DangerousActions -contains $av) {
+                        if ($script:DangerousActions -ccontains $av) {
                             $errors += "id=$($p.id) evidence.tested=false 但 actions.$ak=$av (未实测规则禁止危险动作)"
                         }
                     }
@@ -252,6 +283,79 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                 $ex = $p.execution
                 if ($ex.PSObject.Properties.Name -contains 'allow_auto' -and ($ex.allow_auto -isnot [bool])) {
                     $errors += "id=$($p.id) execution.allow_auto 必须是布尔值"
+                }
+            }
+
+            $hasDangerousManualAction = $false
+            $hasManualActions = $p.PSObject.Properties.Name -contains 'manual_actions'
+            if ($hasManualActions) {
+                $manualActions = $p.PSObject.Properties['manual_actions'].Value
+                if (-not (Test-ObjectContainer $manualActions)) {
+                    $errors += "id=$($p.id) manual_actions 必须是对象"
+                } else {
+                    foreach ($ak in Get-ActionKeys $manualActions) {
+                        $av = Get-ActionFor $manualActions $ak
+                        if ($av -isnot [string] -or $script:ValidActions -cnotcontains $av) {
+                            $errors += "id=$($p.id) manual_actions.$ak 非法: $av"
+                        }
+                        if ($script:DangerousActions -ccontains $av) {
+                            $hasDangerousManualAction = $true
+                        }
+                    }
+                }
+            }
+
+            $policy = $null
+            $hasCleanupPolicy = $p.PSObject.Properties.Name -contains 'cleanup_policy'
+            if ($hasCleanupPolicy) {
+                $rawPolicy = $p.PSObject.Properties['cleanup_policy'].Value
+                if (-not (Test-ObjectContainer $rawPolicy)) {
+                    $errors += "id=$($p.id) cleanup_policy 必须是对象"
+                } else {
+                    $policy = Get-CleanupPolicy $p
+                    if ($policy.execution_class -isnot [string] -or $script:ValidCleanupExecutionClasses -cnotcontains $policy.execution_class) {
+                        $errors += "id=$($p.id) cleanup_policy.execution_class 非法: $($policy.execution_class)"
+                    }
+                    if ($policy.necessity -isnot [string] -or [string]::IsNullOrWhiteSpace($policy.necessity)) {
+                        $errors += "id=$($p.id) cleanup_policy.necessity 必须是非空字符串"
+                    }
+                    foreach ($field in @('default_selected','requires_confirmation')) {
+                        if ($policy.$field -isnot [bool]) {
+                            $errors += "id=$($p.id) cleanup_policy.$field 必须是布尔值"
+                        }
+                    }
+                    foreach ($field in @('impact_cn','cleanup_reason_cn')) {
+                        if ($policy.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($policy.$field)) {
+                            $errors += "id=$($p.id) cleanup_policy.$field 必须是非空字符串"
+                        }
+                    }
+                }
+            }
+
+            if ($hasDangerousManualAction -and ($null -eq $policy -or $policy.execution_class -cne 'manual_impact')) {
+                $errors += "id=$($p.id) 危险 manual_actions 必须使用 manual_impact execution_class"
+            }
+            if ($hasManualActions -and (Test-ObjectContainer $manualActions)) {
+                foreach ($ak in Get-ActionKeys $manualActions) {
+                    $manualAction = Get-ActionFor $manualActions $ak
+                    $normalAction = Get-ActionFor $p.actions $ak
+                    if (($script:DangerousActions -ccontains $manualAction) -and ($script:DangerousActions -ccontains $normalAction)) {
+                        $errors += "id=$($p.id) actions.$ak 和 manual_actions.$ak 不能同时声明危险动作"
+                    }
+                }
+            }
+            if ($null -ne $policy -and $policy.execution_class -ceq 'manual_impact') {
+                if (-not $hasTested -or $p.evidence.tested -isnot [bool] -or $p.evidence.tested -ne $true) {
+                    $errors += "id=$($p.id) manual_impact 要求 evidence.tested=true"
+                }
+                if (-not $hasDangerousManualAction) {
+                    $errors += "id=$($p.id) manual_impact 要求危险 manual_actions"
+                }
+                if ($policy.default_selected -isnot [bool] -or $policy.default_selected -ne $false) {
+                    $errors += "id=$($p.id) manual_impact 要求 default_selected=false"
+                }
+                if ($policy.requires_confirmation -isnot [bool] -or $policy.requires_confirmation -ne $true) {
+                    $errors += "id=$($p.id) manual_impact 要求 requires_confirmation=true"
                 }
             }
         }
@@ -266,7 +370,7 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
 
 # 构造一条命中记录 (结构化字段)
 function New-Hit {
-    param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $action, $matchEvidence, $processId = 0, $processPath = '', $autostartValue = '')
+    param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $decision, $matchEvidence, $processId = 0, $processPath = '', $autostartValue = '')
     $matchedPattern = ''
     $matchedType = ''
     $matchedField = ''
@@ -277,7 +381,7 @@ function New-Hit {
     }
     return [pscustomobject]@{
         id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
-        risk = $p.risk; action = $action; safe = $p.safe; reason_cn = $p.reason_cn
+        risk = $p.risk; action = $decision.Action; safe = $p.safe; reason_cn = $p.reason_cn
         evidence = $p.evidence
         hit_type = $hitType
         detail = $detail
@@ -285,6 +389,12 @@ function New-Hit {
         autostart_source = $autostartSource; autostart_name = $autostartName; autostart_value = $autostartValue
         task_path = $taskPath; process_name = $procName
         matched_pattern = $matchedPattern; matched_type = $matchedType; matched_field = $matchedField
+        execution_class = $decision.ExecutionClass
+        necessity = $decision.Necessity
+        default_selected = $decision.DefaultSelected
+        requires_confirmation = $decision.RequiresConfirmation
+        impact_cn = $decision.ImpactCn
+        cleanup_reason_cn = $decision.CleanupReasonCn
         process_id = $processId; process_path = $processPath
     }
 }
@@ -307,15 +417,110 @@ function Get-ActionFor($act, $key) {
     return 'none'
 }
 
+function Get-ObjectPropertyValue($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+        return $null
+    }
+    if ($Object.PSObject.Properties.Name -contains $Name) { return $Object.$Name }
+    return $null
+}
+
+function Test-ObjectContainer($Value) {
+    return ($null -ne $Value -and ($Value -is [pscustomobject] -or $Value -is [System.Collections.IDictionary]))
+}
+
+function Get-ManualActionFor($profile, [string]$hitType) {
+    $manualActions = Get-ObjectPropertyValue $profile 'manual_actions'
+    if ($null -eq $manualActions) { return 'none' }
+    return Get-ActionFor $manualActions $hitType
+}
+
+function Get-CleanupPolicy($profile) {
+    $source = Get-ObjectPropertyValue $profile 'cleanup_policy'
+    if ($null -eq $source) { return $null }
+    return [pscustomobject][ordered]@{
+        execution_class = Get-ObjectPropertyValue $source 'execution_class'
+        necessity = Get-ObjectPropertyValue $source 'necessity'
+        default_selected = Get-ObjectPropertyValue $source 'default_selected'
+        requires_confirmation = Get-ObjectPropertyValue $source 'requires_confirmation'
+        impact_cn = Get-ObjectPropertyValue $source 'impact_cn'
+        cleanup_reason_cn = Get-ObjectPropertyValue $source 'cleanup_reason_cn'
+    }
+}
+
 # 危险动作只能由当前命中的窄规则证据授权; execution.allow_auto 仅保留作兼容/审计字段
-function Get-EffectiveHitAction($profile, $hitType, $evidence) {
+function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
     $declaredAction = Get-ActionFor $profile.actions $hitType
-    if ($script:DangerousActions -notcontains $declaredAction) { return $declaredAction }
-    if ($profile.PSObject.Properties.Name -notcontains 'safe' -or $profile.safe -isnot [bool] -or $profile.safe -ne $true) { return 'investigate' }
-    if ($profile.PSObject.Properties.Name -notcontains 'evidence' -or $null -eq $profile.evidence) { return 'investigate' }
-    if ($profile.evidence.PSObject.Properties.Name -notcontains 'tested' -or $profile.evidence.tested -isnot [bool] -or $profile.evidence.tested -ne $true) { return 'investigate' }
-    if (-not $evidence -or $evidence.matched_type -notin @('exact','path')) { return 'investigate' }
-    return $declaredAction
+    $manualAction = Get-ManualActionFor $profile $hitType
+    $policy = Get-CleanupPolicy $profile
+    $reasonCn = [string](Get-ObjectPropertyValue $profile 'reason_cn')
+    $neutralImpact = if ([string]::IsNullOrWhiteSpace($reasonCn)) { '具体功能影响未说明，处理前请确认目标用途' } else { $reasonCn }
+    $neutralCleanupReason = if ([string]::IsNullOrWhiteSpace($reasonCn)) { '该项目已实测可处理，但规则未提供具体清理原因' } else { $reasonCn }
+    $matchedType = [string](Get-ObjectPropertyValue $evidence 'matched_type')
+    $hasNarrowEvidence = @('exact','path') -ccontains $matchedType
+    $tested = Get-ObjectPropertyValue (Get-ObjectPropertyValue $profile 'evidence') 'tested'
+    $isTested = $tested -is [bool] -and $tested -eq $true
+
+    $automaticAuthorized = (
+        ($script:DangerousActions -ccontains $declaredAction) -and
+        ((Get-ObjectPropertyValue $profile 'safe') -is [bool]) -and
+        ((Get-ObjectPropertyValue $profile 'safe') -eq $true) -and
+        $isTested -and
+        $hasNarrowEvidence
+    )
+    if ($automaticAuthorized) {
+        $hasAutomaticPolicy = $null -ne $policy -and $policy.execution_class -ceq 'automatic_safe'
+        return [pscustomobject][ordered]@{
+            Action = $declaredAction
+            ExecutionClass = 'automatic_safe'
+            Necessity = if ($hasAutomaticPolicy) { $policy.necessity } else { 'recommended' }
+            DefaultSelected = if ($hasAutomaticPolicy) { $policy.default_selected } else { $true }
+            RequiresConfirmation = if ($hasAutomaticPolicy) { $policy.requires_confirmation } else { $false }
+            ImpactCn = if ($hasAutomaticPolicy) { $policy.impact_cn } else { $neutralImpact }
+            CleanupReasonCn = if ($hasAutomaticPolicy) { $policy.cleanup_reason_cn } else { $neutralCleanupReason }
+        }
+    }
+
+    $manualAuthorized = (
+        ($script:DangerousActions -cnotcontains $declaredAction) -and
+        ($script:DangerousActions -ccontains $manualAction) -and
+        $isTested -and
+        $hasNarrowEvidence -and
+        $null -ne $policy -and
+        $policy.execution_class -ceq 'manual_impact' -and
+        $policy.default_selected -is [bool] -and $policy.default_selected -eq $false -and
+        $policy.requires_confirmation -is [bool] -and $policy.requires_confirmation -eq $true -and
+        $policy.necessity -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.necessity) -and
+        $policy.impact_cn -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.impact_cn) -and
+        $policy.cleanup_reason_cn -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.cleanup_reason_cn)
+    )
+    if ($manualAuthorized) {
+        return [pscustomobject][ordered]@{
+            Action = $manualAction
+            ExecutionClass = 'manual_impact'
+            Necessity = $policy.necessity
+            DefaultSelected = $policy.default_selected
+            RequiresConfirmation = $policy.requires_confirmation
+            ImpactCn = $policy.impact_cn
+            CleanupReasonCn = $policy.cleanup_reason_cn
+        }
+    }
+
+    return [pscustomobject][ordered]@{
+        Action = 'investigate'
+        ExecutionClass = 'observation'
+        Necessity = if ($null -ne $policy -and $policy.necessity -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.necessity)) { $policy.necessity } else { 'informational' }
+        DefaultSelected = $false
+        RequiresConfirmation = $false
+        ImpactCn = if ($null -ne $policy -and $policy.impact_cn -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.impact_cn)) { $policy.impact_cn } else { $neutralImpact }
+        CleanupReasonCn = if ($null -ne $policy -and $policy.cleanup_reason_cn -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.cleanup_reason_cn)) { $policy.cleanup_reason_cn } else { $neutralCleanupReason }
+    }
+}
+
+function Get-EffectiveHitAction($profile, $hitType, $evidence) {
+    return (Get-HitExecutionDecision $profile $hitType $evidence).Action
 }
 
 # v1.5.1 P1: 进程名标准化 (mcpman.exe / MCPMAN.EXE / mcpman / C:\x\mcpman.exe → mcpman)
@@ -340,8 +545,8 @@ function Match-Profiles {
                     [pscustomobject]@{ field = 'service_display_name'; value = $s.DisplayName; context = $null }
                 )
                 if ($matchEvidence) {
-                    $action = Get-EffectiveHitAction $p 'service' $matchEvidence
-                    $hits += New-Hit -p $p -hitType 'service' -detail "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)" -srvName $s.Name -autostartSource '' -autostartName '' -taskPath '' -procName '' -action $action -matchEvidence $matchEvidence
+                    $decision = Get-HitExecutionDecision $p 'service' $matchEvidence
+                    $hits += New-Hit -p $p -hitType 'service' -detail "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)" -srvName $s.Name -autostartSource '' -autostartName '' -taskPath '' -procName '' -decision $decision -matchEvidence $matchEvidence
                 }
             }
         }
@@ -353,8 +558,8 @@ function Match-Profiles {
                     [pscustomobject]@{ field = 'autostart_value'; value = $a.Value; context = $null }
                 )
                 if ($matchEvidence) {
-                    $action = Get-EffectiveHitAction $p 'autostart' $matchEvidence
-                    $hits += New-Hit -p $p -hitType 'autostart' -detail "$($a.Name) => $($a.Value)" -srvName '' -autostartSource $a.Source -autostartName $a.Name -autostartValue $a.Value -taskPath '' -procName '' -action $action -matchEvidence $matchEvidence
+                    $decision = Get-HitExecutionDecision $p 'autostart' $matchEvidence
+                    $hits += New-Hit -p $p -hitType 'autostart' -detail "$($a.Name) => $($a.Value)" -srvName '' -autostartSource $a.Source -autostartName $a.Name -autostartValue $a.Value -taskPath '' -procName '' -decision $decision -matchEvidence $matchEvidence
                 }
             }
         }
@@ -367,8 +572,8 @@ function Match-Profiles {
                     [pscustomobject]@{ field = 'task_path'; value = $actionableTaskPath; context = $null }
                 )
                 if ($matchEvidence) {
-                    $action = Get-EffectiveHitAction $p 'task' $matchEvidence
-                    $hits += New-Hit -p $p -hitType 'task' -detail "$actionableTaskPath | $($t.State)" -srvName '' -autostartSource '' -autostartName '' -taskPath $actionableTaskPath -procName '' -action $action -matchEvidence $matchEvidence
+                    $decision = Get-HitExecutionDecision $p 'task' $matchEvidence
+                    $hits += New-Hit -p $p -hitType 'task' -detail "$actionableTaskPath | $($t.State)" -srvName '' -autostartSource '' -autostartName '' -taskPath $actionableTaskPath -procName '' -decision $decision -matchEvidence $matchEvidence
                 }
             }
         }
@@ -383,8 +588,8 @@ function Match-Profiles {
                     [pscustomobject]@{ field = 'process_path'; value = $processPath; context = $processContext }
                 ) -NormalizeProcessName
                 if ($matchEvidence) {
-                    $action = Get-EffectiveHitAction $p 'process' $matchEvidence
-                    $hits += New-Hit -p $p -hitType 'process' -detail "$($tp.Name) PID=$processId CPU=$($tp.'CPU%')%" -srvName '' -autostartSource '' -autostartName '' -taskPath '' -procName $tp.Name -action $action -matchEvidence $matchEvidence -processId $processId -processPath $processPath
+                    $decision = Get-HitExecutionDecision $p 'process' $matchEvidence
+                    $hits += New-Hit -p $p -hitType 'process' -detail "$($tp.Name) PID=$processId CPU=$($tp.'CPU%')%" -srvName '' -autostartSource '' -autostartName '' -taskPath '' -procName $tp.Name -decision $decision -matchEvidence $matchEvidence -processId $processId -processPath $processPath
                 }
             }
         }

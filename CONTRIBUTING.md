@@ -19,7 +19,7 @@
   - 实机验证过的规则：`evidence.tested=true` + `tested_models`（机型）+ `last_verified`（日期）
   - 没验证过的规则：`evidence.tested=false`，且 **actions 只能配 none/investigate**（程序会强制校验，危险动作直接拒绝加载）
   - 100 条验证过的规则，比 1000 条抄来的有价值——宁缺毋滥
-- `safe=false` 的规则 actions 只能配 none/investigate（程序强制校验）
+- `safe=false` 不能进入 `automatic_safe`；只有具备完整 `manual_impact`/`manual_actions` 策略并经过用户二次确认的精确命中，才可进入手动执行路径
 
 新增规则后跑一遍测试确认不破坏：
 
@@ -47,4 +47,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester; In
 
 - **安全优先**：破坏性操作（删文件/杀进程/卸载）永远要用户显式确认，绝不静默执行
 - **幂等**：重复执行同一操作结果一致
-- **可恢复**：每个处理动作都要有备份和恢复路径
+- **可恢复边界**：服务、自启、计划任务等持久化系统变更必须有备份和恢复路径；用户单独确认的 `stop_process` 只结束当前实例，明确不可恢复，且不得与持久化清理合并执行

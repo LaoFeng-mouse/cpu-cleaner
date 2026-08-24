@@ -8,6 +8,10 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
 $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:Lang = 'zh'   # zh / en
+$script:MaxGuiPendingJsonDepth = 64
+# Task4 的 manual-impact 摘要必须与管理员 clean 使用同一实现；这里只加载既有 core，不改其逻辑。
+. (Join-Path $script:Root 'src\Core\ProfileEngine.ps1')
+. (Join-Path $script:Root 'src\Core\ActionEngine.ps1')
 # v1.5.3: 测试模式 (SHUSHU_CLEANER_TEST=1) — 跳过单实例检查与窗口显示, 供 CI 无窗口验证 (Pester)
 $script:TestMode = ($env:SHUSHU_CLEANER_TEST -eq '1')
 
@@ -22,24 +26,25 @@ if ($existing -and -not $script:TestMode) {
 # ---------- 中英文文案 ----------
 $script:I18N = @{
     'zh' = @{
-        AppName='鼠鼠cleaner'; SubTitle='识别可以宽，执行必须窄'; Privilege='普通权限'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
+        AppName='鼠鼠 Cleaner'; SubTitle='识别可以宽，执行必须窄'; Privilege='普通权限'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
         Stage1='1 轻盈幻想'; Stage2='2 看清现实'; Stage3='3 谨慎整理'; Stage4='4 幻想落地'
         IdleBody='扫描只读，不会修改系统。'; ResultsNoMutation='目前尚未修改任何内容。'; ExecutingBody='正在逐项处理；每项均会备份并复核。'
         BtnStartScan='开始安全扫描'; BtnOpenReview='查看处理建议'; BtnSkipReview='这次先不处理'; BtnExecute='处理已选择项目'; BtnRescan='重新扫描'; BtnRetry='重试'
         ResultStatus='扫描完成，发现需要关注的项目'; ResultStatusEmpty='扫描完成，未发现匹配项'; ResultStatusDegraded='扫描完成，但扫描信息不完整'; ResultHeadlinePrefix='抓到 '; ResultHeadlineSuffix=' 个偷偷常驻的后台'; ResultHeadlineEmpty='这次没有抓到偷偷常驻的后台'; ResultHeadlineDegraded='部分信息使用兼容方式读取，暂不能判断电脑是否干净'; ResultsEvidence='专业证据与服务名称（点击展开）'; ResultsEvidenceEmpty='没有可展示的匹配证据。'; ScanResultDegradedSuffix='；部分分类使用兼容采集'
-        SelectAll='选择全部安全项'; ClearAll='清空选择'; ReviewBoundary='观察项不会自动执行；执行前将再次验证。'; TechnicalDetails='技术详情'; ErrorDetails='查看技术详情'
+        SelectAll='选择全部安全项'; ClearAll='清空选择'; ReviewBoundary='观察项不会自动执行；执行前将再次验证。'; SuspiciousBoundary='可疑进程：只结束本次进程，不删除文件或关闭自启。'; SuspiciousHint='默认不勾选；执行前会复核 PID、名称、路径和启动时间。'; BtnStopProcesses='一次性结束已选进程'; TechnicalDetails='技术详情'; ErrorDetails='查看技术详情'
         TabScan='🐹 1. 扫描（只读）'; TabPending='📋 2. 处理建议'; TabExec='⚙️ 3. 执行（管理员）'; TabResult='✅ 4. 结果与恢复'
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
         ScanPhaseInitial='正在检查服务、启动项、计划任务和进程'; ScanPhaseSystemInfo='读取系统信息'; ScanPhaseProcesses='检查高占用进程'; ScanPhaseServices='检查系统服务'; ScanPhaseAutoStart='检查启动项'; ScanPhaseTasks='检查计划任务'; ScanPhaseRules='匹配安全规则'; ScanPhaseReport='生成扫描报告'
-        ScanResultSummary='{0} 项可以安全处理，{1} 项建议观察'; ScanErrorSummary='扫描失败：{0}'; ScanNoMutation='扫描阶段未修改任何系统设置。'; ScanStatusStart='启动'; ScanStatusOutput='输出读取'; ScanStatusResults='结果处理'
+        ScanResultSummary='{0} 项可以安全处理，{1} 项建议观察'; ScanErrorSummary='扫描失败：{0}'; ScanNoMutation='扫描阶段未修改任何系统设置。'; ScanStatusStart='启动'; ScanStatusOutput='输出读取'; ScanStatusResults='结果处理'; ScanStatusTimeout='超时'
+        ScanRequestingInventory='正在请求管理员只读授权'; ScanCollectingInventory='正在读取完整服务和计划任务'; ScanValidatingInventory='正在验证受保护扫描结果'; ScanLimitedWarning='计划任务和完整服务信息未检查，本次结果不能判断电脑是否干净。'; ScanInventoryReadonly='只读取服务和计划任务，不会修改系统设置。'; ScanInventoryFailed='管理员只读采集失败'; ScanInventoryTimeout='管理员只读采集超过 180 秒；进程状态确认前将保持安全锁定。'
         ReviewErrorSummary='待处理清单已过期，必须重新扫描。'; ReviewNoMutation='没有执行任何系统修改。'
         BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
         ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
         BtnExec='处理已勾选项目（需要管理员）'; ExecEmpty='请先勾选要处理的项目（【2. 处理建议】页勾选）。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
-        ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2} / manual {3}'; ExecCloseBlocked='管理员处理仍在启动、运行或状态未知，暂不能关闭窗口。'; ExecStatusUnknown='管理员进程状态未知'
+        ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2} / manual {3}'; ExecPartialFailed='部分项目失败。'; ExecCloseBlocked='管理员处理仍在启动、运行或状态未知，暂不能关闭窗口。'; ExecStatusUnknown='管理员进程状态未知'
         ExecUnauthorized='未授权、未开始处理。'; ExecNotStarted='管理员授权未完成，未开始处理，系统设置没有变化。'; ExecPartialPossible='执行进程异常结束，可能已有部分动作执行。'; ExecResultReadFailed='无法完整读取逐项结果。'
         BtnResult='查看最近处理结果'; BtnRestore='恢复最近一次处理'; ResultHint='恢复会弹管理员窗口，选最新备份还原'
-        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复 {0}。'; RestoreNone='还没有备份，无需恢复。'; RestoreErr='恢复失败: {0}'; RestorePartial='恢复已执行，但部分条目验证失败。'; RestoreNotStarted='管理员授权未完成，恢复没有开始。'; RestoreMayHaveChanged='恢复进程异常结束，部分设置可能已经改变。'
+        NoBackup='还没有备份记录（还没处理过）。'; RestoreOk='已恢复最近的可信备份。'; RestoreNone='没有通过安全验证的可信备份。'; RestoreErr='恢复失败: {0}'; RestorePartial='恢复已执行，但部分条目验证失败。'; RestoreNotStarted='管理员授权未完成，恢复没有开始。'; RestoreStatusUnknown='恢复进程已启动，状态未知，可能已发生部分修改。'; RestoreMayHaveChanged='恢复进程异常结束，部分设置可能已经改变。'; LegacyBackupUnsupported='旧版项目目录备份不可自动恢复，请重新执行一次安全处理生成可信备份。'
         AutoStage1='轻盈幻想阶段插图'; AutoStage2='看清现实阶段插图'; AutoStage3='谨慎整理阶段插图'; AutoStage4='幻想落地阶段插图'; AutoResult='扫描结果摘要'; AutoCompleted='处理或恢复结果摘要'; AutoError='错误摘要'
         State_idle_Title='鼠鼠开始幻想'; State_idle_Sub='先做只读扫描，不会修改系统。'
         State_scanning_Title='正在看清现实'; State_scanning_Sub='只展示真实阶段，不伪造完成百分比。'
@@ -56,19 +61,20 @@ $script:I18N = @{
         IdleBody='Scanning is read-only and changes no system settings.'; ResultsNoMutation='Nothing has been changed yet.'; ExecutingBody='Processing item by item; each action is backed up and verified.'
         BtnStartScan='Start safe scan'; BtnOpenReview='Review recommendations'; BtnSkipReview='Not this time'; BtnExecute='Process selected items'; BtnRescan='Scan again'; BtnRetry='Retry'
         ResultStatus='Scan complete — items need attention'; ResultStatusEmpty='Scan complete — no matching items found'; ResultStatusDegraded='Scan complete, but some scan information is incomplete'; ResultHeadlinePrefix='Found '; ResultHeadlineSuffix=' resident background items'; ResultHeadlineEmpty='No resident background items found this time'; ResultHeadlineDegraded='Compatibility collection was used; this scan cannot declare the PC clean'; ResultsEvidence='Evidence and service names (expand)'; ResultsEvidenceEmpty='No matcher evidence to display.'; ScanResultDegradedSuffix='; some categories used compatibility collection'
-        SelectAll='Select all safe items'; ClearAll='Clear selection'; ReviewBoundary='Observation items never run automatically; every action is revalidated.'; TechnicalDetails='Technical details'; ErrorDetails='View technical details'
+        SelectAll='Select all safe items'; ClearAll='Clear selection'; ReviewBoundary='Observation items never run automatically; every action is revalidated.'; SuspiciousBoundary='Suspicious processes: stop this instance only; do not delete files or disable startup.'; SuspiciousHint='Unchecked by default; PID, name, path, and start time are revalidated.'; BtnStopProcesses='Stop selected once'; TechnicalDetails='Technical details'; ErrorDetails='View technical details'
         TabScan='🐹 1. Scan (read-only)'; TabPending='📋 2. Recommendations'; TabExec='⚙️ 3. Execute (admin)'; TabResult='✅ 4. Result & Restore'
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
         ScanPhaseInitial='Checking services, startup items, scheduled tasks, and processes'; ScanPhaseSystemInfo='Reading system information'; ScanPhaseProcesses='Checking high-usage processes'; ScanPhaseServices='Checking system services'; ScanPhaseAutoStart='Checking startup items'; ScanPhaseTasks='Checking scheduled tasks'; ScanPhaseRules='Matching safety rules'; ScanPhaseReport='Generating scan report'
-        ScanResultSummary='{0} safe item(s), {1} observation(s)'; ScanErrorSummary='Scan failed: {0}'; ScanNoMutation='The scan did not change any system settings.'; ScanStatusStart='startup'; ScanStatusOutput='output read'; ScanStatusResults='result processing'
+        ScanResultSummary='{0} safe item(s), {1} observation(s)'; ScanErrorSummary='Scan failed: {0}'; ScanNoMutation='The scan did not change any system settings.'; ScanStatusStart='startup'; ScanStatusOutput='output read'; ScanStatusResults='result processing'; ScanStatusTimeout='timeout'
+        ScanRequestingInventory='Requesting administrator read-only access'; ScanCollectingInventory='Reading the complete service and scheduled-task inventory'; ScanValidatingInventory='Validating the protected scan result'; ScanLimitedWarning='Scheduled tasks and complete service information were not checked; this scan cannot declare the PC clean.'; ScanInventoryReadonly='This reads services and scheduled tasks only and changes no system settings.'; ScanInventoryFailed='Administrator read-only inventory failed'; ScanInventoryTimeout='Administrator read-only inventory exceeded 180 seconds; safety lock remains until process state is confirmed.'
         ReviewErrorSummary='The pending review is stale and must be rescanned.'; ReviewNoMutation='No system settings were changed.'
         BtnLoad='Load Pending Items'; PendingHint='Risk & evidence shown; check items to process (unverified = observe only, unchecked)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Check items, then go to tab 3.'
         ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
         BtnExec='Process Checked Items (admin)'; ExecEmpty='Check items first (tab 2).'; ExecStart='Processing {0} item(s). UAC requested, click YES…'; ExecDone='Processing done. See tab 4 (restart PC recommended).'
-        ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2} / manual {3}'; ExecCloseBlocked='The elevated operation is starting, running, or has unknown status. Keep this window open.'; ExecStatusUnknown='Elevated process status is unknown'
+        ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2} / manual {3}'; ExecPartialFailed='Some items failed.'; ExecCloseBlocked='The elevated operation is starting, running, or has unknown status. Keep this window open.'; ExecStatusUnknown='Elevated process status is unknown'
         ExecUnauthorized='Not authorized; processing did not start.'; ExecNotStarted='Administrator authorization was not completed. Processing did not start and no system settings changed.'; ExecPartialPossible='The execution process ended abnormally; some actions may already have run.'; ExecResultReadFailed='The per-item result could not be read completely.'
         BtnResult='Show Latest Result'; BtnRestore='Restore Last Changes'; ResultHint='Restore opens admin window, picks newest backup'
-        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored {0}.'; RestoreNone='No backup, nothing to restore.'; RestoreErr='Restore failed: {0}'; RestorePartial='Restore ran, but some items failed verification.'; RestoreNotStarted='Administrator authorization was not completed; restore did not start.'; RestoreMayHaveChanged='The restore process ended abnormally; some settings may already have changed.'
+        NoBackup='No backup yet (nothing processed).'; RestoreOk='Restored the latest trusted backup.'; RestoreNone='No backup passed the trust validation.'; RestoreErr='Restore failed: {0}'; RestorePartial='Restore ran, but some items failed verification.'; RestoreNotStarted='Administrator authorization was not completed; restore did not start.'; RestoreStatusUnknown='The restore process started, but its status is unknown; partial changes may already have occurred.'; RestoreMayHaveChanged='The restore process ended abnormally; some settings may already have changed.'; LegacyBackupUnsupported='Legacy project-folder backups cannot be restored automatically. Run one safe cleanup to create a trusted backup.'
         AutoStage1='Light fantasy stage illustration'; AutoStage2='Face reality stage illustration'; AutoStage3='Careful cleanup stage illustration'; AutoStage4='Fantasy delivered stage illustration'; AutoResult='Scan result summary'; AutoCompleted='Cleanup or restore result summary'; AutoError='Error summary'
         State_idle_Title='The fantasy begins'; State_idle_Sub='Start with a read-only scan. No system settings will change.'
         State_scanning_Title='Looking at reality'; State_scanning_Sub='Showing real scan phases without a fabricated percentage.'
@@ -162,7 +168,8 @@ function Apply-Language {
         @('IdleBodyText','IdleBody'), @('ResultsNoMutationText','ResultsNoMutation'), @('ExecutingBodyText','ExecutingBody'),
         @('ResultStatusText','ResultStatus'), @('ResultHeadlinePrefix','ResultHeadlinePrefix'), @('ResultHeadlineSuffix','ResultHeadlineSuffix'), @('ResultsEvidenceExpander','ResultsEvidence'),
         @('BtnStartScan','BtnStartScan'), @('BtnOpenReview','BtnOpenReview'), @('BtnSkipReview','BtnSkipReview'), @('BtnExecute','BtnExecute'), @('BtnRescan','BtnRescan'), @('BtnRetry','BtnRetry'), @('BtnRestore','BtnRestore'),
-        @('BtnSelectAll','SelectAll'), @('BtnClearAll','ClearAll'), @('ReviewBoundaryText','ReviewBoundary')
+        @('BtnSelectAll','SelectAll'), @('BtnClearAll','ClearAll'), @('ReviewBoundaryText','ReviewBoundary'),
+        @('SuspiciousBoundaryText','SuspiciousBoundary'), @('SuspiciousSelectionHint','SuspiciousHint'), @('BtnStopProcesses','BtnStopProcesses')
     )) {
         $control = $w.FindName($entry[0])
         if ($null -eq $control) { throw "GUI control missing: $($entry[0])" }
@@ -174,7 +181,7 @@ function Apply-Language {
     $w.Resources['ErrorDetailsText'] = $t['ErrorDetails']
     $automationKeys = @{
         ImgStage1='AutoStage1'; ImgStage2='AutoStage2'; ImgStage3='AutoStage3'; ImgStage4='AutoStage4'
-        BtnStartScan='BtnStartScan'; BtnOpenReview='BtnOpenReview'; BtnSkipReview='BtnSkipReview'; BtnExecute='BtnExecute'; BtnRescan='BtnRescan'; BtnRetry='BtnRetry'; BtnRestore='BtnRestore'; BtnLang='LangLabel'
+        BtnStartScan='BtnStartScan'; BtnOpenReview='BtnOpenReview'; BtnSkipReview='BtnSkipReview'; BtnExecute='BtnExecute'; BtnStopProcesses='BtnStopProcesses'; BtnRescan='BtnRescan'; BtnRetry='BtnRetry'; BtnRestore='BtnRestore'; BtnLang='LangLabel'
         ResultSummaryText='AutoResult'; CompletedSummaryText='AutoCompleted'; ErrorSummaryText='AutoError'
     }
     foreach ($name in $automationKeys.Keys) {
@@ -191,11 +198,35 @@ function Apply-Language {
 
 # ---------- 鼠鼠风格 XAML ----------
 . (Join-Path $script:Root 'src\Gui\Presentation.ps1')
+$script:GuiIconWarning = ''
+function Set-GuiWindowIcon {
+    param([Parameter(Mandatory=$true)]$Window, [Parameter(Mandatory=$true)][string]$Path)
+    $stream = $null
+    try {
+        if (-not [System.IO.File]::Exists($Path)) { throw "icon file missing: $Path" }
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+            $stream,
+            [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat,
+            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        )
+        if ($decoder.Frames.Count -lt 1) { throw 'icon decoder returned no frames' }
+        $Window.Icon = $decoder.Frames[0]
+        $script:GuiIconWarning = ''
+        return $true
+    } catch {
+        $script:GuiIconWarning = 'icon load warning: ' + $_.Exception.Message
+        return $false
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
 $xamlPath = Join-Path $script:Root 'src\Gui\MainWindow.xaml'
 if (-not (Test-Path -LiteralPath $xamlPath)) { throw "GUI layout missing: $xamlPath" }
 [xml]$xaml = Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
+$null = Set-GuiWindowIcon -Window $window -Path (Join-Path $script:Root 'assets\shushu.ico')
 
 # 鼠鼠页面形象图: 用绝对路径 (Image Source 相对路径按工作目录解析, 不可靠)
 $script:ImgMap = [ordered]@{
@@ -227,15 +258,78 @@ $script:ReviewedPendingSnapshot = $null
 $script:ReviewedPendingGenerationSha256 = $null
 $emptyReviewedActionKeys = [System.Collections.Generic.List[string]]::new()
 $script:ReviewedActionIdentityKeys = $emptyReviewedActionKeys.AsReadOnly()
+$emptyReviewedSuspiciousKeys = [System.Collections.Generic.List[string]]::new()
+$script:ReviewedSuspiciousIdentityKeys = $emptyReviewedSuspiciousKeys.AsReadOnly()
 $script:ExecutionProcess = $null
 $script:ExecutionTimer = $null
 $script:ExecutionTempPath = $null
 $script:ExecutionActions = @()
 $script:ExecutionInProgress = $false
+$script:RestoreInProgress = $false
+$script:RestoreProcess = $null
+$script:RestoreTimer = $null
+$script:RestoreLifecycle = 'idle'
+$script:RestoreUnknownProbeCount = 0
 $script:ExecutionLifecycle = 'idle'
 $script:ExecutionUnknownProbeCount = 0
 $script:ExecutionUnknownProbeLimit = 3
+$script:SuspiciousStopProcess = $null
+$script:SuspiciousStopTimer = $null
+$script:SuspiciousStopTempPath = $null
+$script:SuspiciousStopRows = @()
+$script:SuspiciousStopInProgress = $false
+$script:SuspiciousStopLifecycle = 'idle'
+$script:SuspiciousStopUnknownProbeCount = 0
+$script:CoreScript = Join-Path $script:Root 'cpu-cleaner.ps1'
+$script:InventoryProcess = $null
+$script:InventoryTimer = $null
+$script:InventoryNonce = ''
+$script:InventoryDeadlineUtc = [DateTime]::MinValue
+$script:InventoryUnknownProbeCount = 0
+$script:InventoryInProgress = $false
+$script:InventoryLifecycle = 'idle'
+$script:InventoryTimeoutSeconds = 180
 $script:StatePanels = @('IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel','ExecutingPanel','CompletedPanel','ErrorPanel')
+
+function Test-GuiInventoryBusy {
+    if ($null -ne $script:InventoryProcess -and $script:InventoryLifecycle -cin @('unknown','timed_out','detached')) {
+        $staleProbe = Get-GuiExecutionProcessStatus -Process $script:InventoryProcess
+        if ($staleProbe.State -eq 'exited') {
+            $null = Clear-GuiInventoryResources -ProcessExitConfirmed
+            return $false
+        }
+    }
+    return ($script:InventoryInProgress -or $null -ne $script:InventoryProcess -or $script:InventoryLifecycle -cin @('starting','running','unknown','timed_out','detached'))
+}
+
+function Test-GuiNormalScanBusy {
+    return ($null -ne $script:ScanJob -or $null -ne $script:ScanTimer -or $null -ne $script:ScanCheckTimer)
+}
+
+function Update-GuiExecuteAvailability {
+    param($List = $window.FindName('PendingList'))
+    $selectedExecutable = @($List.Items | Where-Object {
+        ($_.CanExecute -is [bool]) -and $_.CanExecute -and
+        ($_.IsChecked -is [bool]) -and $_.IsChecked
+    })
+    $restoreBusy = $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')
+    $window.FindName('BtnExecute').IsEnabled = ($selectedExecutable.Count -gt 0 -and -not $script:ExecutionInProgress -and -not $script:SuspiciousStopInProgress -and -not $restoreBusy -and -not (Test-GuiInventoryBusy) -and -not (Test-GuiNormalScanBusy))
+}
+
+function Update-GuiReviewCounts {
+    param($Items = @())
+    $window.FindName('ReviewCountsText').Text = Format-GuiReviewCountsText (Get-GuiReviewCounts $Items)
+}
+
+function Update-GuiStopProcessAvailability {
+    param($List = $window.FindName('SuspiciousList'))
+    $selected = @($List.Items | Where-Object {
+        ($_.CanStop -is [bool]) -and $_.CanStop -and
+        ($_.IsChecked -is [bool]) -and $_.IsChecked
+    })
+    $restoreBusy = $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')
+    $window.FindName('BtnStopProcesses').IsEnabled = ($selected.Count -gt 0 -and -not $script:SuspiciousStopInProgress -and -not $script:ExecutionInProgress -and -not $restoreBusy -and -not (Test-GuiInventoryBusy) -and -not (Test-GuiNormalScanBusy))
+}
 
 function Set-GuiState {
     param(
@@ -335,7 +429,7 @@ function Get-PendingItems {
     param([string]$Path = '')
     $pf = if ($Path) { $Path } else { Join-Path $script:Root 'pending_actions.json' }
     if (-not (Test-Path $pf)) { return @() }
-    $p = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json
+    $p = Read-GuiPendingFile -Path $pf
     if (-not $p.actions) { return @() }
     return @($p.actions)
 }
@@ -371,6 +465,62 @@ function Copy-PendingActionForSubset($RawAction) {
     return [pscustomobject]$properties
 }
 
+function Copy-GuiSuspiciousForSubset($RawRow) {
+    $properties = [ordered]@{}
+    foreach ($property in $RawRow.PSObject.Properties) { $properties[$property.Name] = $property.Value }
+    $properties['status'] = 'pending'
+    return [pscustomobject]$properties
+}
+
+function Get-GuiSuspiciousIdentityKey($Item) {
+    return ConvertTo-Json -Compress -Depth 3 -InputObject ([ordered]@{
+        PID = $Item.PID
+        Name = $Item.Name
+        Path = $Item.Path
+        StartTimeUtc = $Item.StartTimeUtc
+    })
+}
+
+function Get-GuiValidatedSuspiciousIdentityKeys($Pending) {
+    $null = Assert-GuiPendingEnvelopeShape $Pending
+    $keys = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($row in @($Pending.suspicious)) {
+        if ($row.CanStop -isnot [bool] -or -not $row.CanStop -or [string]$row.status -cnotin @('pending','failed')) { continue }
+        if (($row.PID -isnot [int32] -and $row.PID -isnot [int64]) -or [int64]$row.PID -le 0) { throw 'stoppable suspicious PID is invalid.' }
+        foreach ($name in @('Name','Path','StartTimeUtc')) {
+            if ($row.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($row.$name)) { throw "stoppable suspicious $name is invalid." }
+        }
+        if (-not [System.IO.Path]::IsPathRooted([string]$row.Path) -or -not ([string]$row.StartTimeUtc).EndsWith('Z',[System.StringComparison]::Ordinal)) { throw 'stoppable suspicious identity is incomplete.' }
+        $key = Get-GuiSuspiciousIdentityKey $row
+        if (-not $seen.Add($key)) { throw 'duplicate suspicious identity in reviewed snapshot.' }
+        $keys.Add($key)
+    }
+    return @($keys)
+}
+
+function Get-GuiSuspiciousViewItems($Pending) {
+    $null = Assert-GuiPendingEnvelopeShape $Pending
+    $rows = @()
+    if (-not $Pending.suspicious) { return @() }
+    foreach ($item in @($Pending.suspicious)) {
+        $canStop = ($item.CanStop -is [bool]) -and $item.CanStop -and ([string]$item.status -cin @('pending','failed'))
+        $necessity = [string]$item.Necessity
+        if ([string]::IsNullOrWhiteSpace($necessity)) { $necessity = '按需结束' }
+        $impact = [string]$item.Impact
+        if ([string]::IsNullOrWhiteSpace($impact)) { $impact = '只结束当前进程实例；正在使用的功能可能中断，后台也可能自动重启。' }
+        $rows += [pscustomobject]@{
+            IsChecked = $false; CanStop = [bool]$canStop; PID = $item.PID
+            PidLabel = 'PID ' + [string]$item.PID; Name = [string]$item.Name
+            Path = [string]$item.Path; StartTimeUtc = [string]$item.StartTimeUtc
+            Necessity = $necessity; Reason = [string]$item.Reason; Impact = $impact
+            StopBlockReason = [string]$item.StopBlockReason
+            status = [string]$item.status; _raw = $item
+        }
+    }
+    return @($rows)
+}
+
 function Get-GuiPendingSchemaVersion($Pending) {
     $schemaProperty = $null
     if ($null -ne $Pending) {
@@ -383,15 +533,33 @@ function Get-GuiPendingSchemaVersion($Pending) {
     }
     if ($null -eq $schemaProperty -or
         ($schemaProperty.Value -isnot [int32] -and $schemaProperty.Value -isnot [int64]) -or
-        -not ([int64]2).Equals([int64]$schemaProperty.Value)) {
+        -not ([int64]3).Equals([int64]$schemaProperty.Value)) {
         throw 'pending 清单版本旧或不兼容。请重新运行 scan 生成新清单。'
     }
     return $schemaProperty.Value
 }
 
+function Assert-GuiPendingEnvelopeShape {
+    param([Parameter(Mandatory=$true)]$Pending)
+    $version = Get-GuiPendingSchemaVersion $Pending
+    foreach ($name in @('actions','resolved','observations','suspicious')) {
+        $property = $null
+        foreach ($candidate in $Pending.PSObject.Properties) {
+            if ([string]::Equals($candidate.Name, $name, [System.StringComparison]::Ordinal)) {
+                $property = $candidate
+                break
+            }
+        }
+        if ($null -eq $property -or $property.Value -isnot [System.Array] -or $property.Value.Rank -ne 1) {
+            throw "pending review shape invalid: $name 必须是一维数组。请重新运行 scan 生成新清单。"
+        }
+    }
+    return $version
+}
+
 function New-PendingSubsetPayload {
     param($Checked, $SourcePending)
-    $pendingVersion = Get-GuiPendingSchemaVersion $SourcePending
+    $pendingVersion = Assert-GuiPendingEnvelopeShape $SourcePending
     $actions = @()
     foreach ($checkedItem in @($Checked)) {
         if ($checkedItem -and $checkedItem._raw) {
@@ -400,21 +568,42 @@ function New-PendingSubsetPayload {
     }
     $observations = @()
     if ($SourcePending -and $SourcePending.observations) { $observations = @($SourcePending.observations) }
+    $resolved = @()
+    if ($SourcePending -and $SourcePending.resolved) { $resolved = @($SourcePending.resolved) }
     $suspicious = @()
     if ($SourcePending -and $SourcePending.suspicious) { $suspicious = @($SourcePending.suspicious) }
     $properties = [ordered]@{
         pending_schema_version = $pendingVersion
         generated = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         actions = @($actions)
+        resolved = @($resolved)
         observations = @($observations)
         suspicious = @($suspicious)
     }
     foreach ($property in $SourcePending.PSObject.Properties) {
-        if ($property.Name -notin @('pending_schema_version','generated','actions','observations','suspicious')) {
+        if ($property.Name -notin @('pending_schema_version','generated','actions','resolved','observations','suspicious')) {
             $properties[$property.Name] = $property.Value
         }
     }
     return [pscustomobject]$properties
+}
+
+function New-GuiSuspiciousSubsetPayload {
+    param($Selected, $SourcePending)
+    $pendingVersion = Assert-GuiPendingEnvelopeShape $SourcePending
+    $rows = @()
+    foreach ($selectedRow in @($Selected)) {
+        $raw = if ($selectedRow.PSObject.Properties['_raw'] -and $null -ne $selectedRow._raw) { $selectedRow._raw } else { $selectedRow }
+        $rows += Copy-GuiSuspiciousForSubset $raw
+    }
+    return [pscustomobject]([ordered]@{
+        pending_schema_version = $pendingVersion
+        generated = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        actions = @()
+        resolved = @()
+        observations = @()
+        suspicious = @($rows)
+    })
 }
 
 function ConvertTo-GuiPendingJson {
@@ -458,19 +647,29 @@ function Get-RuleDisplay($rule) {
     return [pscustomobject]@{ risk_label = $riskLabel; evidence_label = $evidenceLabel }
 }
 
-# v1.5.6: 构造勾选展示对象 — actions(可执行, 勾选) / observations(仅观察, checkbox disabled)
-# 数据流: scan → Save-PendingActions 已分流; 这里 actions 只读可执行集, observations 只读观察集
+# 审核页只读投影同一份 reviewed pending snapshot；UI 标签不能影响授权 identity。
 function Get-PendingViewItems {
     param([Parameter(Mandatory=$true)]$Pending)
+    Assert-GuiPendingPresentationShape -Pending $Pending
     $p = $Pending
     $map = Get-ProfileLookup
     $view = @()
-    # 1) 可执行项: 默认勾选, 可勾选
     foreach ($i in @($p.actions | Where-Object { $_ -and $_.status -cin @('pending','failed') })) {
         $d = Get-RuleDisplay $map[$i.id]
+        $presentation = Get-GuiReviewPresentation -Branch actions -Name $i.name_cn -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn
         $view += [pscustomobject]@{
-            IsChecked         = $true
-            CanExecute        = $true
+            IsChecked         = $presentation.IsChecked
+            CanExecute        = $presentation.CanExecute
+            NeedsConfirmation = $presentation.NeedsConfirmation
+            GroupKey          = $presentation.GroupKey
+            GroupLabel        = $presentation.GroupLabel
+            StatusLabel       = $presentation.StatusLabel
+            StatusForeground  = $presentation.StatusForeground
+            AutomationName    = $presentation.AutomationName
+            NecessityLabel    = $presentation.NecessityLabel
+            ImpactText        = $presentation.ImpactText
+            CleanupReasonText = $presentation.CleanupReasonText
+            CurrentStateLabel = $presentation.CurrentStateLabel
             name_cn           = $i.name_cn
             risk_label        = $d.risk_label
             evidence_label    = $d.evidence_label
@@ -481,23 +680,62 @@ function Get-PendingViewItems {
             matcher_detail    = Format-GuiMatcherDetail $i
             matched_type      = [string]$i.matched_type
             matched_field     = [string]$i.matched_field
+            reviewed_identity_key = Get-PendingIdentityKey $i
             _raw              = $i
         }
     }
-    # 2) 观察项: 证据不足/仅观察 — checkbox disabled, 全选跳过
+    foreach ($i in @($p.resolved)) {
+        $d = Get-RuleDisplay $map[$i.id]
+        $presentation = Get-GuiReviewPresentation -Branch resolved -Name $i.name_cn -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn -CurrentState $i.current_state
+        $view += [pscustomobject]@{
+            IsChecked         = $presentation.IsChecked
+            CanExecute        = $presentation.CanExecute
+            NeedsConfirmation = $presentation.NeedsConfirmation
+            GroupKey          = $presentation.GroupKey
+            GroupLabel        = $presentation.GroupLabel
+            StatusLabel       = $presentation.StatusLabel
+            StatusForeground  = $presentation.StatusForeground
+            AutomationName    = $presentation.AutomationName
+            NecessityLabel    = $presentation.NecessityLabel
+            ImpactText        = $presentation.ImpactText
+            CleanupReasonText = $presentation.CleanupReasonText
+            CurrentStateLabel = $presentation.CurrentStateLabel
+            name_cn           = $i.name_cn
+            risk_label        = $d.risk_label
+            evidence_label    = $d.evidence_label
+            action_label      = Get-ActionLabel $i.action
+            restorable_label  = '已处理'
+            status            = $i.status
+            reason_cn         = $i.reason_cn
+            matcher_detail    = Format-GuiMatcherDetail $i
+            matched_type      = [string]$i.matched_type
+            matched_field     = [string]$i.matched_field
+            _raw              = $i
+        }
+    }
     foreach ($i in @($p.observations)) {
         $d = Get-RuleDisplay $map[$i.id]
-        $obsReason = if ($i.obs_reason) { $i.obs_reason } else { '仅观察, 不允许自动处理' }
+        $presentation = Get-GuiReviewPresentation -Branch observations -Name $i.name_cn -ExecutionClass $i.execution_class -Necessity $i.necessity -ImpactCn $i.impact_cn -CleanupReasonCn $i.cleanup_reason_cn
         $view += [pscustomobject]@{
-            IsChecked         = $false
-            CanExecute        = $false
+            IsChecked         = $presentation.IsChecked
+            CanExecute        = $presentation.CanExecute
+            NeedsConfirmation = $presentation.NeedsConfirmation
+            GroupKey          = $presentation.GroupKey
+            GroupLabel        = $presentation.GroupLabel
+            StatusLabel       = $presentation.StatusLabel
+            StatusForeground  = $presentation.StatusForeground
+            AutomationName    = $presentation.AutomationName
+            NecessityLabel    = $presentation.NecessityLabel
+            ImpactText        = $presentation.ImpactText
+            CleanupReasonText = $presentation.CleanupReasonText
+            CurrentStateLabel = $presentation.CurrentStateLabel
             name_cn           = $i.name_cn
             risk_label        = $d.risk_label
             evidence_label    = $d.evidence_label
             action_label      = Get-ActionLabel $i.action
             restorable_label  = '不可自动'
             status            = '观察'
-            reason_cn         = $obsReason
+            reason_cn         = $i.obs_reason
             matcher_detail    = Format-GuiMatcherDetail $i
             matched_type      = [string]$i.matched_type
             matched_field     = [string]$i.matched_field
@@ -522,12 +760,44 @@ function Assert-GuiPendingPresentationRow {
     foreach ($propertyName in @('id','name_cn','hit_type','action','matched_pattern','matched_type','matched_field')) {
         $null = Get-GuiReviewScalarString -Item $Item -PropertyName $propertyName -Context $context
     }
+    $executionClass = Get-GuiReviewScalarString -Item $Item -PropertyName 'execution_class' -Context $context
+    $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'necessity' -Context $context
+    $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'impact_cn' -Context $context
+    $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'cleanup_reason_cn' -Context $context
+    foreach ($propertyName in @('default_selected','requires_confirmation')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $property.Value -isnot [bool]) {
+            throw "pending review shape invalid: $context.$propertyName must be a boolean."
+        }
+    }
+    $allowedClasses = switch ($Branch) {
+        'actions'      { @('automatic_safe','manual_impact') }
+        'resolved'     { @('automatic_safe','manual_impact') }
+        'observations' { @('observation') }
+    }
+    if ($executionClass -cnotin $allowedClasses) {
+        throw "pending review shape invalid: $context.execution_class is not valid for $Branch."
+    }
+    if ($executionClass -ceq 'manual_impact' -and ($Item.default_selected -ne $false -or $Item.requires_confirmation -ne $true)) {
+        throw "pending review shape invalid: $context.manual_impact must require confirmation and default to unchecked."
+    }
+    if ($executionClass -ceq 'automatic_safe' -and ($Item.default_selected -ne $true -or $Item.requires_confirmation -ne $false)) {
+        throw "pending review shape invalid: $context.automatic_safe must default to checked without confirmation."
+    }
+    if ($executionClass -ceq 'observation' -and ($Item.default_selected -ne $false -or $Item.requires_confirmation -ne $false)) {
+        throw "pending review shape invalid: $context.observation must be non-executable and unchecked."
+    }
     if ($Branch -eq 'actions') {
         $status = Get-GuiReviewScalarString -Item $Item -PropertyName 'status' -Context $context
         if ($status -cnotin @('pending','failed','success','skipped','manual_required')) {
             throw "pending review shape invalid: $context.status must be an exact known status."
         }
         $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'reason_cn' -Context $context
+    } elseif ($Branch -eq 'resolved') {
+        $status = Get-GuiReviewScalarString -Item $Item -PropertyName 'status' -Context $context
+        if ($status -cne 'success') { throw "pending review shape invalid: $context.status must be success for resolved items." }
+        $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'reason_cn' -Context $context
+        $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'current_state' -Context $context
     } else {
         $null = Get-GuiReviewScalarString -Item $Item -PropertyName 'obs_reason' -Context $context
     }
@@ -572,8 +842,8 @@ function Assert-GuiPendingPresentationRow {
 
 function Assert-GuiPendingPresentationShape {
     param([Parameter(Mandatory=$true)]$Pending)
-    if ($null -eq $Pending) { throw 'pending review shape invalid: pending object is null.' }
-    foreach ($branch in @('actions','observations')) {
+    $null = Assert-GuiPendingEnvelopeShape $Pending
+    foreach ($branch in @('actions','resolved','observations')) {
         $property = $Pending.PSObject.Properties[$branch]
         if ($null -eq $property -or $property.Value -isnot [System.Array]) {
             throw "pending review shape invalid: $branch must be an array."
@@ -587,6 +857,7 @@ function Assert-GuiPendingPresentationShape {
 
 function Get-GuiValidatedActionIdentityKeys {
     param([Parameter(Mandatory=$true)]$Pending)
+    $null = Assert-GuiPendingEnvelopeShape $Pending
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     $selectableKeys = [System.Collections.Generic.List[string]]::new()
     foreach ($action in @($Pending.actions)) {
@@ -606,10 +877,172 @@ function Get-GuiValidatedActionIdentityKeys {
     return [string[]]$selectableKeys.ToArray()
 }
 
+function Skip-GuiJsonWhitespace([string]$Json, [ref]$Index) {
+    while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @([char]0x20,[char]0x09,[char]0x0A,[char]0x0D)) {
+        $Index.Value++
+    }
+}
+
+function Read-GuiJsonStringToken([string]$Json, [ref]$Index) {
+    if ($Index.Value -ge $Json.Length -or $Json[$Index.Value] -ne '"') { throw 'JSON 字符串缺少开引号' }
+    $Index.Value++
+    $builder = New-Object System.Text.StringBuilder
+    while ($Index.Value -lt $Json.Length) {
+        $character = $Json[$Index.Value]
+        $Index.Value++
+        if ($character -eq '"') { return $builder.ToString() }
+        if ([int]$character -lt 0x20) { throw 'JSON 字符串包含未转义控制字符' }
+        if ($character -ne '\') {
+            $null = $builder.Append($character)
+            continue
+        }
+        if ($Index.Value -ge $Json.Length) { throw 'JSON 字符串转义不完整' }
+        $escaped = $Json[$Index.Value]
+        $Index.Value++
+        switch ($escaped) {
+            '"' { $null = $builder.Append('"') }
+            '\' { $null = $builder.Append('\') }
+            '/' { $null = $builder.Append('/') }
+            'b' { $null = $builder.Append([char]0x08) }
+            'f' { $null = $builder.Append([char]0x0C) }
+            'n' { $null = $builder.Append([char]0x0A) }
+            'r' { $null = $builder.Append([char]0x0D) }
+            't' { $null = $builder.Append([char]0x09) }
+            'u' {
+                if (($Index.Value + 4) -gt $Json.Length) { throw 'JSON Unicode 转义不完整' }
+                $hex = $Json.Substring($Index.Value, 4)
+                foreach ($hexCharacter in $hex.ToCharArray()) {
+                    if ('0123456789abcdefABCDEF'.IndexOf($hexCharacter) -lt 0) { throw 'JSON Unicode 转义无效' }
+                }
+                $codeUnit = [Convert]::ToInt32($hex, 16)
+                $Index.Value = $Index.Value + 4
+                if ($codeUnit -ge 0xD800 -and $codeUnit -le 0xDBFF) {
+                    if (($Index.Value + 6) -gt $Json.Length -or $Json[$Index.Value] -ne '\' -or $Json[$Index.Value + 1] -ne 'u') {
+                        throw 'JSON Unicode 高代理必须紧跟低代理转义'
+                    }
+                    $lowHex = $Json.Substring($Index.Value + 2, 4)
+                    foreach ($hexCharacter in $lowHex.ToCharArray()) {
+                        if ('0123456789abcdefABCDEF'.IndexOf($hexCharacter) -lt 0) { throw 'JSON Unicode 低代理转义无效' }
+                    }
+                    $lowCodeUnit = [Convert]::ToInt32($lowHex, 16)
+                    if ($lowCodeUnit -lt 0xDC00 -or $lowCodeUnit -gt 0xDFFF) { throw 'JSON Unicode 高代理后缺少合法低代理' }
+                    $null = $builder.Append([char]$codeUnit)
+                    $null = $builder.Append([char]$lowCodeUnit)
+                    $Index.Value = $Index.Value + 6
+                } elseif ($codeUnit -ge 0xDC00 -and $codeUnit -le 0xDFFF) {
+                    throw 'JSON Unicode 低代理不能单独出现'
+                } else {
+                    $null = $builder.Append([char]$codeUnit)
+                }
+            }
+            default { throw 'JSON 字符串包含未知转义' }
+        }
+    }
+    throw 'JSON 字符串缺少闭引号'
+}
+
+function Read-GuiJsonNumberToken([string]$Json, [ref]$Index) {
+    if ($Json[$Index.Value] -eq '-') {
+        $Index.Value++
+        if ($Index.Value -ge $Json.Length) { throw 'JSON 数字不完整' }
+    }
+    if ($Json[$Index.Value] -eq '0') {
+        $Index.Value++
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { throw 'JSON 数字包含前导零' }
+    } elseif ($Json[$Index.Value] -ge '1' -and $Json[$Index.Value] -le '9') {
+        while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { $Index.Value++ }
+    } else {
+        throw 'JSON 数字无效'
+    }
+    if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -eq '.') {
+        $Index.Value++
+        $fractionStart = $Index.Value
+        while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { $Index.Value++ }
+        if ($Index.Value -eq $fractionStart) { throw 'JSON 小数部分无效' }
+    }
+    if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @('e','E')) {
+        $Index.Value++
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -in @('+','-')) { $Index.Value++ }
+        $exponentStart = $Index.Value
+        while ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -ge '0' -and $Json[$Index.Value] -le '9') { $Index.Value++ }
+        if ($Index.Value -eq $exponentStart) { throw 'JSON 指数部分无效' }
+    }
+}
+
+function Read-GuiJsonValueAndValidatePropertyNames([string]$Json, [ref]$Index, [int]$Depth) {
+    Skip-GuiJsonWhitespace $Json $Index
+    if ($Index.Value -ge $Json.Length) { throw 'JSON 值缺失' }
+    $token = $Json[$Index.Value]
+    if ($token -eq '{') {
+        $containerDepth = $Depth + 1
+        if ($containerDepth -gt $script:MaxGuiPendingJsonDepth) { throw "JSON 容器深度超过上限 $script:MaxGuiPendingJsonDepth" }
+        $Index.Value++
+        $propertyNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        Skip-GuiJsonWhitespace $Json $Index
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -eq '}') { $Index.Value++; return }
+        while ($true) {
+            Skip-GuiJsonWhitespace $Json $Index
+            $propertyName = Read-GuiJsonStringToken $Json $Index
+            if (-not $propertyNames.Add($propertyName)) { throw "JSON 对象包含重复属性: $propertyName" }
+            Skip-GuiJsonWhitespace $Json $Index
+            if ($Index.Value -ge $Json.Length -or $Json[$Index.Value] -ne ':') { throw 'JSON 属性缺少冒号' }
+            $Index.Value++
+            Read-GuiJsonValueAndValidatePropertyNames -Json $Json -Index $Index -Depth $containerDepth
+            Skip-GuiJsonWhitespace $Json $Index
+            if ($Index.Value -ge $Json.Length) { throw 'JSON 对象未闭合' }
+            if ($Json[$Index.Value] -eq '}') { $Index.Value++; return }
+            if ($Json[$Index.Value] -ne ',') { throw 'JSON 对象属性之间缺少逗号' }
+            $Index.Value++
+        }
+    }
+    if ($token -eq '[') {
+        $containerDepth = $Depth + 1
+        if ($containerDepth -gt $script:MaxGuiPendingJsonDepth) { throw "JSON 容器深度超过上限 $script:MaxGuiPendingJsonDepth" }
+        $Index.Value++
+        Skip-GuiJsonWhitespace $Json $Index
+        if ($Index.Value -lt $Json.Length -and $Json[$Index.Value] -eq ']') { $Index.Value++; return }
+        while ($true) {
+            Read-GuiJsonValueAndValidatePropertyNames -Json $Json -Index $Index -Depth $containerDepth
+            Skip-GuiJsonWhitespace $Json $Index
+            if ($Index.Value -ge $Json.Length) { throw 'JSON 数组未闭合' }
+            if ($Json[$Index.Value] -eq ']') { $Index.Value++; return }
+            if ($Json[$Index.Value] -ne ',') { throw 'JSON 数组元素之间缺少逗号' }
+            $Index.Value++
+        }
+    }
+    if ($token -eq '"') { $null = Read-GuiJsonStringToken $Json $Index; return }
+    if ($token -eq '-' -or ($token -ge '0' -and $token -le '9')) { Read-GuiJsonNumberToken $Json $Index; return }
+    foreach ($literal in @('true','false','null')) {
+        if (($Index.Value + $literal.Length) -le $Json.Length -and $Json.Substring($Index.Value, $literal.Length) -ceq $literal) {
+            $Index.Value = $Index.Value + $literal.Length
+            return
+        }
+    }
+    throw 'JSON 值 token 无效'
+}
+
+function Assert-GuiPendingJsonStrict([string]$Json) {
+    if ([string]::IsNullOrWhiteSpace($Json)) { throw 'JSON 文本为空' }
+    $index = 0
+    Read-GuiJsonValueAndValidatePropertyNames -Json $Json -Index ([ref]$index) -Depth 0
+    Skip-GuiJsonWhitespace $Json ([ref]$index)
+    if ($index -ne $Json.Length) { throw 'JSON 根值之后存在多余 token' }
+}
+
+function ConvertFrom-GuiPendingJsonText {
+    param([Parameter(Mandatory=$true)][string]$Json)
+    Assert-GuiPendingJsonStrict $Json
+    $convertFromJson = Get-Command ConvertFrom-Json
+    if ($convertFromJson.Parameters.ContainsKey('DateKind')) {
+        return $Json | ConvertFrom-Json -DateKind String -ErrorAction Stop
+    }
+    return $Json | ConvertFrom-Json -ErrorAction Stop
+}
+
 function Read-GuiPendingFile {
     param([string]$Path = '')
     $pendingPath = if ($Path) { $Path } else { Join-Path $script:Root 'pending_actions.json' }
-    return Get-Content $pendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    return (Read-GuiPendingByteSnapshot -Path $pendingPath).Pending
 }
 
 function Get-GuiBytesSha256 {
@@ -628,7 +1061,7 @@ function ConvertFrom-GuiPendingBytes {
     $offset = 0
     if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) { $offset = 3 }
     $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
-    return $utf8.GetString($Bytes, $offset, $Bytes.Length - $offset) | ConvertFrom-Json
+    return ConvertFrom-GuiPendingJsonText ($utf8.GetString($Bytes, $offset, $Bytes.Length - $offset))
 }
 
 function Read-GuiPendingByteSnapshot {
@@ -646,7 +1079,9 @@ function Read-GuiPendingByteSnapshot {
             $read += $count
         }
         if ($stream.Length -ne $length) { throw 'pending review file changed during the single read.' }
-        return [pscustomobject]@{ Pending=(ConvertFrom-GuiPendingBytes $bytes); Sha256=(Get-GuiBytesSha256 $bytes) }
+        $pending = ConvertFrom-GuiPendingBytes $bytes
+        $null = Assert-GuiPendingEnvelopeShape $pending
+        return [pscustomobject]@{ Pending=$pending; Sha256=(Get-GuiBytesSha256 $bytes) }
     } finally {
         if ($null -ne $stream) { $stream.Dispose() }
     }
@@ -684,11 +1119,18 @@ function Restore-GuiPendingBytesToLockedStream {
     $Stream.Flush($true)
 }
 
-# v1.5.6: 全选/清空 — 全选跳过 CanExecute=false (观察项 checkbox disabled 且不可被全选勾上)
+# 全选只包含 automatic_safe；manual_impact 必须保持显式人工勾选。
 function Set-AllChecked($list, $value) {
     foreach ($it in @($list.Items)) {
-        if (-not $value -or $it.CanExecute) { $it.IsChecked = $value }
+        if (-not $value) {
+            $it.IsChecked = $false
+        } elseif ($it.GroupKey -ceq 'automatic') {
+            $it.IsChecked = $true
+        } else {
+            $it.IsChecked = $false
+        }
     }
+    if ($null -ne $list.Items.PSObject.Methods['Refresh']) { $list.Items.Refresh() }
 }
 
 # v1.5.5: 把勾选子集临时文件的处理结果状态合并回主 pending_actions.json
@@ -708,7 +1150,7 @@ function Merge-PendingStatus($ExecutionResult) {
             throw 'pending review generation changed; refusing to overwrite a newer scan.'
         }
         $main = ConvertFrom-GuiPendingBytes $mainBytes
-        $null = Get-GuiPendingSchemaVersion $main
+        $null = Assert-GuiPendingEnvelopeShape $main
         if ($null -eq $main.actions -or $null -eq $ExecutionResult.Items) { throw 'pending merge actions are missing.' }
 
         $mainByKey = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
@@ -833,6 +1275,7 @@ function Invoke-GuiScanResourceCleanup {
     $script:ScanJob = $null
     $script:ScanCheckTimer = $null
     $script:ScanTimer = $null
+    $script:ScanDeadlineUtc = $null
 }
 
 function Set-GuiError {
@@ -871,12 +1314,10 @@ function Complete-ScanPoll {
             $items = @(Get-PendingViewItems -Pending $pending)
             $summary = Get-GuiItemSummary $items
             $evidence = @($items | ForEach-Object { '{0} — {1}' -f $_.name_cn, ($_.matcher_detail -replace "`r?`n", ' | ') })
-            $degraded = $false
-            if ($pending.PSObject.Properties.Name -contains 'scan_health' -and $null -ne $pending.scan_health) {
-                $degraded = @('system_info','services','tasks' | Where-Object { [string]$pending.scan_health.$_ -ne 'complete' }).Count -gt 0
-            }
             $warnings = if ($pending.PSObject.Properties.Name -contains 'scan_warnings') { @($pending.scan_warnings) } else { @() }
-            Set-GuiResultSummary -Executable $summary.executable -Observation $summary.observation -Evidence $evidence -Degraded $degraded -Warnings $warnings
+            $scanHealth = if ($pending.PSObject.Properties.Name -contains 'scan_health') { $pending.scan_health } else { $null }
+            $healthPresentation = Get-GuiScanHealthPresentation -ScanHealth $scanHealth -Warnings $warnings -Language $script:Lang
+            Set-GuiResultSummary -Executable $summary.executable -Observation $summary.observation -Evidence $evidence -Degraded $healthPresentation.Degraded -Warnings $healthPresentation.Warnings
             Set-GuiState results
         } else {
             $detail = [string]$result
@@ -896,6 +1337,7 @@ function Complete-ScanPoll {
         $script:ScanJob = $null
         $script:ScanCheckTimer = $null
         $script:ScanTimer = $null
+        $script:ScanDeadlineUtc = $null
         $window.FindName('ScanProgress').IsIndeterminate = $false
         $window.FindName('BtnStartScan').IsEnabled = $true
     }
@@ -906,6 +1348,11 @@ function Invoke-GuiScanPoll {
     param($job, $checkTimer, $scanTimer)
     try {
         $null = Receive-GuiScanOutput $job
+        if ($job.State -notin @('Completed','Failed','Stopped') -and $null -ne $script:ScanDeadlineUtc -and [datetime]::UtcNow -ge $script:ScanDeadlineUtc) {
+            Invoke-GuiScanResourceCleanup -Job $job -CheckTimer $checkTimer -ScanTimer $scanTimer
+            Show-GuiScanError -Status (Get-Text 'ScanStatusTimeout') -Detail '扫描超过 180 秒安全上限，后台扫描已停止；未修改任何系统设置。'
+            return $true
+        }
         return (Complete-ScanPoll -job $job -checkTimer $checkTimer -scanTimer $scanTimer)
     } catch {
         Invoke-GuiScanResourceCleanup -Job $job -CheckTimer $checkTimer -ScanTimer $scanTimer
@@ -937,26 +1384,66 @@ $window.FindName('BtnLang').Add_Click({
 $script:ScanTimer = $null
 $script:ScanCheckTimer = $null
 $script:ScanJob = $null
+$script:ScanDeadlineUtc = $null
+$script:ScanTimeoutSeconds = 180
 $script:ScanJobScript = {
-    param($scriptPath)
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath -Mode scan 2>&1
+    param($scriptPath, [string]$inventoryNonce = '', [bool]$allowLimited = $false)
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    [Console]::OutputEncoding = $utf8
+    $OutputEncoding = $utf8
+    $scannerArgs = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$scriptPath,'-Mode','scan')
+    if ($allowLimited) { $scannerArgs += '-AllowLimited' }
+    elseif (-not [string]::IsNullOrEmpty($inventoryNonce)) { $scannerArgs += @('-InventoryNonce',$inventoryNonce) }
+    & powershell.exe @scannerArgs 2>&1
     $nativeExitCode = $LASTEXITCODE
     if ($nativeExitCode -ne 0) { throw "Scanner process exited with code $nativeExitCode." }
 }
-function Start-GuiScan {
+
+function New-GuiInventoryNonce {
+    $bytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
+    return -join ($bytes | ForEach-Object { $_.ToString('x2') })
+}
+
+function Clear-GuiInventoryResources {
+    param([switch]$ProcessExitConfirmed)
+    if ($null -ne $script:InventoryProcess -and -not $ProcessExitConfirmed) { return $false }
+    Invoke-GuiTimerStop $script:InventoryTimer
+    if ($null -ne $script:InventoryProcess -and $script:InventoryProcess.PSObject.Methods['Dispose']) {
+        try { $script:InventoryProcess.Dispose() } catch { $null = $_ }
+    }
+    $script:InventoryProcess = $null
+    $script:InventoryTimer = $null
+    $script:InventoryNonce = ''
+    $script:InventoryDeadlineUtc = [DateTime]::MinValue
+    $script:InventoryUnknownProbeCount = 0
+    $script:InventoryInProgress = $false
+    $script:InventoryLifecycle = 'idle'
+    return $true
+}
+
+function Start-GuiNormalScanJob {
+    param([string]$InventoryNonce = '', [switch]$AllowLimited)
+    if ($null -ne $script:ScanJob) { return $false }
     $script:ScanJob = $null
     $script:ScanCheckTimer = $null
     $script:ScanTimer = $null
     try {
-        Set-GuiState scanning
+        if ($script:GuiState -ne 'scanning') { Set-GuiState scanning }
         $window.FindName('ScanProgress').IsIndeterminate = $true
-        $window.FindName('ScanPhaseText').Text = (Get-Text 'ScanPhaseInitial')
+        $script:CurrentScanPhaseTextKey = if ($AllowLimited) { 'ScanLimitedWarning' } elseif ($InventoryNonce) { 'ScanValidatingInventory' } else { 'ScanPhaseInitial' }
+        $window.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
         $window.FindName('ScanOutput').Text = (Get-Text 'Scanning')
         $window.FindName('BtnStartScan').IsEnabled = $false
         $script:ScanTranscript = ''
-        $script:CurrentScanPhaseTextKey = 'ScanPhaseInitial'
+        $script:ScanDeadlineUtc = [datetime]::UtcNow.AddSeconds($script:ScanTimeoutSeconds)
 
-        $script:ScanJob = Start-Job -ScriptBlock $script:ScanJobScript -ArgumentList (Join-Path $script:Root 'cpu-cleaner.ps1')
+        $script:ScanJob = Start-Job -ScriptBlock $script:ScanJobScript -ArgumentList $script:CoreScript, $InventoryNonce, ([bool]$AllowLimited)
 
         $script:ScanTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(200)
@@ -979,43 +1466,160 @@ function Start-GuiScan {
     }
 }
 
+function Invoke-GuiInventoryPoll {
+    if ($null -eq $script:InventoryProcess) { return $false }
+    $probe = Get-GuiExecutionProcessStatus -Process $script:InventoryProcess
+    if ($probe.State -eq 'running') {
+        if ([datetime]::UtcNow -ge $script:InventoryDeadlineUtc) {
+            Invoke-GuiTimerStop $script:InventoryTimer
+            $script:InventoryLifecycle = 'timed_out'
+            $window.FindName('ScanProgress').IsIndeterminate = $false
+            Set-GuiError -Summary (Get-Text 'ScanInventoryFailed') -Mutation (Get-Text 'ScanNoMutation') -Detail (Get-Text 'ScanInventoryTimeout')
+            return $true
+        }
+        return $false
+    }
+    if ($probe.State -eq 'unknown') {
+        $script:InventoryLifecycle = 'unknown'
+        $script:InventoryUnknownProbeCount++
+        if ($script:InventoryUnknownProbeCount -ge $script:ExecutionUnknownProbeLimit) {
+            Invoke-GuiTimerStop $script:InventoryTimer
+            $script:InventoryLifecycle = 'detached'
+            Set-GuiError -Summary (Get-Text 'ScanInventoryFailed') -Mutation (Get-Text 'ScanNoMutation') -Detail $probe.Detail
+            return $true
+        }
+        return $false
+    }
+
+    $nonce = $script:InventoryNonce
+    $exitCode = $probe.ExitCode
+    $null = Clear-GuiInventoryResources -ProcessExitConfirmed
+    if ($exitCode -ne 0) {
+        Show-GuiScanError -Status (Get-Text 'ScanInventoryFailed') -Detail ("scan_inventory ExitCode={0}" -f $exitCode)
+        return $true
+    }
+    $script:CurrentScanPhaseTextKey = 'ScanValidatingInventory'
+    $window.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
+    return (Start-GuiNormalScanJob -InventoryNonce $nonce)
+}
+
+function Start-GuiInventoryCollection {
+    if ((Test-GuiInventoryBusy) -or $null -ne $script:ScanJob -or
+        $script:ExecutionInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:SuspiciousStopInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) { return $false }
+    $script:InventoryInProgress = $true
+    $script:InventoryLifecycle = 'starting'
+    $script:InventoryUnknownProbeCount = 0
+    $script:InventoryNonce = New-GuiInventoryNonce
+    try {
+        Set-GuiState scanning
+        $window.FindName('ScanProgress').IsIndeterminate = $true
+        $script:CurrentScanPhaseTextKey = 'ScanRequestingInventory'
+        $window.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
+        $window.FindName('ScanOutput').Text = Get-Text 'ScanInventoryReadonly'
+        $window.FindName('BtnStartScan').IsEnabled = $false
+        $script:InventoryProcess = Start-Process powershell.exe -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',("`"{0}`"" -f $script:CoreScript),'-Mode','scan_inventory','-InventoryNonce',$script:InventoryNonce
+        if ($null -eq $script:InventoryProcess) { throw 'scan_inventory process did not start.' }
+        $script:InventoryLifecycle = 'running'
+        $script:InventoryDeadlineUtc = [datetime]::UtcNow.AddSeconds($script:InventoryTimeoutSeconds)
+        $script:CurrentScanPhaseTextKey = 'ScanCollectingInventory'
+        $window.FindName('ScanPhaseText').Text = Get-Text $script:CurrentScanPhaseTextKey
+        $script:InventoryTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:InventoryTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+        $script:InventoryTimer.Add_Tick({ $null = Invoke-GuiInventoryPoll })
+        $script:InventoryTimer.Start()
+        return $true
+    } catch [System.ComponentModel.Win32Exception] {
+        $cancelled = ($_.Exception.NativeErrorCode -eq 1223)
+        $processStarted = $null -ne $script:InventoryProcess
+        if ($processStarted) {
+            $script:InventoryLifecycle = 'detached'
+            Set-GuiError -Summary (Get-Text 'ScanInventoryFailed') -Mutation (Get-Text 'ScanNoMutation') -Detail $_.Exception.ToString()
+            return $false
+        }
+        $null = Clear-GuiInventoryResources
+        if ($cancelled) { return (Start-GuiNormalScanJob -AllowLimited) }
+        Show-GuiScanError -Status (Get-Text 'ScanInventoryFailed') -Detail $_.Exception.ToString()
+        return $false
+    } catch {
+        $processStarted = $null -ne $script:InventoryProcess
+        if ($processStarted) {
+            Invoke-GuiTimerStop $script:InventoryTimer
+            $script:InventoryLifecycle = 'detached'
+            Set-GuiError -Summary (Get-Text 'ScanInventoryFailed') -Mutation (Get-Text 'ScanNoMutation') -Detail $_.Exception.ToString()
+        } else {
+            $null = Clear-GuiInventoryResources
+            Show-GuiScanError -Status (Get-Text 'ScanInventoryFailed') -Detail $_.Exception.ToString()
+        }
+        return $false
+    }
+}
+
+function Start-GuiScan {
+    return (Start-GuiInventoryCollection)
+}
+
 $window.FindName('BtnStartScan').Add_Click({ Start-GuiScan })
 $window.FindName('BtnRetry').Add_Click({ Start-GuiScan })
+$window.FindName('BtnRescan').Add_Click({ Start-GuiScan })
 function Dismiss-GuiResults {
     $script:ReviewedPendingSnapshot = $null
     $script:ReviewedPendingGenerationSha256 = $null
     $emptyActionKeys = [System.Collections.Generic.List[string]]::new()
     $script:ReviewedActionIdentityKeys = $emptyActionKeys.AsReadOnly()
+    $emptySuspiciousKeys = [System.Collections.Generic.List[string]]::new()
+    $script:ReviewedSuspiciousIdentityKeys = $emptySuspiciousKeys.AsReadOnly()
     Set-GuiState idle -Force
 }
 $window.FindName('BtnSkipReview').Add_Click({ Dismiss-GuiResults })
 $window.FindName('BtnOpenReview').Add_Click({
     $list = $window.FindName('PendingList')
+    $suspiciousList = $window.FindName('SuspiciousList')
     try {
         $pendingPath = Join-Path $script:Root 'pending_actions.json'
         $reviewSnapshot = Read-GuiPendingByteSnapshot -Path $pendingPath
         $pending = $reviewSnapshot.Pending
-        $null = Get-GuiPendingSchemaVersion $pending
+        $null = Assert-GuiPendingEnvelopeShape $pending
         Assert-GuiPendingPresentationShape -Pending $pending
         $validatedActionKeys = @(Get-GuiValidatedActionIdentityKeys -Pending $pending)
+        $validatedSuspiciousKeys = @(Get-GuiValidatedSuspiciousIdentityKeys -Pending $pending)
         $actionKeyList = [System.Collections.Generic.List[string]]::new()
         foreach ($key in $validatedActionKeys) { $actionKeyList.Add($key) }
         $actionAllowlist = $actionKeyList.AsReadOnly()
+        $suspiciousKeyList = [System.Collections.Generic.List[string]]::new()
+        foreach ($key in $validatedSuspiciousKeys) { $suspiciousKeyList.Add($key) }
+        $suspiciousAllowlist = $suspiciousKeyList.AsReadOnly()
         $items = @(Get-PendingViewItems -Pending $pending)
+        $suspiciousItems = @(Get-GuiSuspiciousViewItems -Pending $pending)
         $list.ItemsSource = $null
         $list.ItemsSource = $items
         $list.Items.Refresh()
+        $suspiciousList.ItemsSource = $null
+        $suspiciousList.ItemsSource = $suspiciousItems
+        $suspiciousList.Items.Refresh()
+        Update-GuiReviewCounts -Items $items
         $script:ReviewedPendingSnapshot = $pending
         $script:ReviewedPendingGenerationSha256 = $reviewSnapshot.Sha256
         $script:ReviewedActionIdentityKeys = $actionAllowlist
+        $script:ReviewedSuspiciousIdentityKeys = $suspiciousAllowlist
         Set-GuiState review
+        Update-GuiExecuteAvailability -List $list
+        Update-GuiStopProcessAvailability -List $suspiciousList
     } catch {
         $list.ItemsSource = $null
         $list.Items.Clear()
+        Update-GuiReviewCounts -Items @()
+        $suspiciousList.ItemsSource = $null
+        $suspiciousList.Items.Clear()
         $script:ReviewedPendingSnapshot = $null
         $script:ReviewedPendingGenerationSha256 = $null
         $emptyActionKeys = [System.Collections.Generic.List[string]]::new()
         $script:ReviewedActionIdentityKeys = $emptyActionKeys.AsReadOnly()
+        $emptySuspiciousKeys = [System.Collections.Generic.List[string]]::new()
+        $script:ReviewedSuspiciousIdentityKeys = $emptySuspiciousKeys.AsReadOnly()
+        Update-GuiExecuteAvailability -List $list
+        Update-GuiStopProcessAvailability -List $suspiciousList
         Set-GuiError -Summary (Get-Text 'ReviewErrorSummary') -Mutation (Get-Text 'ReviewNoMutation') -Detail $_.Exception.Message
     }
 })
@@ -1036,18 +1640,214 @@ if ($legacyBtnLoadPending) { $legacyBtnLoadPending.Add_Click({
         $list.ItemsSource = $null
         $list.ItemsSource = $items
         $list.Items.Refresh()
+        $suspiciousList.ItemsSource = $null
+        $suspiciousList.ItemsSource = $suspiciousItems
+        $suspiciousList.Items.Refresh()
     }
+    Update-GuiExecuteAvailability -List $list
 }) }
 
 # v1.5.5: 全选 / 清空 勾选 (v1.5.6: 全选跳过观察项 CanExecute=false)
 $window.FindName('BtnSelectAll').Add_Click({
     Set-AllChecked $window.FindName('PendingList') $true
-    $window.FindName('PendingList').Items.Refresh()
+    Update-GuiExecuteAvailability
 })
 $window.FindName('BtnClearAll').Add_Click({
     Set-AllChecked $window.FindName('PendingList') $false
-    $window.FindName('PendingList').Items.Refresh()
+    Update-GuiExecuteAvailability
 })
+
+$script:PendingSelectionChangedHandler = [System.Windows.RoutedEventHandler]{
+    param($sender, $eventArgs)
+    Update-GuiExecuteAvailability -List $window.FindName('PendingList')
+}
+$window.FindName('PendingList').AddHandler(
+    [System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,
+    $script:PendingSelectionChangedHandler
+)
+
+$script:SuspiciousSelectionChangedHandler = [System.Windows.RoutedEventHandler]{
+    param($sender, $eventArgs)
+    Update-GuiStopProcessAvailability -List $window.FindName('SuspiciousList')
+}
+$window.FindName('SuspiciousList').AddHandler(
+    [System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,
+    $script:SuspiciousSelectionChangedHandler
+)
+
+function Remove-GuiSuspiciousStopTempFile {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    if ([System.IO.Path]::GetFileName($Path) -cnotmatch '^shushu_suspicious_[0-9a-f]{32}\.json$') { return }
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+}
+
+function Clear-GuiSuspiciousStopResources {
+    param([switch]$RemoveTemp, [switch]$ProcessExitConfirmed)
+    if ($null -ne $script:SuspiciousStopProcess -and -not $ProcessExitConfirmed) { return $false }
+    Invoke-GuiTimerStop $script:SuspiciousStopTimer
+    if ($RemoveTemp) { Remove-GuiSuspiciousStopTempFile -Path $script:SuspiciousStopTempPath }
+    $script:SuspiciousStopProcess = $null
+    $script:SuspiciousStopTimer = $null
+    $script:SuspiciousStopTempPath = $null
+    $script:SuspiciousStopRows = @()
+    $script:SuspiciousStopInProgress = $false
+    $script:SuspiciousStopLifecycle = 'idle'
+    $script:SuspiciousStopUnknownProbeCount = 0
+    Update-GuiStopProcessAvailability
+    Update-GuiExecuteAvailability
+    return $true
+}
+
+function Read-GuiStrictSuspiciousStopResult {
+    param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)]$ExpectedRows)
+    $pending = Read-GuiPendingFile -Path $Path
+    $null = Assert-GuiPendingEnvelopeShape $pending
+    if (@($pending.actions).Count -ne 0 -or @($pending.resolved).Count -ne 0 -or @($pending.observations).Count -ne 0) { throw 'suspicious stop result crossed the OEM action boundary.' }
+    $items = @($pending.suspicious)
+    $expected = @($ExpectedRows)
+    if ($items.Count -ne $expected.Count) { throw 'suspicious stop result identity count changed.' }
+    $expectedKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($row in $expected) { if (-not $expectedKeys.Add((Get-GuiSuspiciousIdentityKey $row))) { throw 'suspicious expected identity is duplicated.' } }
+    $resultKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($row in $items) {
+        $key = Get-GuiSuspiciousIdentityKey $row
+        if (-not $resultKeys.Add($key) -or -not $expectedKeys.Contains($key)) { throw 'suspicious stop result identity changed.' }
+        if ([string]$row.status -cnotin @('success','failed','skipped')) { throw 'suspicious stop result contains a non-terminal status.' }
+        if ([string]$row.status -ceq 'success') {
+            $identityProbe = Get-GuiProcessIdentityProbe -ProcessId ([int]$row.PID)
+            if ($identityProbe.State -eq 'unknown') {
+                throw ('suspicious stop success cannot be verified: ' + $identityProbe.Detail)
+            }
+            if ($identityProbe.State -eq 'present' -and (Get-GuiSuspiciousIdentityKey $identityProbe.Identity) -ceq $key) {
+                throw 'suspicious stop success is untrusted: the exact process instance is still running.'
+            }
+        }
+    }
+    return @($items)
+}
+
+function Get-GuiProcessIdentityProbe {
+    param([int]$ProcessId)
+    try {
+        $process = [System.Diagnostics.Process]::GetProcessById($ProcessId)
+    } catch [System.ArgumentException] {
+        return [pscustomobject]@{ State='absent'; Identity=$null; Detail='' }
+    } catch {
+        return [pscustomobject]@{ State='unknown'; Identity=$null; Detail=$_.Exception.Message }
+    }
+    try {
+        $identity = [pscustomobject]@{
+            PID = [int64]$process.Id
+            Name = [string]$process.ProcessName
+            Path = [string]$process.Path
+            StartTimeUtc = $process.StartTime.ToUniversalTime().ToString('o')
+        }
+        return [pscustomobject]@{ State='present'; Identity=$identity; Detail='' }
+    } catch {
+        return [pscustomobject]@{ State='unknown'; Identity=$null; Detail=$_.Exception.Message }
+    } finally {
+        try { $process.Dispose() } catch {}
+    }
+}
+
+function Resolve-GuiReviewedSuspiciousRows {
+    param($List)
+    if ($null -eq $script:ReviewedPendingSnapshot -or $null -eq $script:ReviewedSuspiciousIdentityKeys) { throw 'suspicious reviewed allowlist is unavailable.' }
+    $validatedKeys = @(Get-GuiValidatedSuspiciousIdentityKeys $script:ReviewedPendingSnapshot)
+    if ($validatedKeys.Count -ne $script:ReviewedSuspiciousIdentityKeys.Count) { throw 'suspicious reviewed allowlist changed.' }
+    $byKey = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
+    foreach ($row in @($script:ReviewedPendingSnapshot.suspicious)) {
+        if ($row.CanStop -is [bool] -and $row.CanStop -and [string]$row.status -cin @('pending','failed')) {
+            $key = Get-GuiSuspiciousIdentityKey $row
+            if (-not $script:ReviewedSuspiciousIdentityKeys.Contains($key)) { throw 'suspicious reviewed allowlist changed.' }
+            $byKey.Add($key,$row)
+        }
+    }
+    $resolved = @()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($view in @($List.Items | Where-Object { $_.IsChecked })) {
+        if ($view.CanStop -isnot [bool] -or -not $view.CanStop -or $null -eq $view._raw) { throw 'selected suspicious row is not stoppable.' }
+        $key = Get-GuiSuspiciousIdentityKey $view._raw
+        if (-not $script:ReviewedSuspiciousIdentityKeys.Contains($key) -or -not $byKey.ContainsKey($key)) { throw 'selected suspicious row is outside the reviewed allowlist.' }
+        if (-not $seen.Add($key)) { throw 'selected suspicious identity is duplicated.' }
+        $resolved += $byKey[$key]
+    }
+    return @($resolved)
+}
+
+function Complete-SuspiciousStopPoll {
+    if ($null -eq $script:SuspiciousStopProcess) { return $false }
+    $probe = Get-GuiExecutionProcessStatus -Process $script:SuspiciousStopProcess
+    if ($probe.State -eq 'running') { return $false }
+    if ($probe.State -eq 'unknown') {
+        $script:SuspiciousStopLifecycle = 'unknown'
+        $script:SuspiciousStopUnknownProbeCount++
+        $window.FindName('SuspiciousSelectionHint').Text = '进程状态暂时不可读，已保留诊断清单。'
+        if ($script:SuspiciousStopUnknownProbeCount -ge $script:ExecutionUnknownProbeLimit) {
+            Invoke-GuiTimerStop $script:SuspiciousStopTimer
+            $script:SuspiciousStopInProgress = $false
+            $script:SuspiciousStopLifecycle = 'detached'
+            Update-GuiStopProcessAvailability
+            return $true
+        }
+        return $false
+    }
+    Invoke-GuiTimerStop $script:SuspiciousStopTimer
+    try {
+        $rows = @(Read-GuiStrictSuspiciousStopResult -Path $script:SuspiciousStopTempPath -ExpectedRows $script:SuspiciousStopRows)
+        $window.FindName('SuspiciousList').ItemsSource = @(Get-GuiSuspiciousViewItems ([pscustomobject]@{ suspicious=$rows }))
+        $success = @($rows | Where-Object { $_.status -ceq 'success' }).Count
+        $skipped = @($rows | Where-Object { $_.status -ceq 'skipped' }).Count
+        $failed = @($rows | Where-Object { $_.status -ceq 'failed' }).Count
+        $window.FindName('SuspiciousSelectionHint').Text = "一次性结束结果：成功 $success，跳过 $skipped，失败 $failed。"
+        if ($probe.ExitCode -ne 0 -or $failed -gt 0) { throw "stop_process exited with code $($probe.ExitCode)." }
+        $null = Clear-GuiSuspiciousStopResources -RemoveTemp -ProcessExitConfirmed
+    } catch {
+        $detail = $_.Exception.Message + [Environment]::NewLine + 'Diagnostic subset: ' + $script:SuspiciousStopTempPath
+        $window.FindName('SuspiciousSelectionHint').Text = $detail
+        $null = Clear-GuiSuspiciousStopResources -ProcessExitConfirmed
+    }
+    return $true
+}
+
+function Start-GuiSuspiciousStop {
+    param($List = $window.FindName('SuspiciousList'))
+    if ((Test-GuiInventoryBusy) -or (Test-GuiNormalScanBusy) -or $script:SuspiciousStopInProgress -or $script:ExecutionInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) { return $false }
+    $selectedRows = @(Resolve-GuiReviewedSuspiciousRows -List $List)
+    if ($selectedRows.Count -eq 0) { return $false }
+    $script:SuspiciousStopInProgress = $true
+    $script:SuspiciousStopLifecycle = 'starting'
+    Update-GuiStopProcessAvailability -List $List
+    try {
+        $payload = New-GuiSuspiciousSubsetPayload -Selected $selectedRows -SourcePending $script:ReviewedPendingSnapshot
+        $script:SuspiciousStopTempPath = Join-Path $env:TEMP ('shushu_suspicious_' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($script:SuspiciousStopTempPath, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($true))
+        $pendingSha256 = Get-GuiFileSha256 -Path $script:SuspiciousStopTempPath
+        $script:SuspiciousStopRows = @($payload.suspicious)
+        $script:SuspiciousStopProcess = Start-Process powershell -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','stop_process','-PendingFileArg',"`"$script:SuspiciousStopTempPath`"",'-PendingSha256Arg',$pendingSha256
+        if ($null -eq $script:SuspiciousStopProcess) { throw 'stop_process 未启动。' }
+        $script:SuspiciousStopLifecycle = 'running'
+        $script:SuspiciousStopTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:SuspiciousStopTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $script:SuspiciousStopTimer.Add_Tick({ $null = Complete-SuspiciousStopPoll })
+        $script:SuspiciousStopTimer.Start()
+        $window.FindName('SuspiciousSelectionHint').Text = '正在结束已选的这一次进程实例…'
+        return $true
+    } catch {
+        if ($null -ne $script:SuspiciousStopProcess) {
+            $script:SuspiciousStopLifecycle = 'detached'
+            $window.FindName('SuspiciousSelectionHint').Text = $_.Exception.Message + '；已保留诊断清单。'
+        } else {
+            $null = Clear-GuiSuspiciousStopResources -RemoveTemp
+            $window.FindName('SuspiciousSelectionHint').Text = $_.Exception.Message
+        }
+        return $false
+    }
+}
+
+$window.FindName('BtnStopProcesses').Add_Click({ Start-GuiSuspiciousStop })
 
 # ---------- 异步处理已选择项目 (review snapshot → 临时清单 → elevated clean) ----------
 function Remove-GuiExecutionTempFile {
@@ -1087,12 +1887,15 @@ function Clear-GuiExecutionResources {
     $script:ExecutionInProgress = $false
     $script:ExecutionLifecycle = 'idle'
     $script:ExecutionUnknownProbeCount = 0
+    Update-GuiExecuteAvailability
     return $true
 }
 
 function Protect-GuiExecutionWindowClose {
     param([Parameter(Mandatory=$true)]$EventArgs)
-    if ($script:ExecutionInProgress -or $script:ExecutionLifecycle -cin @('starting','running','unknown')) {
+    if ((Test-GuiInventoryBusy) -or (Test-GuiNormalScanBusy) -or $script:ExecutionInProgress -or $script:ExecutionLifecycle -cin @('starting','running','unknown') -or
+        $script:SuspiciousStopInProgress -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown') -or
+        $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) {
         $EventArgs.Cancel = $true
         $window.FindName('StateSubtitle').Text = Get-Text 'ExecCloseBlocked'
         return $false
@@ -1105,7 +1908,7 @@ function Resolve-GuiReviewedActions {
     if ($null -eq $script:ReviewedPendingSnapshot -or $null -eq $script:ReviewedActionIdentityKeys) {
         throw '没有有效的 reviewed pending snapshot。请重新运行 scan 并审核。'
     }
-    $null = Get-GuiPendingSchemaVersion $script:ReviewedPendingSnapshot
+    $null = Assert-GuiPendingEnvelopeShape $script:ReviewedPendingSnapshot
     Assert-GuiPendingPresentationShape -Pending $script:ReviewedPendingSnapshot
     $validatedKeys = @(Get-GuiValidatedActionIdentityKeys -Pending $script:ReviewedPendingSnapshot)
     if ($validatedKeys.Count -ne $script:ReviewedActionIdentityKeys.Count) {
@@ -1129,6 +1932,8 @@ function Resolve-GuiReviewedActions {
     foreach ($row in $selectedRows) {
         if ($null -eq $row._raw) { throw '选择项缺少审核身份。未开始处理。' }
         $key = Get-PendingIdentityKey $row._raw
+        $viewIdentityKey = Get-GuiReviewScalarString -Item $row -PropertyName 'reviewed_identity_key' -Context 'selected action'
+        if ($viewIdentityKey -cne $key) { throw '选择项身份与 reviewed 视图不一致。未开始处理。' }
         if (-not $script:ReviewedActionIdentityKeys.Contains($key) -or -not $actionByKey.ContainsKey($key)) {
             throw '选择项不在 reviewed action allowlist 中。未开始处理。'
         }
@@ -1136,6 +1941,50 @@ function Resolve-GuiReviewedActions {
         $resolved += [pscustomobject]@{ _raw = $actionByKey[$key] }
     }
     return @($resolved)
+}
+
+function Confirm-GuiImpactActions {
+    param([Parameter(Mandatory=$true)]$Actions)
+    try {
+        $manualActions = @($Actions)
+        if ($manualActions.Count -eq 0) { return $false }
+        $english = ($script:Lang -ceq 'en')
+        $lines = if ($english) {
+            @('The selected items can affect OEM features.', '')
+        } else {
+            @('以下已选项目可能影响 OEM 附加功能：', '')
+        }
+        foreach ($action in $manualActions) {
+            foreach ($propertyName in @('name_cn','necessity','cleanup_reason_cn','impact_cn')) {
+                $null = Get-GuiReviewScalarString -Item $action -PropertyName $propertyName -Context 'manual confirmation'
+            }
+            if ($english) {
+                $lines += 'Target: ' + $action.name_cn
+                $lines += 'Necessity: ' + $action.necessity
+                $lines += 'Cleanup reason: ' + $action.cleanup_reason_cn
+                $lines += 'Impact: ' + $action.impact_cn
+            } else {
+                $lines += '目标：' + $action.name_cn
+                $lines += '必要性：' + $action.necessity
+                $lines += '清理原因：' + $action.cleanup_reason_cn
+                $lines += '影响：' + $action.impact_cn
+            }
+            $lines += ''
+        }
+        if ($english) {
+            $lines += 'Each action will be backed up first and can be undone through Restore.'
+            $lines += 'Continue with these selected items?'
+            $title = 'Confirm high-impact cleanup'
+        } else {
+            $lines += '每个动作会先备份，可通过恢复撤销。'
+            $lines += '是否继续处理这些已选项目？'
+            $title = '确认高影响清理'
+        }
+        $result = [System.Windows.MessageBox]::Show(($lines -join [Environment]::NewLine), $title, 'YesNo', 'Warning')
+        return ($result -eq [System.Windows.MessageBoxResult]::Yes)
+    } catch {
+        return $false
+    }
 }
 
 function Format-GuiExecutionDetail {
@@ -1176,7 +2025,7 @@ function Get-GuiExecutionProcessStatus {
 function Read-GuiStrictExecutionResult {
     param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)]$ExpectedActions)
     $pending = Read-GuiPendingFile -Path $Path
-    $null = Get-GuiPendingSchemaVersion $pending
+    $null = Assert-GuiPendingEnvelopeShape $pending
     Assert-GuiPendingPresentationShape -Pending $pending
     $items = @($pending.actions)
     $expected = @($ExpectedActions)
@@ -1270,7 +2119,7 @@ function Complete-ExecutionPoll {
         }
         try {
             $pending = Read-GuiPendingFile -Path $script:ExecutionTempPath
-            $null = Get-GuiPendingSchemaVersion $pending
+            $null = Assert-GuiPendingEnvelopeShape $pending
             Assert-GuiPendingPresentationShape -Pending $pending
             $items = @($pending.actions)
             $expected = @($script:ExecutionActions)
@@ -1304,12 +2153,18 @@ function Complete-ExecutionPoll {
     Invoke-GuiTimerStop $script:ExecutionTimer
     $script:ExecutionLifecycle = 'exited'
     $exitCode = $probe.ExitCode
-    if ($exitCode -eq 0) {
+    if ($exitCode -eq 0 -or $exitCode -eq 2) {
         try {
             $result = Read-GuiStrictExecutionResult -Path $script:ExecutionTempPath -ExpectedActions $script:ExecutionActions
+            if ($exitCode -eq 2 -and $result.Summary['failed'] -le 0) {
+                throw 'execution exit 2 result does not contain a failed action.'
+            }
             Merge-PendingStatus $result
             $window.FindName('CompletedList').ItemsSource = @($result.Rows)
             Set-GuiCompletedSummary -Success $result.Summary['success'] -Failed $result.Summary['failed'] -Skipped $result.Summary['skipped'] -Manual $result.Summary['manual_required']
+            if ($exitCode -eq 2) {
+                $window.FindName('CompletedSummaryText').Text += [Environment]::NewLine + (Get-Text 'ExecPartialFailed')
+            }
             Set-GuiState completed
             $null = Clear-GuiExecutionResources -RemoveTemp -ProcessExitConfirmed
         } catch {
@@ -1344,12 +2199,14 @@ function Complete-ExecutionPoll {
 
 function Start-GuiExecution {
     param($List = $window.FindName('PendingList'))
-    if ($script:ExecutionInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached')) {
+    if ((Test-GuiInventoryBusy) -or (Test-GuiNormalScanBusy) -or $script:ExecutionInProgress -or $script:SuspiciousStopInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached')) {
         return $false
     }
     $script:ExecutionInProgress = $true
     $script:ExecutionLifecycle = 'starting'
     $script:ExecutionUnknownProbeCount = 0
+    Update-GuiExecuteAvailability -List $List
     $startedProcess = $false
     try {
         $checked = @(Resolve-GuiReviewedActions -List $List)
@@ -1357,6 +2214,21 @@ function Start-GuiExecution {
             $window.FindName('ReviewBoundaryText').Text = (Get-Text 'ExecEmpty')
             $null = Clear-GuiExecutionResources -RemoveTemp
             return $false
+        }
+
+        $manualActions = @($checked | ForEach-Object { $_._raw } | Where-Object { $_.execution_class -ceq 'manual_impact' })
+        $confirmedImpactSha256 = $null
+        if ($manualActions.Count -gt 0) {
+            $confirmedImpactSha256 = Get-ManualImpactDigest $manualActions
+            if ($confirmedImpactSha256 -isnot [string] -or $confirmedImpactSha256 -cnotmatch '^[0-9a-f]{64}$') {
+                throw '高影响清理摘要无效。请重新运行 scan 并审核。'
+            }
+            $confirmationCopies = @($manualActions | ForEach-Object { Copy-PendingActionForSubset $_ })
+            $result = Confirm-GuiImpactActions -Actions $confirmationCopies
+            if (-not ($result -is [bool] -and $result -eq $true)) {
+                $null = Clear-GuiExecutionResources -RemoveTemp
+                return $false
+            }
         }
 
         $payload = New-PendingSubsetPayload -Checked $checked -SourcePending $script:ReviewedPendingSnapshot
@@ -1374,7 +2246,9 @@ function Start-GuiExecution {
         }
         $window.FindName('ExecutionList').ItemsSource = @(ConvertTo-GuiExecutionRows $runningItems)
 
-        $script:ExecutionProcess = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll','-PendingFileArg',"`"$script:ExecutionTempPath`"",'-PendingSha256Arg',$pendingSha256
+        $cleanArguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll','-PendingFileArg',"`"$script:ExecutionTempPath`"",'-PendingSha256Arg',$pendingSha256)
+        if ($null -ne $confirmedImpactSha256) { $cleanArguments += @('-ConfirmedImpactSha256Arg',$confirmedImpactSha256) }
+        $script:ExecutionProcess = Start-Process powershell -Verb RunAs -PassThru -ArgumentList $cleanArguments
         if ($null -eq $script:ExecutionProcess) { throw '管理员进程未启动。' }
         $startedProcess = $true
         $script:ExecutionLifecycle = 'running'
@@ -1407,23 +2281,7 @@ if ($legacyBtnExec) { $legacyBtnExec.Add_Click({ Start-GuiExecution }) }
 $legacyBtnResult = $window.FindName('BtnResult')
 if ($legacyBtnResult) { $legacyBtnResult.Add_Click({
     $out = $window.FindName('ResultOutput')
-    $backupRoot = Join-Path $script:Root 'backups'
-    if (-not (Test-Path $backupRoot)) { $out.Text = (Get-Text 'NoBackup'); return }
-    $latest = Get-ChildItem $backupRoot -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $latest) { $out.Text = (Get-Text 'NoBackup'); return }
-    $mf = Join-Path $latest.FullName 'manifest.json'
-    if (-not (Test-Path $mf)) { $out.Text = "manifest not found: $mf"; return }
-    $man = Get-Content $mf -Raw -Encoding UTF8 | ConvertFrom-Json
-    $lines = @("latest: $($latest.Name)", '')
-    $ok = 0; $bad = 0
-    foreach ($m in $man) {
-        $v = if ($m.verified) { 'OK' } else { 'FAIL' }
-        $lines += "  [$v] $($m.type) $($m.name)"
-        if ($m.verified) { $ok++ } else { $bad++ }
-    }
-    $lines += ''; $lines += "success $ok, failed $bad"
-    $lines += ''; $lines += "restore: cpu-cleaner.ps1 -Mode restore -BackupDir `".\backups\$($latest.Name)`""
-    $out.Text = ($lines -join "`r`n")
+    $out.Text = Get-Text 'LegacyBackupUnsupported'
 }) }
 
 function Show-GuiMessage {
@@ -1434,55 +2292,103 @@ function Show-GuiMessage {
     [System.Windows.MessageBox]::Show($Message, (Get-Text 'AppName'), 'OK', $Icon) | Out-Null
 }
 
-function Get-GuiRestoreRows {
-    param([Parameter(Mandatory=$true)][string]$BackupPath)
-    $manifestPath = Join-Path $BackupPath 'manifest.json'
-    if (-not (Test-Path -LiteralPath $manifestPath)) { return @() }
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $rows = foreach ($item in @($manifest)) {
-        $state = if ($item.verified -eq $true) { 'success' } else { 'failed' }
-        [pscustomobject]@{
-            State = $state
-            StateLabel = ('[{0}] {1} {2}' -f $state, [string]$item.type, [string]$item.name)
-            Name = [string]$item.name
-            Type = [string]$item.type
-            Reason = [string]$item.note
-        }
-    }
-    return @($rows)
-}
-
 function Invoke-GuiRestoreLatest {
-    $backupRoot = Join-Path $script:Root 'backups'
-    $latest = Get-ChildItem $backupRoot -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $latest) {
-        Show-GuiMessage -Message (Get-Text 'RestoreNone') -Icon Information
-        return $false
-    }
+    if ((Test-GuiInventoryBusy) -or (Test-GuiNormalScanBusy) -or $script:RestoreInProgress -or $null -ne $script:RestoreProcess -or $script:RestoreLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:ExecutionInProgress -or $null -ne $script:ExecutionProcess -or $script:ExecutionLifecycle -cin @('starting','running','unknown','detached') -or
+        $script:SuspiciousStopInProgress -or $null -ne $script:SuspiciousStopProcess -or $script:SuspiciousStopLifecycle -cin @('starting','running','unknown','detached')) { return $false }
+    $script:RestoreInProgress = $true
+    $script:RestoreLifecycle = 'starting'
+    $script:RestoreUnknownProbeCount = 0
+    $restoreButton = $window.FindName('BtnRestore')
+    $restoreButton.IsEnabled = $false
+    Update-GuiExecuteAvailability
+    Update-GuiStopProcessAvailability
     $window.FindName('CompletedSummaryText').Text = ''
     $window.FindName('CompletedList').ItemsSource = $null
     try {
-        $proc = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','restore','-BackupDir',"`"$script:Root\backups\$($latest.Name)`""
-        if ($null -eq $proc) { throw '管理员恢复进程未启动。' }
-        $proc.WaitForExit()
-        $exitCode = [int]$proc.ExitCode
-        if ($exitCode -in @(0,2)) {
-            $window.FindName('CompletedList').ItemsSource = @(Get-GuiRestoreRows -BackupPath $latest.FullName)
-            $restoreSummary = if ($exitCode -eq 0) { (Get-Text 'RestoreOk') -f $latest.Name } else { Get-Text 'RestorePartial' }
-            Set-GuiCompletedSummary -Failed $(if ($exitCode -eq 2) { 1 } else { 0 }) -Text $restoreSummary
-            Set-GuiState completed -Force
+        $script:RestoreProcess = Start-Process powershell -Verb RunAs -PassThru -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','restore','-BackupDir','latest'
+        if ($null -eq $script:RestoreProcess) { throw '管理员恢复进程未启动。' }
+        $script:RestoreLifecycle = 'running'
+        $script:RestoreTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:RestoreTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $script:RestoreTimer.Add_Tick({ $null = Complete-GuiRestorePoll })
+        $script:RestoreTimer.Start()
+        return $true
+    } catch {
+        $summary = (Get-Text 'RestoreErr') -f $_.Exception.Message
+        $processStarted = $null -ne $script:RestoreProcess
+        $mutation = if ($processStarted) { Get-Text 'RestoreStatusUnknown' } else { Get-Text 'RestoreNotStarted' }
+        Set-GuiError -Summary $summary -Mutation $mutation -Detail $_.Exception.ToString()
+        Show-GuiMessage -Message $summary -Icon Warning
+        if ($processStarted) {
+            Invoke-GuiTimerStop $script:RestoreTimer
+            $script:RestoreLifecycle = 'detached'
+            $script:RestoreInProgress = $false
+            Update-GuiExecuteAvailability
+            Update-GuiStopProcessAvailability
+        } else {
+            $script:RestoreProcess = $null
+            $script:RestoreTimer = $null
+            $script:RestoreLifecycle = 'idle'
+            $script:RestoreInProgress = $false
+            $restoreButton.IsEnabled = $true
+        }
+        return $false
+    }
+}
+
+function Clear-GuiRestoreResources {
+    param([switch]$ProcessExitConfirmed)
+    if ($null -ne $script:RestoreProcess -and -not $ProcessExitConfirmed) { return $false }
+    Invoke-GuiTimerStop $script:RestoreTimer
+    $script:RestoreProcess = $null
+    $script:RestoreTimer = $null
+    $script:RestoreInProgress = $false
+    $script:RestoreLifecycle = 'idle'
+    $script:RestoreUnknownProbeCount = 0
+    $window.FindName('BtnRestore').IsEnabled = $true
+    Update-GuiExecuteAvailability
+    Update-GuiStopProcessAvailability
+    return $true
+}
+
+function Complete-GuiRestorePoll {
+    if ($null -eq $script:RestoreProcess) { return $false }
+    $probe = Get-GuiExecutionProcessStatus -Process $script:RestoreProcess
+    if ($probe.State -eq 'running') { return $false }
+    if ($probe.State -eq 'unknown') {
+        $script:RestoreLifecycle = 'unknown'
+        $script:RestoreUnknownProbeCount++
+        if ($script:RestoreUnknownProbeCount -ge $script:ExecutionUnknownProbeLimit) {
+            Invoke-GuiTimerStop $script:RestoreTimer
+            $script:RestoreInProgress = $false
+            $script:RestoreLifecycle = 'detached'
+            $summary = (Get-Text 'RestoreErr') -f 'process status unknown'
+            Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreStatusUnknown') -Detail $probe.Detail
             return $true
         }
+        return $false
+    }
+
+    Invoke-GuiTimerStop $script:RestoreTimer
+    $script:RestoreLifecycle = 'exited'
+    $exitCode = $probe.ExitCode
+    if ($exitCode -eq 0) {
+        Set-GuiCompletedSummary -Text (Get-Text 'RestoreOk')
+        Set-GuiState completed -Force
+    } elseif ($exitCode -eq 2) {
+        Set-GuiCompletedSummary -Failed 1 -Text (Get-Text 'RestorePartial')
+        Set-GuiState completed -Force
+    } elseif ($exitCode -eq 3) {
+        $summary = Get-Text 'RestoreNone'
+        Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreNone') -Detail $summary
+    } else {
         $summary = (Get-Text 'RestoreErr') -f "ExitCode=$exitCode"
         Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreMayHaveChanged') -Detail $summary
         Show-GuiMessage -Message $summary -Icon Warning
-        return $false
-    } catch {
-        $summary = (Get-Text 'RestoreErr') -f $_.Exception.Message
-        Set-GuiError -Summary $summary -Mutation (Get-Text 'RestoreNotStarted') -Detail $_.Exception.ToString()
-        Show-GuiMessage -Message $summary -Icon Warning
-        return $false
     }
+    $null = Clear-GuiRestoreResources -ProcessExitConfirmed
+    return $true
 }
 
 # ---------- 恢复最近一次处理 ----------

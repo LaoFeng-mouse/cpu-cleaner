@@ -36,6 +36,29 @@ BeforeAll {
         }
     }
 
+    function New-ManualImpactProfiles {
+        $profiles = New-AuthProfiles -Action 'none' -Safe $false
+        $rule = $profiles.profiles[0]
+        $rule | Add-Member -NotePropertyName manual_actions -NotePropertyValue ([pscustomobject]@{ service = 'disable_service' })
+        $rule | Add-Member -NotePropertyName cleanup_policy -NotePropertyValue ([pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'; default_selected = $false; requires_confirmation = $true
+            impact_cn = '会影响厂商安全组件'; cleanup_reason_cn = '不使用该组件时可减少后台'
+        })
+        return $profiles
+    }
+
+    function New-ManualImpactPending {
+        $pending = New-ServicePending
+        $pending | Add-Member -NotePropertyName safe -NotePropertyValue $false
+        $pending | Add-Member -NotePropertyName execution_class -NotePropertyValue 'manual_impact'
+        $pending | Add-Member -NotePropertyName necessity -NotePropertyValue 'optional'
+        $pending | Add-Member -NotePropertyName default_selected -NotePropertyValue $false
+        $pending | Add-Member -NotePropertyName requires_confirmation -NotePropertyValue $true
+        $pending | Add-Member -NotePropertyName impact_cn -NotePropertyValue '会影响厂商安全组件'
+        $pending | Add-Member -NotePropertyName cleanup_reason_cn -NotePropertyValue '不使用该组件时可减少后台'
+        return $pending
+    }
+
     function Is-Admin { return $false }
     function Write-Step { param([string]$Message) }
     if (-not (Get-Command Get-NormalizedFinalPathFromHandle -ErrorAction SilentlyContinue)) {
@@ -519,16 +542,78 @@ Describe '执行前最终授权防 TOCTOU' {
 
     It '真实 clean 选中循环在任何备份或 mutation 之前调用最终授权 helper' {
         $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
-        $loop = $source.IndexOf('foreach ($idx in $indexes)')
+        $selection = $source.IndexOf('$selectedActions = @()')
+        $impactDigest = $source.IndexOf('New-ManualImpactConfirmationContext', $selection)
+        $loop = $source.IndexOf('for ($selectedIndex = 0;', $selection)
         $guard = $source.IndexOf('Test-SelectedPendingActionAuthorized', $loop)
-        $mutations = @('New-Item -ItemType Directory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Invoke-LiteralAutostartRemoval', 'Disable-ScheduledTask', 'Stop-Process') |
+        $mutations = @('Initialize-ProtectedBackupDirectory', 'Backup-RegistryKey', 'sc.exe config', 'sc.exe stop', 'Invoke-LiteralAutostartRemoval', 'Disable-ScheduledTask') |
             ForEach-Object { $source.IndexOf($_, $loop) }
 
+        $selection | Should -BeGreaterOrEqual 0
+        $impactDigest | Should -BeGreaterThan $selection
         $loop | Should -BeGreaterOrEqual 0
         $guard | Should -BeGreaterThan $loop
         foreach ($mutation in $mutations) {
             $mutation | Should -BeGreaterThan $guard
         }
+    }
+
+    It 'restore 主入口严格按 resolve trusted-package plan-mutation 顺序且可信包 helper 完成 manifest 验证' {
+        $source = Get-Content (Join-Path $script:Root 'src\Core\ActionEngine.ps1') -Raw
+        $start = $source.IndexOf('function Invoke-Restore {')
+        $end = $source.IndexOf('function Update-Profiles {', $start)
+        $body = $source.Substring($start, $end - $start)
+        $resolve = $body.IndexOf('Resolve-TrustedRestoreBackupDirectory')
+        $trustedPackage = $body.IndexOf('Get-TrustedRestorePackage -BackupDir')
+        $execute = $body.IndexOf('Invoke-ValidatedRestoreManifest')
+
+        $resolve | Should -BeGreaterOrEqual 0
+        $trustedPackage | Should -BeGreaterThan $resolve
+        $execute | Should -BeGreaterThan $trustedPackage
+
+        $helperStart = $source.IndexOf('function Get-TrustedRestorePackage')
+        $helperEnd = $source.IndexOf('function Resolve-LatestTrustedRestorePackage', $helperStart)
+        $helperBody = $source.Substring($helperStart, $helperEnd - $helperStart)
+        $packageAcl = $helperBody.IndexOf('Assert-TrustedBackupPackagePath')
+        $join = $helperBody.IndexOf("Join-Path `$resolvedBackupDir 'manifest.json'")
+        $manifestAcl = $helperBody.IndexOf('Assert-TrustedBackupPathAcl')
+        $read = $helperBody.IndexOf('Read-BackupManifestEntries')
+        $plan = $helperBody.IndexOf('Get-RestorePlan')
+        $packageAcl | Should -BeGreaterOrEqual 0
+        $join | Should -BeGreaterThan $packageAcl
+        $manifestAcl | Should -BeGreaterThan $join
+        $read | Should -BeGreaterThan $manifestAcl
+        $plan | Should -BeGreaterThan $read
+
+        $driver = Join-Path $TestDrive 'restore-order-driver.ps1'
+        $orderFile = Join-Path $TestDrive 'restore-order.txt'
+        $projectRootLiteral = $script:Root.Replace("'", "''")
+        $orderFileLiteral = $orderFile.Replace("'", "''")
+        $driverSource = @"
+`$projectRoot = '$projectRootLiteral'
+`$orderFile = '$orderFileLiteral'
+`$src = Get-Content (Join-Path `$projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
+`$idx = `$src.IndexOf("switch (```$Mode)")
+`$defs = `$src.Substring(0, `$idx).Replace('`$script:Root = Split-Path -Parent `$MyInvocation.MyCommand.Path', '`$script:Root = `$projectRoot')
+Invoke-Expression `$defs
+`$BackupDir = 'C:\legacy\20260811_120000'
+`$script:BackupRoot = 'C:\legacy'
+`$script:Order = @()
+function Is-Admin { return `$true }
+function Resolve-TrustedRestoreBackupDirectory { param(`$RequestedPath, `$LegacyRoot); `$script:Order += 'resolve'; return 'C:\trusted\20260811_120000' }
+function Get-TrustedRestorePackage { param(`$BackupDir); if (`$BackupDir -notmatch 'trusted') { throw ('wrong backup dir: ' + `$BackupDir) }; `$script:Order += 'trusted-package'; return [pscustomobject]@{BackupDir=`$BackupDir;Manifest=@([pscustomobject]@{type='process';name='noop';path=''})} }
+function Invoke-ValidatedRestoreManifest { `$script:Order += 'plans-then-pre-mutation'; [System.IO.File]::WriteAllText(`$orderFile, ('ORDER=' + (`$script:Order -join ','))); return [pscustomobject]@{success=`$true} }
+function Write-Step {}
+Invoke-Restore
+"@
+        # Windows PowerShell 5.1 treats UTF-8 without a BOM as the active ANSI code page.
+        # The generated script embeds $script:Root, so preserve non-ASCII checkout paths.
+        [System.IO.File]::WriteAllText($driver, $driverSource, [System.Text.UTF8Encoding]::new($true))
+
+        $output = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $driver 2>&1
+
+        $LASTEXITCODE | Should -Be 0 -Because ($output -join "`n")
+        (Get-Content -LiteralPath $orderFile -Raw) | Should -BeExactly 'ORDER=resolve,trusted-package,plans-then-pre-mutation'
     }
 }
 
@@ -557,10 +642,31 @@ Describe 'pending JSON 重复属性预检' {
         Test-JsonPropertyNamesUnique '{"actions":[{"id":"a","\u0069d":"b"}]}' | Should -BeFalse
     }
 
-    It '接受合法嵌套 JSON 并由严格入口转换' {
-        $json = '{"pending_schema_version":2,"actions":[{"id":"a","status":"pending"}],"observations":[]}'
+    It '拒绝字符串中的孤立高低 surrogate <label>' -TestCases @(
+        @{ label='high property'; json='{"\uD800":1}' }
+        @{ label='low property'; json='{"\uDC00":1}' }
+        @{ label='high value'; json='{"value":"\uD800"}' }
+        @{ label='low value'; json='{"value":"\uDC00"}' }
+    ) {
+        param($label, $json)
+        Test-JsonPropertyNamesUnique $json | Should -BeFalse -Because $label
+        { ConvertFrom-StrictPendingJson $json } | Should -Throw '*代理*' -Because $label
+    }
+
+    It '接受合法高低 surrogate pair' {
+        $json = '{"\uD83D\uDE00":"\uD83D\uDE00"}'
         Test-JsonPropertyNamesUnique $json | Should -BeTrue
-        (ConvertFrom-StrictPendingJson $json).pending_schema_version | Should -Be 2
+        { ConvertFrom-StrictPendingJson $json } | Should -Not -Throw
+    }
+
+    It '在 ConvertFrom-Json 折叠属性前拒绝高低孤立 surrogate 键组合' {
+        { ConvertFrom-StrictPendingJson '{"\uD800":1,"\uDC00":2}' } | Should -Throw '*代理*'
+    }
+
+    It '接受合法嵌套 JSON 并由严格入口转换' {
+        $json = '{"pending_schema_version":3,"actions":[{"id":"a","status":"pending"}],"observations":[]}'
+        Test-JsonPropertyNamesUnique $json | Should -BeTrue
+        (ConvertFrom-StrictPendingJson $json).pending_schema_version | Should -Be 3
     }
 
     It '严格入口在 ConvertFrom-Json 前拒绝重复键' {
@@ -577,11 +683,11 @@ Describe 'pending JSON 重复属性预检' {
 
     It 'pending 读取入口不再使用 Get-Item 与 Get-Content 分离检查和读取' {
         $path = Join-Path $TestDrive 'single-stream.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         Mock Get-Item { throw 'Get-Item must not run' }
         Mock Get-Content { throw 'Get-Content must not run' }
 
-        (Read-StrictPendingJsonFile $path).pending_schema_version | Should -Be 2
+        (Read-StrictPendingJsonFile $path).pending_schema_version | Should -Be 3
         Assert-MockCalled Get-Item -Times 0 -Exactly
         Assert-MockCalled Get-Content -Times 0 -Exactly
     }
@@ -617,7 +723,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '精确 5 MiB 的合法 JSON 位于允许边界' {
         $path = Join-Path $TestDrive 'max-pending.json'
-        $prefix = '{"pending_schema_version":2,"actions":[]}'
+        $prefix = '{"pending_schema_version":3,"actions":[]}'
         $prefixBytes = [System.Text.Encoding]::UTF8.GetBytes($prefix)
         $json = $prefix + [string]::new([char]' ', (5MB - $prefixBytes.Length))
         [System.IO.File]::WriteAllBytes($path, [System.Text.Encoding]::UTF8.GetBytes($json))
@@ -633,12 +739,12 @@ Describe 'pending JSON 重复属性预检' {
     ) {
         param($label, $bom)
         $path = Join-Path $TestDrive ("utf8-$label.json")
-        $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes('{"pending_schema_version":2,"name":"测试","actions":[]}')
+        $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes('{"pending_schema_version":3,"name":"测试","actions":[]}')
         $bytes = if ($bom) { [byte[]]([System.Text.Encoding]::UTF8.GetPreamble() + $jsonBytes) } else { $jsonBytes }
         [System.IO.File]::WriteAllBytes($path, $bytes)
 
         $pending = Read-StrictPendingJsonFile $path
-        $pending.pending_schema_version | Should -Be 2
+        $pending.pending_schema_version | Should -Be 3
         $pending.name | Should -Be '测试'
     }
 
@@ -665,7 +771,7 @@ Describe 'pending JSON 重复属性预检' {
         $path = Join-Path $TestDrive 'locked-read-write.json'
         $replacement = Join-Path $TestDrive 'locked-replacement.json'
         $backup = Join-Path $TestDrive 'locked-backup.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         [System.IO.File]::WriteAllText($replacement, '{"replacement":true}', [System.Text.UTF8Encoding]::new($false))
         $stream = $null
         try {
@@ -676,7 +782,7 @@ Describe 'pending JSON 重复属性预检' {
             { [System.IO.File]::Delete($path) } | Should -Throw
             { [System.IO.File]::Replace($replacement, $path, $backup) } | Should -Throw
 
-            $payload = [pscustomobject]@{ pending_schema_version=2; generated='locked'; actions=@(); observations=@(); suspicious=@() }
+            $payload = [pscustomobject]@{ pending_schema_version=3; generated='locked'; actions=@(); resolved=@(); observations=@(); suspicious=@() }
             Write-PendingToLockedStream -Stream $stream -Pending $payload
         } finally {
             if ($null -ne $stream) { $stream.Dispose() }
@@ -690,7 +796,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '普通文件的已打开句柄最终路径与输入身份一致' {
         $path = Join-Path $TestDrive 'identity-normal.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         try {
             Test-OpenedPendingFileIdentity -Stream $stream -Path $path | Should -BeTrue
@@ -701,7 +807,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '普通临时文件的已打开句柄 link count 严格为 1' {
         $path = Join-Path $TestDrive 'single-link.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         try {
             Test-OpenedPendingFileHasSingleLink -Stream $stream | Should -BeTrue
@@ -713,7 +819,7 @@ Describe 'pending JSON 重复属性预检' {
     It '存在第二个硬链接时 Open-LockedPendingFile 在读取前关闭并拒绝' {
         $target = Join-Path $TestDrive 'hardlink-target.json'
         $link = Join-Path $TestDrive 'hardlink-alias.json'
-        [System.IO.File]::WriteAllText($target, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($target, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $null = New-Item -ItemType HardLink -Path $link -Target $target
         Mock Read-LimitedPendingJsonStream { throw 'must not parse hardlink' }
         $script:UnexpectedHardlinkStream = $null
@@ -731,7 +837,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It 'GetFileInformationByHandle API 失败或 link count 非 1 时 fail closed' {
         $path = Join-Path $TestDrive 'link-api-failure.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         try {
             Mock Invoke-GetFileInformationByHandleNative { return [pscustomobject]@{ success=$false; nNumberOfLinks=[uint32]0 } }
@@ -749,7 +855,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '已打开句柄返回不同最终目标时失败关闭且路径换回不改变结论' {
         $path = Join-Path $TestDrive 'identity-input.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         Mock Invoke-GetFinalPathNameByHandleNative {
             $null = $Builder.Append('\\?\C:\Different\target.json')
@@ -766,7 +872,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '最终路径 Windows API 失败时句柄身份校验 fail closed' {
         $path = Join-Path $TestDrive 'identity-api-failure.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
         Mock Invoke-GetFinalPathNameByHandleNative { return [uint32]0 }
         try {
@@ -778,7 +884,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It '句柄身份不一致时 Invoke-Clean 不进入 JSON 解析或写回并释放句柄' {
         $path = Join-Path $TestDrive 'identity-block-clean.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $oldPendingFile = $script:PendingFile
         $script:PendingFile = $path
         Mock Is-Admin { $true }
@@ -804,7 +910,7 @@ Describe 'pending JSON 重复属性预检' {
         $junctionPath = Join-Path $TestDrive 'identity-junction'
         $null = New-Item -ItemType Directory -Path $targetDirectory
         $null = New-Item -ItemType Junction -Path $junctionPath -Target $targetDirectory
-        [System.IO.File]::WriteAllText((Join-Path $targetDirectory 'pending.json'), '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $targetDirectory 'pending.json'), '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $pendingPath = Join-Path $junctionPath 'pending.json'
         Mock Assert-PendingPathIsNotReparsePoint {}
         $script:UnexpectedIdentityStream = $null
@@ -821,7 +927,7 @@ Describe 'pending JSON 重复属性预检' {
         $null = New-Item -ItemType Directory -Path $targetDirectory
         $null = New-Item -ItemType Junction -Path $junctionPath -Target $targetDirectory
         $pendingPath = Join-Path $junctionPath 'pending.json'
-        [System.IO.File]::WriteAllText((Join-Path $targetDirectory 'pending.json'), '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $targetDirectory 'pending.json'), '{"pending_schema_version":3,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
 
         $script:UnexpectedReparseStream = $null
         try {
@@ -833,7 +939,7 @@ Describe 'pending JSON 重复属性预检' {
 
     It 'Invoke-Clean 严格 JSON 异常后释放 pending 独占写句柄' {
         $path = Join-Path $TestDrive 'invalid-locked-pending.json'
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[],"Actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[],"Actions":[]}', [System.Text.UTF8Encoding]::new($false))
         $oldPendingFile = $script:PendingFile
         $script:PendingFile = $path
         Mock Is-Admin { $true }
@@ -847,7 +953,7 @@ Describe 'pending JSON 重复属性预检' {
     }
 }
 
-Describe 'clean pending v2 状态持久化' {
+Describe 'clean pending v3 状态持久化' {
     It 'CLI 同句柄写回无损保留 <Levels> 层 envelope 扩展字段' -TestCases @(
         @{ Levels = 12 }
         @{ Levels = 55 }
@@ -858,15 +964,16 @@ Describe 'clean pending v2 状态持久化' {
             $deep = [pscustomobject]@{ next = $deep }
         }
         $payload = [pscustomobject]@{
-            pending_schema_version = 2
+            pending_schema_version = 3
             generated = 'deep'
             actions = @()
+            resolved = @()
             observations = @()
             suspicious = @()
             extension = $deep
         }
         $path = Join-Path $TestDrive "deep-cli-$Levels.json"
-        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":2,"actions":[]}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($path, '{"pending_schema_version":3,"actions":[],"resolved":[],"observations":[],"suspicious":[]}', [System.Text.UTF8Encoding]::new($false))
         $stream = $null
         try {
             $stream = Open-LockedPendingFile $path
@@ -883,11 +990,12 @@ Describe 'clean pending v2 状态持久化' {
     }
 
     It '初始授权全部拒绝也写回 skipped 并保留完整安全 envelope' {
-        $path = Join-Path $TestDrive 'rejected-v2.json'
+        $path = Join-Path $TestDrive 'rejected-v3.json'
         $pending = [pscustomobject]@{
-            pending_schema_version = 2
+            pending_schema_version = 3
             generated = 'scan-time'
             actions = @([pscustomobject]@{ id='reject'; status='pending'; action='disable_service'; hit_type='service' })
+            resolved = @([pscustomobject]@{ id='resolved'; status='success'; retained='yes' })
             observations = @([pscustomobject]@{ id='observe'; obs_reason='keep' })
             suspicious = @([pscustomobject]@{ PID=42; Name='suspect' })
             safety_nonce = 'preserve-me'
@@ -907,23 +1015,190 @@ Describe 'clean pending v2 状态持久化' {
             $script:PendingFile = $oldPendingFile
         }
 
-        $after.pending_schema_version | Should -Be 2
+        $after.pending_schema_version | Should -Be 3
         $after.generated | Should -Be 'scan-time'
         $after.actions[0].status | Should -Be 'skipped'
+        $after.resolved[0].retained | Should -Be 'yes'
         $after.observations[0].obs_reason | Should -Be 'keep'
         $after.suspicious[0].PID | Should -Be 42
         $after.safety_nonce | Should -Be 'preserve-me'
     }
 
-    It '集中 payload builder 保留 envelope 扩展字段但强制 v2 和当前数组' {
-        $source = [pscustomobject]@{ pending_schema_version=2; generated='g'; actions=@('old'); observations=@('obs'); suspicious=@('sus'); safety_nonce='n' }
-        $built = Build-PendingV2Payload -Source $source -Actions @('new')
+    It '集中 payload builder 保留 envelope 扩展字段但强制 v3 和当前数组' {
+        $source = [pscustomobject]@{ pending_schema_version=3; generated='g'; actions=@('old'); resolved=@('done'); observations=@('obs'); suspicious=@('sus'); safety_nonce='n' }
+        $built = Build-PendingPayload -Source $source -Actions @('new')
 
-        $built.pending_schema_version | Should -Be 2
+        $built.pending_schema_version | Should -Be 3
         $built.generated | Should -Be 'g'
         @($built.actions) | Should -Be @('new')
+        @($built.resolved) | Should -Be @('done')
         @($built.observations) | Should -Be @('obs')
         @($built.suspicious) | Should -Be @('sus')
         $built.safety_nonce | Should -Be 'n'
+    }
+}
+
+Describe 'manual_impact 精确影响确认' {
+    BeforeEach {
+        Mock Get-Service { [pscustomobject]@{ Name='Svc'; DisplayName='Svc' } } -ParameterFilter { $Name -eq 'Svc' }
+    }
+
+    It 'automatic_safe exact 无需 impact digest 仍授权' {
+        $pending = New-ServicePending
+        $pending | Add-Member -NotePropertyName execution_class -NotePropertyValue 'automatic_safe'
+
+        Test-PendingActionAuthorized $pending (New-AuthProfiles) | Should -BeTrue
+    }
+
+    It 'manual_impact 缺失、空白、非法、错误或 stale digest 均拒绝' -TestCases @(
+        @{ label='missing'; digest=$null }
+        @{ label='blank'; digest=' ' }
+        @{ label='short'; digest=('a' * 63) }
+        @{ label='non-hex'; digest=('g' * 64) }
+        @{ label='wrong'; digest=('0' * 64) }
+    ) {
+        param($label, $digest)
+        $pending = New-ManualImpactPending
+        $expected = Get-ManualImpactDigest @($pending)
+
+        Test-PendingActionAuthorized $pending (New-ManualImpactProfiles) $digest $expected | Should -BeFalse -Because $label
+    }
+
+    It 'manual_impact 正确 digest（接受大写输入）授权' {
+        $pending = New-ManualImpactPending
+        $digest = Get-ManualImpactDigest @($pending)
+
+        Test-PendingActionAuthorized $pending (New-ManualImpactProfiles) $digest.ToUpperInvariant() $digest | Should -BeTrue
+    }
+
+    It 'manual_impact 最终授权缺少 selection confirmation context 时失败关闭' {
+        $pending = New-ManualImpactPending
+
+        Test-SelectedPendingActionAuthorized $pending (New-ManualImpactProfiles) $null | Should -BeFalse
+        $pending.status | Should -Be 'skipped'
+    }
+
+    It '另一 identity set 的合法 digest 不能授权当前 manual action' {
+        $pending = New-ManualImpactPending
+        $other = New-ManualImpactPending
+        $other.id = 'other-rule'
+        $currentDigest = Get-ManualImpactDigest @($pending)
+        $otherDigest = Get-ManualImpactDigest @($other)
+
+        $otherDigest | Should -Not -Be $currentDigest
+        Test-PendingActionAuthorized $pending (New-ManualImpactProfiles) $otherDigest $currentDigest | Should -BeFalse
+    }
+
+    It 'manual identities 的输入顺序不影响 digest，而增删或替换目标会改变 digest' {
+        $first = New-ManualImpactPending
+        $second = New-ManualImpactPending
+        $second.service_name = 'OtherSvc'
+        $second.matched_pattern = 'OtherSvc'
+
+        $forward = Get-ManualImpactDigest @($first, $second)
+        $reverse = Get-ManualImpactDigest @($second, $first)
+        $removed = Get-ManualImpactDigest @($first)
+        $replacement = New-ManualImpactPending
+        $replacement.id = 'other-rule'
+
+        $forward | Should -Be $reverse
+        $forward | Should -Not -Be $removed
+        $forward | Should -Not -Be (Get-ManualImpactDigest @($first, $replacement))
+    }
+
+    It '同一 manual identity 重复 1、2、N 次得到同一 digest' {
+        $manual = New-ManualImpactPending
+        $single = Get-ManualImpactDigest @($manual)
+
+        (Get-ManualImpactDigest @($manual, $manual)) | Should -Be $single
+        (Get-ManualImpactDigest @($manual, $manual, $manual, $manual, $manual)) | Should -Be $single
+    }
+
+    It 'Ordinal identity 集合不合并仅大小写不同的 identity' {
+        $lower = New-ManualImpactPending
+        $upper = New-ManualImpactPending
+        $upper.id = 'Rule'
+
+        (Get-ManualImpactDigest @($lower, $upper)) | Should -Not -Be (Get-ManualImpactDigest @($lower))
+    }
+
+    It 'pending PSObject 属性插入顺序不同仍产生相同 canonical identity key 和 digest' {
+        $forward = New-ManualImpactPending
+        $reverse = [pscustomobject]@{}
+        $propertyNames = @($forward.PSObject.Properties.Name)
+        [array]::Reverse($propertyNames)
+        foreach ($propertyName in $propertyNames) {
+            $reverse | Add-Member -NotePropertyName $propertyName -NotePropertyValue $forward.$propertyName
+        }
+
+        (Get-PendingIdentityKey $reverse) | Should -Be (Get-PendingIdentityKey $forward)
+        (Get-ManualImpactDigest @($reverse)) | Should -Be (Get-ManualImpactDigest @($forward))
+    }
+
+    It 'canonical identity 固定向量在 PS5 和 PS7 输出一致' {
+        $pending = New-ManualImpactPending
+        $expectedKey = '{"id":"rule","hit_type":"service","action":"disable_service","service_name":"Svc","service_display_name":null,"autostart_source":null,"autostart_name":null,"autostart_value":null,"task_name":null,"task_path":null,"process_name":null,"process_id":null,"process_path":null,"matched_pattern":"Svc","matched_type":"exact","matched_field":"service_name"}'
+        $expectedDigest = 'ebfe00aca1a05377b089a2c7ca0792d9525459c12963541dbad74ce59e7941d9'
+
+        Get-PendingIdentityKey $pending | Should -BeExactly $expectedKey
+        Get-ManualImpactDigest @($pending) | Should -BeExactly $expectedDigest
+    }
+
+    It '任一有效授权 identity 字段值变化仍改变 key 和 digest' -TestCases @(
+        @{ property='id'; value='other-rule' }
+        @{ property='service_name'; value='OtherSvc' }
+        @{ property='service_display_name'; value='Other Display' }
+        @{ property='matched_pattern'; value='OtherSvc' }
+        @{ property='matched_field'; value='service_display_name' }
+    ) {
+        param($property, $value)
+        $original = New-ManualImpactPending
+        $changed = New-ManualImpactPending
+        if ($changed.PSObject.Properties.Name -contains $property) { $changed.$property = $value }
+        else { $changed | Add-Member -NotePropertyName $property -NotePropertyValue $value }
+
+        Get-PendingIdentityKey $changed | Should -Not -Be (Get-PendingIdentityKey $original)
+        Get-ManualImpactDigest @($changed) | Should -Not -Be (Get-ManualImpactDigest @($original))
+    }
+
+    It 'digest 只纳入严格 manual_impact action，且身份包含 rule/action/target/provenance' {
+        $manual = New-ManualImpactPending
+        $automatic = New-ServicePending
+        $automatic | Add-Member -NotePropertyName execution_class -NotePropertyValue 'automatic_safe'
+        $manualOnly = Get-ManualImpactDigest @($manual)
+
+        (Get-ManualImpactDigest @($automatic, $manual)) | Should -Be $manualOnly
+        (Get-ManualImpactDigest @($automatic)) | Should -BeNullOrEmpty
+        $manual.matched_pattern = 'ChangedSvc'
+        (Get-ManualImpactDigest @($manual)) | Should -Not -Be $manualOnly
+    }
+
+    It 'manual_impact 的 contains 或 regex provenance 即使 digest 正确也拒绝' -TestCases @(
+        @{ type='contains'; pattern='Sv' }
+        @{ type='regex'; pattern='^Svc$' }
+    ) {
+        param($type, $pattern)
+        $pending = New-ManualImpactPending
+        $pending.matched_type = $type
+        $pending.matched_pattern = $pattern
+        $profiles = New-ManualImpactProfiles
+        $profiles.profiles[0].detect.services = @([pscustomobject]@{ match=$pattern; type=$type })
+        $digest = Get-ManualImpactDigest @($pending)
+
+        Test-PendingActionAuthorized $pending $profiles $digest $digest | Should -BeFalse
+    }
+
+    It 'scan 后 manual action、class 或 policy 变化均拒绝' -TestCases @(
+        @{ label='manual action'; mutate={ param($rule) $rule.manual_actions.service = 'disable_task' } }
+        @{ label='class'; mutate={ param($rule) $rule.cleanup_policy.execution_class = 'automatic_safe' } }
+        @{ label='policy'; mutate={ param($rule) $rule.cleanup_policy.impact_cn = '不同影响' } }
+    ) {
+        param($label, $mutate)
+        $pending = New-ManualImpactPending
+        $profiles = New-ManualImpactProfiles
+        & $mutate $profiles.profiles[0]
+        $digest = Get-ManualImpactDigest @($pending)
+
+        Test-PendingActionAuthorized $pending $profiles $digest $digest | Should -BeFalse -Because $label
     }
 }

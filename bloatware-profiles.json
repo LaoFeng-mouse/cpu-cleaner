@@ -13,7 +13,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "LeMCPManagerService",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          },
                                                          {
                                                              "match":  "LeMcpManager",
@@ -77,7 +77,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "XLSmartService",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -133,7 +133,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "LISFService",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -177,7 +177,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "LenovoServiceAS",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -229,7 +229,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "GAService",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -269,7 +269,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "SmartConnect",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -317,7 +317,7 @@
                                         "services":  [
                                                          {
                                                              "match":  "LnvVCamInstaller",
-                                                             "type":  "contains"
+                                                             "type":  "exact"
                                                          }
                                                      ],
                                         "processes":  [
@@ -352,9 +352,13 @@
                          "name_cn":  "联想安全中心组件",
                          "risk":  "low",
                          "safe":  false,
-                         "reason_cn":  "电脑管家安全组件，带自我保护禁不掉且属正常，随电脑管家运行，别硬刚（safe=false 只报告）",
+                         "reason_cn":  "联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需禁用",
                          "detect":  {
                                         "services":  [
+                                                         {
+                                                             "match":  "HRWSCCtrl",
+                                                             "type":  "exact"
+                                                         },
                                                          {
                                                              "match":  "HRWSCCtrl",
                                                              "type":  "contains"
@@ -377,6 +381,17 @@
                                          "service":  "none",
                                          "process":  "none"
                                      },
+                         "manual_actions":  {
+                                                "service":  "disable_service"
+                                            },
+                         "cleanup_policy":  {
+                                                "execution_class":  "manual_impact",
+                                                "necessity":  "optional",
+                                                "default_selected":  false,
+                                                "requires_confirmation":  true,
+                                                "impact_cn":  "可能影响联想电脑管家的安全状态、主动防护和通知",
+                                                "cleanup_reason_cn":  "不使用联想电脑管家时可减少常驻后台"
+                                            },
                          "evidence":  {
                                           "tested":  true,
                                           "tested_count":  1,
@@ -486,6 +501,14 @@
                                         "tasks":  [
                                                       {
                                                           "match":  "LenovoMachineFixUser_OOBE_AUTO_Notification",
+                                                          "type":  "exact"
+                                                      },
+                                                      {
+                                                          "match":  "Lenovo UDC Diagnostic Scan",
+                                                          "type":  "exact"
+                                                      },
+                                                      {
+                                                          "match":  "LenovoMachineFixUser_OOBE_AUTO_Notification",
                                                           "type":  "contains"
                                                       },
                                                       {
@@ -497,6 +520,14 @@
                          "actions":  {
                                          "task":  "disable_task"
                                      },
+                         "cleanup_policy":  {
+                                                "execution_class":  "automatic_safe",
+                                                "necessity":  "optional",
+                                                "default_selected":  true,
+                                                "requires_confirmation":  false,
+                                                "impact_cn":  "仅停用联想后台通知与诊断计划任务，不影响系统核心功能",
+                                                "cleanup_reason_cn":  "减少不需要的联想通知与诊断后台唤醒"
+                                            },
                          "evidence":  {
                                           "tested":  true,
                                           "tested_count":  1,

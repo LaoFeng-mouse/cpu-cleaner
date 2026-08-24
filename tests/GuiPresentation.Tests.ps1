@@ -88,6 +88,31 @@ Describe 'GUI presentation model' {
         }
     }
 
+    It 'counts the four review groups and formats their stable review summary' {
+        $counts = Get-GuiReviewCounts @(
+            [pscustomobject]@{ GroupKey='automatic' },
+            [pscustomobject]@{ GroupKey='manual' },
+            [pscustomobject]@{ GroupKey='manual' },
+            [pscustomobject]@{ GroupKey='resolved' },
+            [pscustomobject]@{ GroupKey='observation' },
+            [pscustomobject]@{ GroupKey='observation' }
+        )
+
+        $counts.automatic | Should -Be 1
+        $counts.manual | Should -Be 2
+        $counts.resolved | Should -Be 1
+        $counts.observation | Should -Be 2
+        (Format-GuiReviewCountsText $counts) | Should -Be '建议清理 1 项 · 可选清理 2 项 · 已处理 1 项 · 仅观察 2 项'
+    }
+
+    It 'uses the approved recommendation labels for executable review groups' {
+        $automatic = Get-GuiReviewPresentation -Branch actions -Name '自动项' -ExecutionClass automatic_safe -Necessity recommended -ImpactCn '低影响' -CleanupReasonCn '减少后台'
+        $manual = Get-GuiReviewPresentation -Branch actions -Name '手动项' -ExecutionClass manual_impact -Necessity optional -ImpactCn '有功能影响' -CleanupReasonCn '按需处理'
+
+        $automatic.GroupLabel | Should -BeExactly '建议清理'
+        $manual.GroupLabel | Should -BeExactly '可选清理'
+    }
+
     It 'formats exact matcher provenance without granting authority' {
         $raw = [pscustomobject]@{
             hit_type='service'; service_name='ExactSvc'; action='disable_service'
@@ -132,5 +157,33 @@ Describe 'GUI presentation model' {
         $rows[0].StateLabel | Should -Be '需要手动处理'
         $rows[1].StateLabel | Should -Be '执行中'
         $rows[2].StateLabel | Should -Be '等待执行'
+    }
+
+    It 'presents limited scan health as a warning and never as a clean empty state' {
+        $presentation = Get-GuiScanHealthPresentation -ScanHealth ([pscustomobject]@{
+            system_info='complete'
+            services='degraded'
+            tasks='unavailable'
+        }) -Warnings @() -Language zh
+
+        $presentation.Degraded | Should -BeTrue
+        $presentation.CanDeclareClean | Should -BeFalse
+        $presentation.StatusKey | Should -Be 'ResultStatusDegraded'
+        $presentation.EmptyHeadlineKey | Should -Be 'ResultHeadlineDegraded'
+        ($presentation.Warnings -join "`n") | Should -Match '不能判断电脑是否干净'
+        $presentation.EmptyHeadlineKey | Should -Not -Be 'ResultHeadlineEmpty'
+    }
+
+    It 'fails closed when scan health is missing null or not a structured object' -ForEach @(
+        @{ Health=$null; Name='null' }
+        @{ Health='complete'; Name='scalar string' }
+        @{ Health=@('complete'); Name='array' }
+        @{ Health=[pscustomobject]@{system_info='complete';services='complete'}; Name='missing category' }
+    ) {
+        $presentation = Get-GuiScanHealthPresentation -ScanHealth $Health -Warnings @() -Language en
+
+        $presentation.Degraded | Should -BeTrue -Because $Name
+        $presentation.CanDeclareClean | Should -BeFalse -Because $Name
+        $presentation.EmptyHeadlineKey | Should -Be 'ResultHeadlineDegraded' -Because $Name
     }
 }

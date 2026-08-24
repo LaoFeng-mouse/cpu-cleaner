@@ -26,6 +26,22 @@
 - Copy and content: app-owned Chinese copy stands alone and keeps the product rule explicit: scanning may be broad, execution must be narrow and revalidated. English text visible in deterministic rows is fixture data used only by the renderer, not hard-coded production interface copy.
 - Interaction and accessibility: automated GUI coverage verifies the seven-state journey, language repaint, default buttons, continuous keyboard navigation, screen-reader names, scroll resilience, truthful errors, restore outcomes, and non-mutating scan behavior. Off-screen rendering does not launch clean, restore, service, task, process, or Run-key mutation paths.
 
+## Privileged read-only scan presentation contract
+
+The seven product states remain unchanged; inventory collection is a truthful sub-phase of `scanning`, not a fabricated eighth state.
+
+| Checkpoint | Required presentation | Forbidden presentation |
+|---|---|---|
+| Idle | “Start safe scan”; normal-privilege identity | Claim that full service/task inventory already exists |
+| UAC request | Administrator **read-only** authorization and no-mutation copy | Cleanup, optimization, or automatic-fix wording |
+| Privileged collection | Complete services and scheduled tasks are being read | Fake percentage or suggestion that settings are changing |
+| Normal scan | Protected result is being validated, then actual scan phases stream | Using inventory before collector exit 0 |
+| Complete results | Separate executable actions and observations | Treating broad matchers as executable |
+| Limited results | Warning styling and copy that the PC cannot be declared clean | Clean/healthy empty-state copy |
+| Error/timeout/unknown | Real failure detail and explicit no-mutation statement; safety latch remains until process exit is confirmed | Silent downgrade after nonzero exit or unknown process state |
+
+UAC cancellation is the only automatic route to explicit limited scanning. The GUI remains normal privilege throughout. Cleanup remains a separate user-selected, hash-bound, administrator-revalidated, backed-up and recoverable operation.
+
 ## Comparison history
 
 ### Pass 1 - blocked
@@ -72,4 +88,4 @@
 
 ## Final result
 
-final result: runtime and visual revalidation passed; independent review pending
+final result: prior runtime and visual revalidation passed; privileged read-only scan automation added, fresh live UAC acceptance pending
