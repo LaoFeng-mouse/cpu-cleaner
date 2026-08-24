@@ -834,7 +834,11 @@ Invoke-Clean
 
         Save-PendingActions -Hits @($hit) -Suspicious @()
         $pendingJson = Get-Content $script:PendingFile -Raw -Encoding UTF8
-        $p = $pendingJson | ConvertFrom-Json -DateKind String
+        $p = if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+            $pendingJson | ConvertFrom-Json -DateKind String
+        } else {
+            $pendingJson | ConvertFrom-Json
+        }
 
         @($p.actions).Count | Should -Be 1
         @($p.resolved).Count | Should -Be 0

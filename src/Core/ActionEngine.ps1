@@ -113,15 +113,30 @@ function Remove-LiteralAutostartValue {
     }
 }
 
-function New-AutostartRemovalResult($Status, $Reason, $Backup = '', $Manifest = $null) {
-    return [pscustomobject]@{ status=$Status; reason=$Reason; backup=$Backup; manifest=$Manifest }
+function New-CleanupActionResult($Status, $ResultReason, $FailureStage = '', $Backup = '', $Manifest = $null) {
+    if ($Status -cnotin @('success','failed','skipped') -or $ResultReason -isnot [string] -or [string]::IsNullOrWhiteSpace($ResultReason)) {
+        throw 'cleanup action result is invalid'
+    }
+    if ($Status -ceq 'failed') {
+        if ($FailureStage -cnotin @('authorization','backup','mutation','verification','result_persistence')) { throw 'cleanup action failure_stage is invalid' }
+    } elseif ($FailureStage -cne '') {
+        throw 'non-failed cleanup action failure_stage must be empty'
+    }
+    return [pscustomobject]@{
+        status=$Status; result_reason=$ResultReason; failure_stage=[string]$FailureStage
+        reason=$ResultReason; backup=$Backup; manifest=$Manifest
+    }
+}
+
+function New-AutostartRemovalResult($Status, $Reason, $Backup = '', $Manifest = $null, $FailureStage = '') {
+    return New-CleanupActionResult -Status $Status -ResultReason $Reason -FailureStage $FailureStage -Backup $Backup -Manifest $Manifest
 }
 
 function Invoke-LiteralAutostartRemovalFromKey {
     param($RegistryKey, $Source, $Name, $ExpectedValue, $BackupDir, $Tag, [bool]$RequireArtifactIdentity = $false)
     $artifact = $null
     try {
-    if ($null -eq $RegistryKey) { return New-AutostartRemovalResult 'failed' '注册表键未打开' }
+    if ($null -eq $RegistryKey) { return New-AutostartRemovalResult 'failed' '注册表键未打开' -FailureStage 'authorization' }
     if ($Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name) -or
         $ExpectedValue -isnot [string] -or [string]::IsNullOrWhiteSpace($ExpectedValue)) {
         return New-AutostartRemovalResult 'skipped' 'pending 自启名称或原始 Value 无效'
@@ -140,7 +155,7 @@ function Invoke-LiteralAutostartRemovalFromKey {
         }
         $valueKind = $RegistryKey.GetValueKind($literalName)
     } catch {
-        return New-AutostartRemovalResult 'failed' ('读取当前自启值失败: ' + $_.Exception.Message)
+        return New-AutostartRemovalResult 'failed' '无法读取当前自启值' -FailureStage 'authorization'
     }
 
     $backupInfo = [pscustomobject]@{
@@ -152,11 +167,11 @@ function Invoke-LiteralAutostartRemovalFromKey {
     try {
         $backup = Write-AutostartValueBackup -Info $backupInfo -BackupDir $BackupDir -Tag $Tag
     } catch {
-        return New-AutostartRemovalResult 'failed' ('单值备份失败: ' + $_.Exception.Message)
+        return New-AutostartRemovalResult 'failed' '自启项单值备份失败' -FailureStage 'backup'
     }
     if ($backup -isnot [string] -or [string]::IsNullOrWhiteSpace($backup) -or
         -not [System.IO.File]::Exists($backup) -or (Get-Item -LiteralPath $backup).Length -le 0) {
-        return New-AutostartRemovalResult 'failed' '单值备份未成功写入有效文件'
+        return New-AutostartRemovalResult 'failed' '单值备份未成功写入有效文件' -FailureStage 'backup'
     }
     if ($RequireArtifactIdentity) {
         try {
@@ -164,7 +179,7 @@ function Invoke-LiteralAutostartRemovalFromKey {
             $artifact = Open-LockedBackupArtifact $backup
             $null = Assert-BackupArtifactIdentity -Type 'autostart' -Artifact $artifact -Key $Source -Name $literalName -ExpectedValue $currentValue
         } catch {
-            return New-AutostartRemovalResult 'failed' ('单值备份身份验证失败: ' + $_.Exception.Message) $backup
+            return New-AutostartRemovalResult 'failed' '自启项备份身份验证失败' $backup -FailureStage 'backup'
         }
     }
 
@@ -177,11 +192,11 @@ function Invoke-LiteralAutostartRemovalFromKey {
     try {
         $null = Add-BackupManifestEntryAtomic -BackupDir $BackupDir -Entry $manifestEntry
     } catch {
-        return New-AutostartRemovalResult 'failed' ('manifest write-ahead 失败: ' + $_.Exception.Message) $backup
+        return New-AutostartRemovalResult 'failed' '自启项备份清单预写失败' $backup -FailureStage 'backup'
     }
     if ($RequireArtifactIdentity) {
         try { $null = Assert-TrustedBackupPackagePath $BackupDir; Assert-TrustedBackupPathAcl $backup; Assert-TrustedBackupPathAcl (Join-Path $BackupDir 'manifest.json') } catch {
-            return New-AutostartRemovalResult 'failed' ('mutation 前备份 ACL 复验失败: ' + $_.Exception.Message) $backup $manifestEntry
+            return New-AutostartRemovalResult 'failed' '自启项 mutation 前备份信任复验失败' $backup $manifestEntry -FailureStage 'backup'
         }
     }
 
@@ -205,18 +220,18 @@ function Invoke-LiteralAutostartRemovalFromKey {
         }).Count -gt 0
         if ($stillPresent) {
             try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
-            return New-AutostartRemovalResult 'failed' '字面删除后自启项仍存在' $backup $manifestEntry
+            return New-AutostartRemovalResult 'failed' '字面删除后自启项仍存在' $backup $manifestEntry -FailureStage 'verification'
         }
         try {
             $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'success' $true
             $manifestEntry.execution_status = 'success'; $manifestEntry.verified = $true
         } catch {
-            return New-AutostartRemovalResult 'failed' ('自启项已删除，但 manifest 状态更新失败: ' + $_.Exception.Message) $backup $manifestEntry
+            return New-AutostartRemovalResult 'failed' '自启项已删除，但备份清单状态更新失败' $backup $manifestEntry -FailureStage 'result_persistence'
         }
         return New-AutostartRemovalResult 'success' '自启项已完成单值备份并删除' $backup $manifestEntry
     } catch {
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
-        return New-AutostartRemovalResult 'failed' ('字面删除或验证失败: ' + $_.Exception.Message) $backup $manifestEntry
+        return New-AutostartRemovalResult 'failed' '自启项删除命令执行失败' $backup $manifestEntry -FailureStage 'mutation'
     }
     } finally { Close-BackupArtifact $artifact }
 }
@@ -277,7 +292,7 @@ function Build-SuspiciousSubsetPayload($Rows) {
 function Invoke-LiteralAutostartRemoval {
     param($Source, $Name, $ExpectedValue, $BackupDir, $Tag)
     try { $null = Assert-TrustedBackupPackagePath $BackupDir } catch {
-        return New-AutostartRemovalResult 'failed' ('备份 ACL 信任验证失败: ' + $_.Exception.Message)
+        return New-AutostartRemovalResult 'failed' '自启项备份目录信任验证失败' -FailureStage 'backup'
     }
     if (-not (Test-AllowedAutostartRegistrySource $Source)) {
         return New-AutostartRemovalResult 'skipped' '自启注册表路径不在白名单'
@@ -302,7 +317,7 @@ function Invoke-LiteralAutostartRemoval {
         if ($null -eq $key) { return New-AutostartRemovalResult 'skipped' '自启注册表键不存在' }
         return Invoke-LiteralAutostartRemovalFromKey -RegistryKey $key -Source $Source -Name $Name -ExpectedValue $ExpectedValue -BackupDir $BackupDir -Tag $Tag -RequireArtifactIdentity $true
     } catch {
-        return New-AutostartRemovalResult 'failed' ('打开或处理自启注册表键失败: ' + $_.Exception.Message)
+        return New-AutostartRemovalResult 'failed' '无法打开或处理自启注册表键' -FailureStage 'authorization'
     } finally {
         if ($null -ne $key) { $key.Dispose() }
         if ($null -ne $baseKey) { $baseKey.Dispose() }
@@ -1760,10 +1775,10 @@ function Invoke-ServiceDisableAction {
     try {
     $srvName = $Pending.service_name
     if ($srvName -isnot [string] -or $srvName -cnotmatch '^[A-Za-z0-9_.]+$') {
-        return [pscustomobject]@{ status='skipped'; reason='服务名无效'; backup=''; manifest=$null }
+        return New-CleanupActionResult 'skipped' '服务名无效'
     }
     try { $null = Assert-TrustedBackupPackagePath $BackupDir } catch {
-        return [pscustomobject]@{ status='failed'; reason=('备份 ACL 信任验证失败: ' + $_.Exception.Message); backup=''; manifest=$null }
+        return New-CleanupActionResult 'failed' '服务备份目录信任验证失败' 'backup'
     }
     try {
         $info = Get-ServiceBackupInfo $srvName
@@ -1773,7 +1788,7 @@ function Invoke-ServiceDisableAction {
         $artifact = Open-LockedBackupArtifact $bak
         $null = Assert-BackupArtifactIdentity -Type 'service' -Artifact $artifact -TargetIdentity $srvName
     } catch {
-        return [pscustomobject]@{ status='failed'; reason=('服务备份失败: ' + $_.Exception.Message); backup=''; manifest=$null }
+        return New-CleanupActionResult 'failed' '服务备份或身份验证失败' 'backup'
     }
 
     $manifest = [pscustomobject]@{
@@ -1786,28 +1801,33 @@ function Invoke-ServiceDisableAction {
         execution_status='prepared'; verified=$false; note='restore: sc config <name> start= <start_type_sc>'
     }
     try { $null = Add-BackupManifestEntryAtomic -BackupDir $BackupDir -Entry $manifest } catch {
-        return [pscustomobject]@{ status='failed'; reason=('manifest write-ahead 失败: ' + $_.Exception.Message); backup=$bak; manifest=$null }
+        return New-CleanupActionResult 'failed' '服务备份清单预写失败' 'backup' $bak
     }
     try { $null = Assert-TrustedBackupPackagePath $BackupDir; Assert-TrustedBackupPathAcl $bak; Assert-TrustedBackupPathAcl (Join-Path $BackupDir 'manifest.json') } catch {
-        return [pscustomobject]@{ status='failed'; reason=('mutation 前备份 ACL 复验失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' '服务 mutation 前备份信任复验失败' 'backup' $bak $manifest
     }
     try {
         Invoke-ServiceConfigDisable -ServiceName $srvName
+    } catch {
+        try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
+        return New-CleanupActionResult 'failed' '服务禁用命令执行失败' 'mutation' $bak $manifest
+    }
+    try {
         $after = Get-Service -Name $srvName -ErrorAction SilentlyContinue
         if ($after -and $after.StartType -eq 'Disabled' -and $after.Status -eq 'Stopped') {
             try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'success' $true } catch {
-                return [pscustomobject]@{ status='failed'; reason=('服务已修改，但 manifest 状态更新失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+                return New-CleanupActionResult 'failed' '服务已修改，但备份清单状态更新失败' 'result_persistence' $bak $manifest
             }
             $manifest.execution_status = 'success'; $manifest.verified = $true
-            return [pscustomobject]@{ status='success'; reason='已禁用并停止'; backup=$bak; manifest=$manifest }
+            return New-CleanupActionResult 'success' '已禁用并停止' '' $bak $manifest
         }
         $actual = if ($after) { ('StartType={0}; Status={1}' -f $after.StartType,$after.Status) } else { '服务不存在' }
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
         $reason = if ($after -and $after.StartType -eq 'Disabled' -and $after.Status -eq 'Running') { '服务已禁用但仍在运行' } else { "服务禁用后置验证失败: $actual" }
-        return [pscustomobject]@{ status='failed'; reason=$reason; backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' $reason 'verification' $bak $manifest
     } catch {
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
-        return [pscustomobject]@{ status='failed'; reason=('服务修改或验证失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' '服务后置状态读取失败' 'verification' $bak $manifest
     }
     } finally { Close-BackupArtifact $artifact }
 }
@@ -1830,16 +1850,16 @@ function Invoke-TaskDisableAction {
     $artifact = $null
     try {
     try { $null = Assert-TrustedBackupPackagePath $BackupDir } catch {
-        return [pscustomobject]@{ status='failed'; reason=('备份 ACL 信任验证失败: ' + $_.Exception.Message); backup=''; manifest=$null }
+        return New-CleanupActionResult 'failed' '计划任务备份目录信任验证失败' 'backup'
     }
     try { $taskPath = Normalize-TaskPathIdentity $Pending.task_path } catch {
-        return [pscustomobject]@{ status='skipped'; reason='计划任务路径无效'; backup=''; manifest=$null }
+        return New-CleanupActionResult 'skipped' '计划任务路径无效'
     }
     $taskName = $taskPath.Split('\')[-1]
     $taskFolder = if ($taskPath.Length -gt $taskName.Length) { $taskPath.Substring(0, $taskPath.Length - $taskName.Length) } else { '\' }
     try {
         $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-        if (-not $task) { return [pscustomobject]@{ status='skipped'; reason='计划任务不存在'; backup=''; manifest=$null } }
+        if (-not $task) { return New-CleanupActionResult 'skipped' '计划任务不存在' }
         if ($task.State -isnot [string] -or [string]::IsNullOrWhiteSpace($task.State)) { throw '计划任务原始 Enabled 状态不可用' }
         $enabled = ($task.State -cne 'Disabled')
         $xml = Export-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop
@@ -1848,7 +1868,7 @@ function Invoke-TaskDisableAction {
         $artifact = Open-LockedBackupArtifact $bak
         $null = Assert-BackupArtifactIdentity -Type 'task' -Artifact $artifact -TargetIdentity $taskPath
     } catch {
-        return [pscustomobject]@{ status='failed'; reason=('计划任务备份失败: ' + $_.Exception.Message); backup=''; manifest=$null }
+        return New-CleanupActionResult 'failed' '计划任务备份或身份验证失败' 'backup'
     }
 
     $manifest = [pscustomobject]@{
@@ -1859,27 +1879,32 @@ function Invoke-TaskDisableAction {
         note='restore: Register-ScheduledTask -Xml <backup> -TaskName <name> -TaskPath <path> -Force'
     }
     try { $null = Add-BackupManifestEntryAtomic -BackupDir $BackupDir -Entry $manifest } catch {
-        return [pscustomobject]@{ status='failed'; reason=('manifest write-ahead 失败: ' + $_.Exception.Message); backup=$bak; manifest=$null }
+        return New-CleanupActionResult 'failed' '计划任务备份清单预写失败' 'backup' $bak
     }
     try { $null = Assert-TrustedBackupPackagePath $BackupDir; Assert-TrustedBackupPathAcl $bak; Assert-TrustedBackupPathAcl (Join-Path $BackupDir 'manifest.json') } catch {
-        return [pscustomobject]@{ status='failed'; reason=('mutation 前备份 ACL 复验失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' '计划任务 mutation 前备份信任复验失败' 'backup' $bak $manifest
     }
     try {
         Disable-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop | Out-Null
+    } catch {
+        try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
+        return New-CleanupActionResult 'failed' '计划任务禁用命令执行失败' 'mutation' $bak $manifest
+    }
+    try {
         $taskAfter = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
         if ($taskAfter -and $taskAfter.State -eq 'Disabled') {
             try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'success' $true } catch {
-                return [pscustomobject]@{ status='failed'; reason=('任务已禁用，但 manifest 状态更新失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+                return New-CleanupActionResult 'failed' '任务已禁用，但备份清单状态更新失败' 'result_persistence' $bak $manifest
             }
             $manifest.execution_status = 'success'; $manifest.verified = $true
-            return [pscustomobject]@{ status='success'; reason='计划任务已禁用'; backup=$bak; manifest=$manifest }
+            return New-CleanupActionResult 'success' '计划任务已禁用' '' $bak $manifest
         }
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
         $actualState = if ($taskAfter) { $taskAfter.State } else { '目标不存在' }
-        return [pscustomobject]@{ status='failed'; reason=("任务状态=$actualState"); backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' ("任务状态=$actualState") 'verification' $bak $manifest
     } catch {
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
-        return [pscustomobject]@{ status='failed'; reason=('计划任务禁用或验证失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' '计划任务后置状态读取失败' 'verification' $bak $manifest
     }
     } finally { Close-BackupArtifact $artifact }
 }
@@ -2316,18 +2341,17 @@ function Get-NormalizedStrictUtcProcessStartTime($Value) {
 function Test-ServiceProcessIdentityEqual {
     param($Pending, $Current)
     if ($null -eq $Pending -or $null -eq $Current) { return [pscustomobject]@{ Equal=$false; Reason='current identity is unavailable; rescan required' } }
-    $comparisons = @(
-        @('service name','service_name'),
-        @('process name','process_name')
-    )
-    foreach ($comparison in $comparisons) {
-        $field = $comparison[1]
-        $expected = Get-StrictNonBlankStringProperty $Pending $field
-        $actual = Get-StrictNonBlankStringProperty $Current $field
-        if ($null -eq $expected -or $null -eq $actual -or
-            -not [string]::Equals($expected, $actual, [System.StringComparison]::OrdinalIgnoreCase)) {
-            return [pscustomobject]@{ Equal=$false; Reason=("$($comparison[0]) changed; rescan required") }
-        }
+    $expectedServiceName = Get-StrictNonBlankStringProperty $Pending 'service_name'
+    $actualServiceName = Get-StrictNonBlankStringProperty $Current 'service_name'
+    if ($null -eq $expectedServiceName -or $null -eq $actualServiceName -or
+        -not [string]::Equals($expectedServiceName,$actualServiceName,[System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Equal=$false; Reason='service name changed; rescan required' }
+    }
+    $expectedProcessName = Get-StrictNonBlankStringProperty $Pending 'process_name'
+    $actualProcessName = Get-StrictNonBlankStringProperty $Current 'process_name'
+    if ($null -eq $expectedProcessName -or $null -eq $actualProcessName -or
+        -not [string]::Equals((Normalize-ProcessName $expectedProcessName),(Normalize-ProcessName $actualProcessName),[System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Equal=$false; Reason='process name changed; rescan required' }
     }
     if (-not (Test-PositiveScalarProcessId $Pending.process_id) -or -not (Test-PositiveScalarProcessId $Current.process_id) -or
         [int]$Pending.process_id -ne [int]$Current.process_id) {
@@ -2355,8 +2379,16 @@ function New-ServiceProcessStopResult([string]$Status, [string]$Reason, [string]
     return [pscustomobject]@{ status=$Status; result_reason=$Reason; failure_stage=$FailureStage }
 }
 
+function Get-ServiceProcessVerificationTimeMilliseconds {
+    return [int64]([System.Diagnostics.Stopwatch]::GetTimestamp() * 1000 / [System.Diagnostics.Stopwatch]::Frequency)
+}
+
+function Start-ServiceProcessVerificationDelay([int]$Milliseconds) {
+    Start-Sleep -Milliseconds $Milliseconds
+}
+
 function Invoke-ServiceProcessStopAction {
-    param($Pending)
+    param($Pending, [int]$VerificationTimeoutMilliseconds = 5000, [int]$PollIntervalMilliseconds = 100)
     if (-not (Test-ServiceProcessActionShape $Pending)) {
         return New-ServiceProcessStopResult 'skipped' 'pending service process identity is invalid; rescan required'
     }
@@ -2369,36 +2401,68 @@ function Invoke-ServiceProcessStopAction {
     if (-not $comparison.Equal) { return New-ServiceProcessStopResult 'skipped' $comparison.Reason }
 
     $targetPid = [int]$capture.Identity.process_id
-    try { Stop-Process -Id $targetPid -Force -ErrorAction Stop } catch {
-        $kind = $_.Exception.GetType().Name
-        $denied = $_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.Message -match '(?i)access.+denied|拒绝访问|权限'
-        $reason = if ($denied) { "Stop-Process access denied for recorded PID $targetPid" } else { "Stop-Process failed for recorded PID $targetPid ($kind)" }
-        return New-ServiceProcessStopResult 'failed' $reason 'mutation'
+    $boundTarget = Get-BoundProcessTarget -ProcessId $targetPid
+    if ($null -eq $boundTarget -or $null -eq $boundTarget.Process -or $null -eq $boundTarget.Identity) {
+        return New-ServiceProcessStopResult 'skipped' 'current process handle could not be bound; rescan required'
     }
-
-    try { $oldProcesses = @(Get-Process -Id $targetPid -ErrorAction SilentlyContinue) } catch {
-        return New-ServiceProcessStopResult 'failed' "could not verify exit of old PID $targetPid" 'verification'
-    }
-    if (@($oldProcesses | Where-Object { $_ -and $_.Id -eq $targetPid }).Count -gt 0) {
-        return New-ServiceProcessStopResult 'failed' "old PID $targetPid remains alive after Stop-Process" 'verification'
-    }
-
-    $escapedName = ([string]$Pending.service_name).Replace("'", "''")
-    try { $services = @(Get-CimInstance -ClassName Win32_Service -Filter ("Name = '{0}'" -f $escapedName) -ErrorAction Stop) } catch {
-        return New-ServiceProcessStopResult 'failed' 'could not verify service restart state' 'verification'
-    }
-    if ($services.Count -gt 1) { return New-ServiceProcessStopResult 'failed' 'service restart identity is not unique' 'verification' }
-    if ($services.Count -eq 1 -and (Test-PositiveScalarProcessId $services[0].ProcessId)) {
-        $replacementPid = [int]$services[0].ProcessId
-        $serviceState = [string]$services[0].State
-        $reason = if ([string]::Equals($serviceState, 'Running', [System.StringComparison]::OrdinalIgnoreCase)) {
-            "current instance ended but service restarted with replacement PID $replacementPid"
-        } else {
-            "current instance ended but service state '$serviceState' reports replacement PID $replacementPid"
+    try {
+        $boundIdentity = [pscustomobject]@{
+            service_name=$capture.Identity.service_name; service_binary_path=$capture.Identity.service_binary_path
+            process_id=$boundTarget.Identity.PID; process_name=$boundTarget.Identity.Name
+            process_path=$boundTarget.Identity.Path; process_start_time_utc=$boundTarget.Identity.StartTimeUtc
         }
-        return New-ServiceProcessStopResult 'failed' $reason 'verification'
+        $pendingBoundComparison = Test-ServiceProcessIdentityEqual -Pending $Pending -Current $boundIdentity
+        if (-not $pendingBoundComparison.Equal) { return New-ServiceProcessStopResult 'skipped' $pendingBoundComparison.Reason }
+        $captureBoundComparison = Test-ServiceProcessIdentityEqual -Pending $capture.Identity -Current $boundIdentity
+        if (-not $captureBoundComparison.Equal) { return New-ServiceProcessStopResult 'skipped' 'process identity changed while binding handle; rescan required' }
+
+        $snapshotReason = ''
+        $boundService = Get-CurrentServiceExecutionSnapshot -ServiceName $Pending.service_name -FailureReason ([ref]$snapshotReason)
+        if ($null -eq $boundService -or $boundService.State -cne 'Running' -or $boundService.ProcessId -ne $targetPid -or
+            -not [string]::Equals($boundService.Name,$Pending.service_name,[System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($boundService.BinaryPath,$capture.Identity.service_binary_path,[System.StringComparison]::OrdinalIgnoreCase)) {
+            return New-ServiceProcessStopResult 'skipped' 'service binding changed before mutation; rescan required'
+        }
+
+        try { $exited = Stop-BoundProcessTarget -Target $boundTarget -TimeoutMilliseconds 1000 } catch {
+            $denied = $_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.Message -match '(?i)access.+denied|拒绝访问|权限'
+            $mutationReason = if ($denied) { "access denied while terminating recorded PID $targetPid" } else { "could not terminate the recorded process instance PID $targetPid" }
+            return New-ServiceProcessStopResult 'failed' $mutationReason 'mutation'
+        }
+        if (-not $exited) { return New-ServiceProcessStopResult 'failed' "recorded process PID $targetPid did not exit within the bounded wait" 'verification' }
+
+        if ($VerificationTimeoutMilliseconds -lt 1 -or $PollIntervalMilliseconds -lt 1) {
+            return New-ServiceProcessStopResult 'failed' 'service stabilization window is invalid' 'verification'
+        }
+        $escapedName = ([string]$Pending.service_name).Replace("'", "''")
+        $verificationDeadline = (Get-ServiceProcessVerificationTimeMilliseconds) + $VerificationTimeoutMilliseconds
+        while ($true) {
+            try { $services = @(Get-CimInstance -ClassName Win32_Service -Filter ("Name = '{0}'" -f $escapedName) -ErrorAction Stop) } catch {
+                return New-ServiceProcessStopResult 'failed' 'could not verify service restart state' 'verification'
+            }
+            if ($services.Count -ne 1 -or $null -eq $services[0] -or
+                -not [string]::Equals([string]$services[0].Name,[string]$Pending.service_name,[System.StringComparison]::OrdinalIgnoreCase)) {
+                return New-ServiceProcessStopResult 'failed' 'service restart identity is missing or not unique' 'verification'
+            }
+            if (Test-PositiveScalarProcessId $services[0].ProcessId) {
+                $replacementPid = [int]$services[0].ProcessId
+                $replacementReason = if ([string]::Equals([string]$services[0].State,'Running',[System.StringComparison]::OrdinalIgnoreCase)) {
+                    "current instance ended but service restarted with replacement PID $replacementPid"
+                } else {
+                    "current instance ended but service reports replacement PID $replacementPid"
+                }
+                return New-ServiceProcessStopResult 'failed' $replacementReason 'verification'
+            }
+            if (-not (Test-StrictInteger $services[0].ProcessId) -or [int64]$services[0].ProcessId -ne 0) {
+                return New-ServiceProcessStopResult 'failed' 'service restart PID is unreadable' 'verification'
+            }
+            if ((Get-ServiceProcessVerificationTimeMilliseconds) -ge $verificationDeadline) { break }
+            Start-ServiceProcessVerificationDelay -Milliseconds $PollIntervalMilliseconds
+        }
+        return New-ServiceProcessStopResult 'success' "ended current service process PID $targetPid; no replacement PID is bound"
+    } finally {
+        try { $boundTarget.Process.Dispose() } catch {}
     }
-    return New-ServiceProcessStopResult 'success' "ended current service process PID $targetPid; no replacement PID is bound"
 }
 
 function Get-CurrentProcessIdentity($ProcessId) {
@@ -2544,30 +2608,19 @@ function Test-PersistentCleanupAction($Action) {
     return $Action -is [string] -and @('disable_service','remove_autostart','disable_task') -ccontains $Action
 }
 
-function Get-PendingHelperFailureStage($ResultReason) {
-    if ($ResultReason -isnot [string] -or [string]::IsNullOrWhiteSpace($ResultReason)) { return $null }
-    if ($ResultReason -match 'manifest 状态更新失败') { return 'result_persistence' }
-    if ($ResultReason -match '备份|backup|manifest write-ahead|ACL') { return 'backup' }
-    if ($ResultReason -match '后置验证|仍存在|仍在运行|状态=|目标不存在') { return 'verification' }
-    return 'mutation'
-}
-
 function Set-PendingTransactionResult {
     param($Pending, $Result)
     if ($null -eq $Pending -or $null -eq $Result) { throw 'pending transaction result is missing' }
     $status = [string]$Result.status
     if ($status -cnotin @('success','failed','skipped','manual_required')) { throw 'pending transaction status is invalid' }
-    $reason = if ($Result.PSObject.Properties.Name -contains 'result_reason') { [string]$Result.result_reason } else { [string]$Result.reason }
+    if ($Result.PSObject.Properties.Name -notcontains 'result_reason') { throw 'pending transaction result_reason is missing' }
+    $reason = [string]$Result.result_reason
     if ([string]::IsNullOrWhiteSpace($reason)) { throw 'pending transaction result_reason is blank' }
     $failureStage = ''
     if ($status -ceq 'failed') {
-        $providedStage = if ($Result.PSObject.Properties.Name -contains 'failure_stage') { [string]$Result.failure_stage } else { '' }
-        $failureStage = if (@('backup','mutation','verification','result_persistence') -ccontains $providedStage) {
-            $providedStage
-        } else {
-            Get-PendingHelperFailureStage $reason
-        }
-        if ($failureStage -cnotin @('backup','mutation','verification','result_persistence')) { throw 'failed transaction failure_stage is invalid' }
+        if ($Result.PSObject.Properties.Name -notcontains 'failure_stage') { throw 'failed transaction failure_stage is missing' }
+        $failureStage = [string]$Result.failure_stage
+        if ($failureStage -cnotin @('authorization','backup','mutation','verification','result_persistence')) { throw 'failed transaction failure_stage is invalid' }
     }
     $Pending.status = $status
     $Pending | Add-Member NoteProperty result_reason $reason -Force
@@ -2613,6 +2666,11 @@ function Invoke-Clean {
     if ($pending.actions) { $actions = @($pending.actions | Where-Object { $_ -and $_.status -in @('pending','failed') }) }
     $suspicious = @()
     if ($pending.suspicious) { $suspicious = @($pending.suspicious) }
+    if (-not $pendingSha256Verified -and @($actions | Where-Object { $_.action -ceq 'stop_service_process' }).Count -gt 0) {
+        Write-Host '错误: stop_service_process 要求本次 clean 已验证 pending 文件 SHA-256 绑定，未执行且未改写清单。' -ForegroundColor Red
+        $pendingValidated = $false
+        return [int]1
+    }
 
     # v1.5.3 P0: 提权后重新验证 — 不信任 pending_actions.json, 按当前特征库授权
     try { $profiles = Load-Profiles } catch {
@@ -2623,15 +2681,7 @@ function Invoke-Clean {
     $rejected = @()
     foreach ($a in $actions) {
         # Manual rows must be displayed before the user can supply a digest for the final selected subset.
-        if ($a.action -ceq 'stop_service_process' -and -not $pendingSha256Verified) {
-            $rejected += $a
-            Set-PendingTransactionResult -Pending $a -Result ([pscustomobject]@{
-                status='skipped'
-                result_reason='stop_service_process requires a SHA-256-bound pending file verified in this clean invocation'
-                failure_stage=''
-            })
-        }
-        elseif (Test-PendingActionEligible $a $profiles) { $authorized += $a }
+        if (Test-PendingActionEligible $a $profiles) { $authorized += $a }
         else {
             $rejected += $a
             Set-PendingTransactionResult -Pending $a -Result ([pscustomobject]@{
@@ -2733,7 +2783,7 @@ function Invoke-Clean {
                 try { $backupDir = Initialize-ProtectedBackupDirectory $backupDir } catch {
                     Write-Host ('  安全备份目录创建/ACL 验证失败，拒绝执行任何 mutation: ' + $_.Exception.Message) -ForegroundColor Red
                     Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
-                        status='failed'; result_reason=('安全备份目录创建或 ACL 验证失败: ' + $_.Exception.Message); failure_stage='backup'
+                        status='failed'; result_reason='安全备份目录创建或 ACL 验证失败'; failure_stage='backup'
                     })
                     continue
                 }
@@ -2744,9 +2794,9 @@ function Invoke-Clean {
                 'disable_service' {
                     $serviceResult = Invoke-ServiceDisableAction -Pending $p -BackupDir $backupDir -Tag $tag
                     Set-PendingTransactionResult -Pending $p -Result $serviceResult
-                    if ($serviceResult.status -eq 'success') { Write-Host "  验证通过: $($serviceResult.reason)" -ForegroundColor Green }
-                    elseif ($serviceResult.status -eq 'skipped') { Write-Host "  跳过: $($serviceResult.reason)" -ForegroundColor DarkYellow }
-                    else { Write-Host "  失败: $($serviceResult.reason)" -ForegroundColor Red }
+                    if ($serviceResult.status -eq 'success') { Write-Host "  验证通过: $($serviceResult.result_reason)" -ForegroundColor Green }
+                    elseif ($serviceResult.status -eq 'skipped') { Write-Host "  跳过: $($serviceResult.result_reason)" -ForegroundColor DarkYellow }
+                    else { Write-Host "  失败: $($serviceResult.result_reason)" -ForegroundColor Red }
                 }
                 'remove_autostart' {
                     $rp = $p.autostart_source
@@ -2756,17 +2806,17 @@ function Invoke-Clean {
                     if ($removal.status -eq 'success') {
                         Write-Host "  验证通过: 自启项已删除: $nm (备份: $($removal.backup))" -ForegroundColor Green
                     } elseif ($removal.status -eq 'skipped') {
-                        Write-Host "  跳过: $($removal.reason) ($nm)" -ForegroundColor DarkYellow
+                        Write-Host "  跳过: $($removal.result_reason) ($nm)" -ForegroundColor DarkYellow
                     } else {
-                        Write-Host "  失败: $($removal.reason) ($nm)" -ForegroundColor Red
+                        Write-Host "  失败: $($removal.result_reason) ($nm)" -ForegroundColor Red
                     }
                 }
                 'disable_task' {
                     $taskResult = Invoke-TaskDisableAction -Pending $p -BackupDir $backupDir -Tag $tag
                     Set-PendingTransactionResult -Pending $p -Result $taskResult
                     if ($taskResult.status -eq 'success') { Write-Host "  验证通过: 已禁用计划任务: $($p.task_path) (备份: $($taskResult.backup))" -ForegroundColor Green }
-                    elseif ($taskResult.status -eq 'skipped') { Write-Host "  跳过: $($taskResult.reason)" -ForegroundColor DarkYellow }
-                    else { Write-Host "  失败: $($taskResult.reason)" -ForegroundColor Red }
+                    elseif ($taskResult.status -eq 'skipped') { Write-Host "  跳过: $($taskResult.result_reason)" -ForegroundColor DarkYellow }
+                    else { Write-Host "  失败: $($taskResult.result_reason)" -ForegroundColor Red }
                 }
                 'uninstall' {
                     Write-Host '  uninstall 动作需要人工确认, 请到 设置 -> 应用 -> 已安装的应用 手动卸载。' -ForegroundColor Yellow
