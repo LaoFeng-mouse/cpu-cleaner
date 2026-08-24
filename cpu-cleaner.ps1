@@ -1,5 +1,5 @@
 ﻿# ============================================================
-#  CPU 后台整理工具 v1.7.0 (cpu-cleaner.ps1) — 多维检测与风险评分
+#  CPU 后台整理工具 v1.8.0 (cpu-cleaner.ps1) — 多维检测与风险评分
 #  适用: Windows 10/11, PowerShell 5.1+
 #
 #  用法:
@@ -13,7 +13,7 @@
 #  安全设计:
 #    - scan 完全只读
 #    - clean 必须先 scan, 逐条确认后才执行; 结束进程使用独立哈希绑定清单并重验完整进程身份
-#    - 每个处理动作自动备份到 backups\, restore 一键恢复
+#    - 持久化系统变更自动备份到 backups\，restore 一键恢复；一次性结束进程不属于可恢复变更
 # ============================================================
 
 param(
@@ -42,7 +42,7 @@ $script:RequirePendingSha256 = $false
 $script:ConfirmedImpactSha256 = $null
 $script:BackupRoot = Join-Path $script:Root 'backups'
 # v1.5.2: 版本号全局唯一 (文本报告/HTML 页脚统一引用, 不再手改多处)
-$script:Version = '1.7.0'
+$script:Version = '1.8.0'
 # 特征库更新地址(可选): 填入指向 bloatware-profiles.json 的 URL 后可用 -Mode update
 $script:ProfileUrl = ''
 # v1.5.1 供应链安全: 特征库 SHA256 校验文件地址 (与 ProfileUrl 配套发布, 可选但强烈建议)

@@ -61,8 +61,8 @@ function Get-GuiReviewPresentation {
         default { 'observation' }
     }
     $groupLabel = switch ($groupKey) {
-        'automatic'   { '安全自动项' }
-        'manual'      { '需确认项' }
+        'automatic'   { '建议清理' }
+        'manual'      { '可选清理' }
         'resolved'    { '已处理' }
         default       { '仅观察' }
     }
@@ -103,7 +103,7 @@ function Get-GuiReviewCounts {
 
 function Format-GuiReviewCountsText {
     param([Parameter(Mandatory=$true)]$Counts)
-    return '安全自动 {0} 项 · 需确认 {1} 项 · 已处理 {2} 项 · 仅观察 {3} 项' -f $Counts.automatic, $Counts.manual, $Counts.resolved, $Counts.observation
+    return '建议清理 {0} 项 · 可选清理 {1} 项 · 已处理 {2} 项 · 仅观察 {3} 项' -f $Counts.automatic, $Counts.manual, $Counts.resolved, $Counts.observation
 }
 
 function Get-GuiScanHealthPresentation {

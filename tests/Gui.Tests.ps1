@@ -1534,7 +1534,7 @@ Describe '勾选视图 (v1.5.5)' {
         (Get-GuiReviewCounts $items).resolved | Should -Be 1
         (Get-GuiReviewCounts $items).observation | Should -Be 1
         Update-GuiReviewCounts -Items $items
-        $script:Win.FindName('ReviewCountsText').Text | Should -Be '安全自动 1 项 · 需确认 1 项 · 已处理 1 项 · 仅观察 1 项'
+        $script:Win.FindName('ReviewCountsText').Text | Should -Be '建议清理 1 项 · 可选清理 1 项 · 已处理 1 项 · 仅观察 1 项'
     }
 
     It 'synchronizes safe-select and clear through real STA WPF checkbox bindings without losing selection or identity' {
@@ -1587,8 +1587,9 @@ Describe '勾选视图 (v1.5.5)' {
 
         try {
             foreach ($item in $items) {
-                $status = Get-GuiBoundControl -List $list -Item $item -Type ([System.Windows.Controls.TextBlock]) -Text $item.StatusLabel
-                $status.Foreground.ToString() | Should -Be $expectedColors[$item.GroupKey]
+                $row = $list.ItemContainerGenerator.ContainerFromItem($item)
+                $statusCandidates = @(Get-GuiVisualDescendants -Root $row -Type ([System.Windows.Controls.TextBlock]) | Where-Object { $_.Text -eq $item.StatusLabel })
+                @($statusCandidates | Where-Object { $_.Foreground.ToString() -eq $expectedColors[$item.GroupKey] }).Count | Should -BeGreaterThan 0
                 $box = Get-GuiBoundControl -List $list -Item $item -Type ([System.Windows.Controls.CheckBox])
                 $automationName = [System.Windows.Automation.AutomationProperties]::GetName($box)
                 $automationName | Should -Match ([regex]::Escape($item.name_cn))
@@ -2142,6 +2143,7 @@ Describe '勾选视图 (v1.5.5)' {
         $source | Should -Match 'Text="\{Binding GroupLabel\}"'
         $source | Should -Match 'Text="\{Binding NecessityLabel\}"'
         $source | Should -Match 'Text="\{Binding CurrentStateLabel\}"'
+        $source | Should -Match 'Text="\{Binding restorable_label\}"'
         $source | Should -Match 'Text="\{Binding ImpactText\}"'
         $source | Should -Match 'Text="\{Binding CleanupReasonText\}"'
     }

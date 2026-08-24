@@ -102,7 +102,15 @@ Describe 'GUI presentation model' {
         $counts.manual | Should -Be 2
         $counts.resolved | Should -Be 1
         $counts.observation | Should -Be 2
-        (Format-GuiReviewCountsText $counts) | Should -Be '安全自动 1 项 · 需确认 2 项 · 已处理 1 项 · 仅观察 2 项'
+        (Format-GuiReviewCountsText $counts) | Should -Be '建议清理 1 项 · 可选清理 2 项 · 已处理 1 项 · 仅观察 2 项'
+    }
+
+    It 'uses the approved recommendation labels for executable review groups' {
+        $automatic = Get-GuiReviewPresentation -Branch actions -Name '自动项' -ExecutionClass automatic_safe -Necessity recommended -ImpactCn '低影响' -CleanupReasonCn '减少后台'
+        $manual = Get-GuiReviewPresentation -Branch actions -Name '手动项' -ExecutionClass manual_impact -Necessity optional -ImpactCn '有功能影响' -CleanupReasonCn '按需处理'
+
+        $automatic.GroupLabel | Should -BeExactly '建议清理'
+        $manual.GroupLabel | Should -BeExactly '可选清理'
     }
 
     It 'formats exact matcher provenance without granting authority' {

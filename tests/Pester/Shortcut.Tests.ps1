@@ -55,4 +55,23 @@
         $shortcut.IconLocation | Should -BeExactly ((Join-Path $script:ProjectRoot 'assets\shushu.ico') + ',0')
         $shortcut.Description | Should -BeExactly '安全识别并清理 OEM 后台组件和高 CPU 可疑进程'
     }
+
+    It 'preserves a conflicting existing shortcut before installing the cleaner shortcut' {
+        $installer = Join-Path $script:ProjectRoot 'Install-DesktopShortcut.ps1'
+        $path = Join-Path $TestDrive '鼠鼠 Cleaner.lnk'
+        $shell = New-Object -ComObject WScript.Shell
+        $old = $shell.CreateShortcut($path)
+        $old.TargetPath = "$env:WINDIR\System32\notepad.exe"
+        $old.Description = '用户原有快捷方式'
+        $old.Save()
+
+        & $installer -DesktopPath $TestDrive
+
+        $backups = @(Get-ChildItem -LiteralPath $TestDrive -Filter '鼠鼠 Cleaner.previous-*.lnk')
+        $backups.Count | Should -Be 1
+        $preserved = $shell.CreateShortcut($backups[0].FullName)
+        $preserved.TargetPath | Should -Match 'notepad\.exe$'
+        $installed = $shell.CreateShortcut($path)
+        $installed.TargetPath | Should -Match 'WindowsPowerShell\\v1\.0\\powershell\.exe$'
+    }
 }
