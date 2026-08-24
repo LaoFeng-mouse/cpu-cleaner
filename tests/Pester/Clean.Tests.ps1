@@ -823,6 +823,8 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         Mock Test-SelectedPendingActionAuthorized { $true }
         Mock Initialize-ProtectedBackupDirectory { throw 'ACL denied at C:\internal\backup --token=raw-secret' }
         Mock Invoke-ServiceDisableAction { throw 'backup failure must precede mutation' }
+        $script:capturedHostOutput = [System.Collections.ArrayList]::new()
+        Mock Write-Host { $null = $script:capturedHostOutput.Add([string]$Object) }
         try {
             $exitCode = Invoke-Clean
             $saved = Read-StrictPendingJsonFile $path
@@ -833,6 +835,8 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         $saved.actions[0].result_reason | Should -Match '备份|backup|ACL'
         $saved.actions[0].result_reason | Should -Not -Match 'internal|secret|token|C:\\'
         $saved.actions[0].failure_stage | Should -BeExactly 'backup'
+        ($script:capturedHostOutput -join "`n") | Should -Match '备份|backup|ACL'
+        ($script:capturedHostOutput -join "`n") | Should -Not -Match 'internal|secret|token|C:\\'
         Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
     }
 

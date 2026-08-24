@@ -2528,10 +2528,16 @@ function Test-SameProcessIdentity($Expected, $Current) {
     } catch { return $false }
 }
 
-function New-ProcessStopResult($Row, [string]$Status, [string]$Reason) {
+function New-ProcessStopResult($Row, [string]$Status, [string]$Reason, [string]$FailureStage = '') {
+    if ($Status -ceq 'failed') {
+        if ($FailureStage -cnotin @('authorization','mutation','verification')) { throw 'process stop failure_stage is invalid' }
+    } elseif ($FailureStage -cne '') {
+        throw 'non-failed process stop failure_stage must be empty'
+    }
     $copy = $Row.PSObject.Copy()
     $copy.status = $Status
     $copy | Add-Member NoteProperty result_reason $Reason -Force
+    $copy | Add-Member NoteProperty failure_stage ([string]$FailureStage) -Force
     return $copy
 }
 
@@ -2546,7 +2552,7 @@ function Wait-ProcessIdentityExit {
 
 function Invoke-OneTimeProcessStop($Row) {
     try { $null = Assert-SuspiciousPendingRow $Row -RequireStoppable } catch {
-        return New-ProcessStopResult $Row 'failed' ('身份结构无效: ' + $_.Exception.Message)
+        return New-ProcessStopResult $Row 'failed' '进程身份结构无效' 'authorization'
     }
     if ($Row.status -cnotin @('pending','failed')) { return New-ProcessStopResult $Row 'skipped' '该条目已是终态' }
     $protectedNames = @('system','system idle process','registry','smss','csrss','wininit','services','lsass','winlogon','svchost','fontdrvhost','dwm')
@@ -2564,9 +2570,11 @@ function Invoke-OneTimeProcessStop($Row) {
     try {
         if (-not (Test-SameProcessIdentity $Row $target.Identity)) { return New-ProcessStopResult $Row 'skipped' 'PID 对应的名称、路径或启动时间已变化' }
         try { $exited = Stop-BoundProcessTarget -Target $target } catch {
-            return New-ProcessStopResult $Row 'failed' ('停止进程失败: ' + $_.Exception.Message)
+            $denied = $_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.Message -match '(?i)access.+denied|拒绝访问|权限'
+            $reason = if ($denied) { '权限不足，无法结束进程' } else { '结束进程命令失败' }
+            return New-ProcessStopResult $Row 'failed' $reason 'mutation'
         }
-        if (-not $exited) { return New-ProcessStopResult $Row 'failed' '等待退出超时，进程仍存在' }
+        if (-not $exited) { return New-ProcessStopResult $Row 'failed' '等待退出超时，进程仍存在' 'verification' }
         return New-ProcessStopResult $Row 'success' '已结束这一次进程实例'
     } finally {
         try { if ($null -ne $target.Process) { $target.Process.Dispose() } } catch {}
@@ -2781,7 +2789,7 @@ function Invoke-Clean {
             # sc.exe config、sc.exe stop、Disable-ScheduledTask 等 mutation 原语。
             if ((Test-PersistentCleanupAction $p.action) -and -not $backupDirReady) {
                 try { $backupDir = Initialize-ProtectedBackupDirectory $backupDir } catch {
-                    Write-Host ('  安全备份目录创建/ACL 验证失败，拒绝执行任何 mutation: ' + $_.Exception.Message) -ForegroundColor Red
+                    Write-Host '  安全备份目录创建或 ACL 验证失败，拒绝执行任何 mutation。' -ForegroundColor Red
                     Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
                         status='failed'; result_reason='安全备份目录创建或 ACL 验证失败'; failure_stage='backup'
                     })

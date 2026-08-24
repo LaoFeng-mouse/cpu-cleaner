@@ -80,6 +80,24 @@
         (Invoke-OneTimeProcessStop $script:selectedRow).status | Should -BeExactly 'failed'
     }
 
+    It 'persists a fixed sanitized mutation reason when bound process termination throws' {
+        $path = Join-Path $TestDrive 'failed-selected-suspicious.json'
+        $payload = Build-SuspiciousSubsetPayload @($script:selectedRow)
+        [System.IO.File]::WriteAllText($path, (ConvertTo-Json -InputObject $payload -Depth 20), [System.Text.UTF8Encoding]::new($false))
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        Mock Get-BoundProcessTarget { New-TestBoundTarget ([pscustomobject]@{PID=4242;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'}) }
+        Mock Stop-BoundProcessTarget { throw 'Access denied at C:\internal\agent.exe --token=raw-secret --command-line=private' }
+
+        $result = Invoke-StopProcessPending -Path $path -ExpectedSha256 $hash
+        $saved = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        $result.ExitCode | Should -Be 2
+        $saved.suspicious[0].status | Should -BeExactly 'failed'
+        $saved.suspicious[0].result_reason | Should -Match '权限|拒绝|denied|无法'
+        $saved.suspicious[0].result_reason | Should -Not -Match 'internal|secret|token|command-line|C:\\'
+        $saved.suspicious[0].failure_stage | Should -BeExactly 'mutation'
+    }
+
     It 'accepts a bounded wait reported by the bound process object' {
         Mock Get-BoundProcessTarget { New-TestBoundTarget ([pscustomobject]@{PID=4242;Name='suspect';Path='C:\Temp\suspect.exe';StartTimeUtc='2026-08-11T00:00:00.0000000Z'}) }
         Mock Stop-BoundProcessTarget { $true }
