@@ -59,6 +59,7 @@
     It 'preserves a conflicting existing shortcut before installing the cleaner shortcut' {
         $installer = Join-Path $script:ProjectRoot 'Install-DesktopShortcut.ps1'
         $path = Join-Path $TestDrive '鼠鼠 Cleaner.lnk'
+        & $installer -DesktopPath $TestDrive
         $shell = New-Object -ComObject WScript.Shell
         $old = $shell.CreateShortcut($path)
         $old.TargetPath = "$env:WINDIR\System32\notepad.exe"

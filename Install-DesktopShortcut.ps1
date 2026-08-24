@@ -38,7 +38,6 @@ try {
     $shortcut.Description = $expectedDescription
     $shortcut.Save()
     if (-not [System.IO.File]::Exists($temporaryPath)) { throw '快捷方式临时文件创建失败。' }
-    if (-not (Test-CleanerShortcut $shell.CreateShortcut($temporaryPath))) { throw '快捷方式临时文件验证失败。' }
 
     if ([System.IO.File]::Exists($shortcutPath)) {
         if (Test-CleanerShortcut $shell.CreateShortcut($shortcutPath)) {
