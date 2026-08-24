@@ -50,8 +50,12 @@ try {
     if ([System.IO.File]::Exists($temporaryPath)) {
         Move-Item -LiteralPath $temporaryPath -Destination $shortcutPath
     }
-    if (-not [System.IO.File]::Exists($shortcutPath) -or -not (Test-CleanerShortcut $shell.CreateShortcut($shortcutPath))) {
-        throw '快捷方式安装后验证失败。'
+    $verificationShell = New-Object -ComObject WScript.Shell
+    $installedShortcut = $verificationShell.CreateShortcut($shortcutPath)
+    if (-not [System.IO.File]::Exists($shortcutPath) -or -not (Test-CleanerShortcut $installedShortcut)) {
+        throw ('快捷方式安装后验证失败。Target={0}; Arguments={1}; WorkingDirectory={2}; IconLocation={3}; Description={4}' -f
+            $installedShortcut.TargetPath, $installedShortcut.Arguments, $installedShortcut.WorkingDirectory,
+            $installedShortcut.IconLocation, $installedShortcut.Description)
     }
 } catch {
     if ($null -ne $backupPath -and [System.IO.File]::Exists($backupPath)) {
