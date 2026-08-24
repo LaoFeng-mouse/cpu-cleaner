@@ -20,6 +20,20 @@
             }
             return @($rows)
         }
+        function Get-ShortcutSnapshotForTest([string]$Path) {
+            $readerPath = Join-Path (Split-Path $Path -Parent) ('.shortcut-reader-' + [guid]::NewGuid().ToString('N') + '.lnk')
+            try {
+                Copy-Item -LiteralPath $Path -Destination $readerPath
+                $readerShell = New-Object -ComObject WScript.Shell
+                $reader = $readerShell.CreateShortcut($readerPath)
+                return [pscustomobject]@{
+                    TargetPath=$reader.TargetPath; Arguments=$reader.Arguments; WorkingDirectory=$reader.WorkingDirectory
+                    IconLocation=$reader.IconLocation; Description=$reader.Description
+                }
+            } finally {
+                if (Test-Path -LiteralPath $readerPath) { Remove-Item -LiteralPath $readerPath -Force }
+            }
+        }
     }
 
     It 'packages all required Windows icon sizes including a PNG 256 frame' {
@@ -47,8 +61,7 @@
 
         $path = Join-Path $TestDrive '鼠鼠 Cleaner.lnk'
         Test-Path -LiteralPath $path | Should -BeTrue
-        $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($path)
+        $shortcut = Get-ShortcutSnapshotForTest $path
         $shortcut.TargetPath | Should -Match 'WindowsPowerShell\\v1\.0\\powershell\.exe$'
         $shortcut.Arguments | Should -Match '^-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "[^"]+\\gui-cleaner\.ps1"$'
         $shortcut.WorkingDirectory | Should -BeExactly $script:ProjectRoot
@@ -59,20 +72,21 @@
     It 'preserves a conflicting existing shortcut before installing the cleaner shortcut' {
         $installer = Join-Path $script:ProjectRoot 'Install-DesktopShortcut.ps1'
         $path = Join-Path $TestDrive '鼠鼠 Cleaner.lnk'
-        & $installer -DesktopPath $TestDrive
+        $foreignPath = Join-Path $TestDrive ('.foreign-' + [guid]::NewGuid().ToString('N') + '.lnk')
         $shell = New-Object -ComObject WScript.Shell
-        $old = $shell.CreateShortcut($path)
+        $old = $shell.CreateShortcut($foreignPath)
         $old.TargetPath = "$env:WINDIR\System32\notepad.exe"
         $old.Description = '用户原有快捷方式'
         $old.Save()
+        Move-Item -LiteralPath $foreignPath -Destination $path -Force
 
         & $installer -DesktopPath $TestDrive
 
         $backups = @(Get-ChildItem -LiteralPath $TestDrive -Filter '鼠鼠 Cleaner.previous-*.lnk')
         $backups.Count | Should -Be 1
-        $preserved = $shell.CreateShortcut($backups[0].FullName)
+        $preserved = Get-ShortcutSnapshotForTest $backups[0].FullName
         $preserved.TargetPath | Should -Match 'notepad\.exe$'
-        $installed = $shell.CreateShortcut($path)
+        $installed = Get-ShortcutSnapshotForTest $path
         $installed.TargetPath | Should -Match 'WindowsPowerShell\\v1\.0\\powershell\.exe$'
     }
 }

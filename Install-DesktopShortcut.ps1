@@ -29,6 +29,26 @@ function Test-CleanerShortcut {
         [string]::Equals([string]$Shortcut.Description, $expectedDescription, [StringComparison]::Ordinal)
 }
 
+# 英文 Windows Runner 的 WScript COM 不能直接回读非 ASCII 文件名，复制到 ASCII 临时名后解析同一份 .lnk 内容。
+function Get-ShortcutSnapshot {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $readerPath = Join-Path $DesktopPath ('.shushu-reader-' + [guid]::NewGuid().ToString('N') + '.lnk')
+    try {
+        Copy-Item -LiteralPath $Path -Destination $readerPath
+        $readerShell = New-Object -ComObject WScript.Shell
+        $reader = $readerShell.CreateShortcut($readerPath)
+        return [pscustomobject]@{
+            TargetPath       = [string]$reader.TargetPath
+            Arguments        = [string]$reader.Arguments
+            WorkingDirectory = [string]$reader.WorkingDirectory
+            IconLocation     = [string]$reader.IconLocation
+            Description      = [string]$reader.Description
+        }
+    } finally {
+        if ([System.IO.File]::Exists($readerPath)) { Remove-Item -LiteralPath $readerPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 try {
     $shortcut = $shell.CreateShortcut($temporaryPath)
     $shortcut.TargetPath = $powershellPath
@@ -40,7 +60,7 @@ try {
     if (-not [System.IO.File]::Exists($temporaryPath)) { throw '快捷方式临时文件创建失败。' }
 
     if ([System.IO.File]::Exists($shortcutPath)) {
-        if (Test-CleanerShortcut $shell.CreateShortcut($shortcutPath)) {
+        if (Test-CleanerShortcut (Get-ShortcutSnapshot $shortcutPath)) {
             Remove-Item -LiteralPath $temporaryPath -Force
         } else {
             $backupPath = Join-Path $DesktopPath ('鼠鼠 Cleaner.previous-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N') + '.lnk')
@@ -50,8 +70,7 @@ try {
     if ([System.IO.File]::Exists($temporaryPath)) {
         Move-Item -LiteralPath $temporaryPath -Destination $shortcutPath
     }
-    $verificationShell = New-Object -ComObject WScript.Shell
-    $installedShortcut = $verificationShell.CreateShortcut($shortcutPath)
+    $installedShortcut = Get-ShortcutSnapshot $shortcutPath
     if (-not [System.IO.File]::Exists($shortcutPath) -or -not (Test-CleanerShortcut $installedShortcut)) {
         throw ('快捷方式安装后验证失败。Target={0}; Arguments={1}; WorkingDirectory={2}; IconLocation={3}; Description={4}' -f
             $installedShortcut.TargetPath, $installedShortcut.Arguments, $installedShortcut.WorkingDirectory,
