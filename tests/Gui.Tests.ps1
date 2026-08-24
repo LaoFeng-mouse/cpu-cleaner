@@ -410,7 +410,7 @@ Describe 'GUI 壳 (无窗口)' {
         $script:InventoryTimer | Should -BeNullOrEmpty
         $script:InventoryNonce | Should -BeOfType [string]
         $script:InventoryInProgress | Should -BeOfType [bool]
-        $script:InventoryTimeoutSeconds | Should -Be 60
+        $script:InventoryTimeoutSeconds | Should -Be 180
         $script:ScanTimeoutSeconds | Should -Be 180
     }
 
@@ -488,7 +488,7 @@ Describe 'GUI 壳 (无窗口)' {
         $script:Win.FindName('ErrorDetailText').Text | Should -Match 'ExitCode=7'
     }
 
-    It 'times collector out at 60 seconds and retains the mutation latch' {
+    It 'times collector out at the configured safety limit and retains the mutation latch' {
         Reset-GuiInventoryTestState
         $timer = New-FakeTimer
         $process = [pscustomobject]@{ HasExited=$false; ExitCode=0 }
@@ -903,6 +903,7 @@ exit 0
         $source = Get-Content (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw -Encoding UTF8
         $source | Should -Match "BtnStartScan'\)\.Add_Click\(\{\s*Start-GuiScan\s*\}\)"
         $source | Should -Match "BtnRetry'\)\.Add_Click\(\{\s*Start-GuiScan\s*\}\)"
+        $source | Should -Match "BtnRescan'\)\.Add_Click\(\{\s*Start-GuiScan\s*\}\)"
         $source | Should -Match "BtnOpenReview'\)\.Add_Click"
         $source | Should -Match 'Get-PendingViewItems'
         $source | Should -Match 'Set-GuiState review'
@@ -1713,6 +1714,39 @@ Describe '勾选视图 (v1.5.5)' {
             (,$script:ReviewedActionIdentityKeys) | Should -BeOfType ([System.Collections.ObjectModel.ReadOnlyCollection[string]])
             @($script:ReviewedActionIdentityKeys).Count | Should -Be 1
             $script:Win.FindName('PendingList').Items[0]._raw.service_name | Should -Be 'FirstService'
+        } finally {
+            $script:Root = $oldRoot
+        }
+    }
+
+    It 'successful review binds suspicious process rows into the visible selection list' {
+        $tmpRoot = Join-Path $TestDrive ('gui-suspicious-bind-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $pending = New-GuiReviewPendingFixture
+        $pending.suspicious = @([pscustomobject]@{
+            PID=[int64]42; Name='busy-helper'; Path='C:\Temp\busy-helper.exe'
+            StartTimeUtc='2026-08-24T00:00:00.0000000Z'; Reason='high CPU and temporary path'
+            Necessity='按需结束'; Impact='只结束当前进程实例'; CanStop=$true
+            StopBlockReason=''; status='pending'
+        })
+        [System.IO.File]::WriteAllText(
+            (Join-Path $tmpRoot 'pending_actions.json'),
+            (ConvertTo-Json -InputObject $pending -Depth 6),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $oldRoot = $script:Root
+        $script:Root = $tmpRoot
+        try {
+            Set-GuiState results -Force
+            Invoke-GuiOpenReviewClick
+
+            $list = $script:Win.FindName('SuspiciousList')
+            @($list.Items).Count | Should -Be 1
+            $list.Items[0].Name | Should -BeExactly 'busy-helper'
+            $list.Items[0].CanStop | Should -BeTrue
+            $list.Items[0].IsChecked | Should -BeFalse
+            @($script:ReviewedSuspiciousIdentityKeys).Count | Should -Be 1
         } finally {
             $script:Root = $oldRoot
         }

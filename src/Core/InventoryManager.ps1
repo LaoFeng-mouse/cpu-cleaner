@@ -50,7 +50,7 @@ function Test-InventoryInteger($Value) {
 
 function Get-InventoryAclDescriptor($Path) {
     try {
-        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $acl = Get-LocalFileSystemAcl -Path $Path
         $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
         $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {
             [pscustomobject]@{
@@ -111,7 +111,7 @@ function Test-TrustedInventoryAclDescriptor($Descriptor, [string]$ReaderSid) {
 
     # Require concrete FullControl for both trusted principals. Raw GENERIC_ALL is
     # deliberately not expanded here because this descriptor may be synthetic or
-    # unnormalized; Get-Acl returns safely normalized concrete FileSystemRights.
+    # unnormalized; the Windows filesystem ACL API returns normalized concrete FileSystemRights.
     $fullControlMask = [int64][System.Security.AccessControl.FileSystemRights]::FullControl
     foreach ($trustedSid in @($script:TrustedInventorySystemSid, $script:TrustedInventoryAdministratorsSid)) {
         if (([int64]$trustedAllows[$trustedSid] -band $fullControlMask) -ne $fullControlMask) { return $false }
@@ -480,7 +480,7 @@ function New-ProtectedInventorySecurity {
 }
 
 function Set-InventoryPathAcl($Path, $Acl) {
-    Set-Acl -LiteralPath $Path -AclObject $Acl -ErrorAction Stop
+    Set-LocalFileSystemAcl -Path $Path -Acl $Acl
 }
 
 function Protect-InventoryPathAcl {

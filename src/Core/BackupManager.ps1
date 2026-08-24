@@ -10,7 +10,7 @@ function Get-SecureBackupRoot {
 
 function Get-BackupAclDescriptor($Path) {
     try {
-        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $acl = Get-LocalFileSystemAcl -Path $Path
         $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
         $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {
             [pscustomobject]@{ Sid=$_.IdentityReference.Value; Type=$_.AccessControlType.ToString(); Rights=[int64]$_.FileSystemRights; Inherited=[bool]$_.IsInherited }
@@ -64,7 +64,7 @@ function New-ProtectedBackupSecurity([bool]$Directory = $true) {
 }
 
 function New-ProtectedBackupDirectory($Path) { return [System.IO.Directory]::CreateDirectory($Path, (New-ProtectedBackupSecurity -Directory $true)) }
-function Set-BackupPathAcl($Path, $Acl) { Set-Acl -LiteralPath $Path -AclObject $Acl -ErrorAction Stop }
+function Set-BackupPathAcl($Path, $Acl) { Set-LocalFileSystemAcl -Path $Path -Acl $Acl }
 
 function Protect-BackupPathAcl($Path, [bool]$Directory = $false) {
     try {

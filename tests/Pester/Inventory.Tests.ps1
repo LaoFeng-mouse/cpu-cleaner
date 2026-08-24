@@ -120,6 +120,16 @@ Describe 'trusted privileged inventory nonce and paths' {
 }
 
 Describe 'trusted privileged inventory ACL proof' {
+    It 'reads the ACL without depending on Security module autoloading' {
+        Mock Get-Acl { throw "The 'Get-Acl' command was found in the module 'Microsoft.PowerShell.Security', but the module could not be loaded." }
+
+        $descriptor = Get-InventoryAclDescriptor -Path $TestDrive
+
+        $descriptor.OwnerSid | Should -Match '^S-1-'
+        $descriptor.Rules.Count | Should -BeGreaterThan 0
+        Assert-MockCalled Get-Acl -Times 0 -Exactly
+    }
+
     It 'accepts a protected trusted owner with trusted writers and a read-only reader' {
         Test-TrustedInventoryAclDescriptor (New-TestInventoryAclDescriptor) $script:ReaderSid | Should -BeTrue
     }

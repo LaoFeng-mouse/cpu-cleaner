@@ -36,7 +36,7 @@ $script:I18N = @{
         BtnScan='开始扫描'; ScanHint='扫描只查看、不改任何设置，随便点'; Scanning='正在扫描，请稍候…'
         ScanPhaseInitial='正在检查服务、启动项、计划任务和进程'; ScanPhaseSystemInfo='读取系统信息'; ScanPhaseProcesses='检查高占用进程'; ScanPhaseServices='检查系统服务'; ScanPhaseAutoStart='检查启动项'; ScanPhaseTasks='检查计划任务'; ScanPhaseRules='匹配安全规则'; ScanPhaseReport='生成扫描报告'
         ScanResultSummary='{0} 项可以安全处理，{1} 项建议观察'; ScanErrorSummary='扫描失败：{0}'; ScanNoMutation='扫描阶段未修改任何系统设置。'; ScanStatusStart='启动'; ScanStatusOutput='输出读取'; ScanStatusResults='结果处理'; ScanStatusTimeout='超时'
-        ScanRequestingInventory='正在请求管理员只读授权'; ScanCollectingInventory='正在读取完整服务和计划任务'; ScanValidatingInventory='正在验证受保护扫描结果'; ScanLimitedWarning='计划任务和完整服务信息未检查，本次结果不能判断电脑是否干净。'; ScanInventoryReadonly='只读取服务和计划任务，不会修改系统设置。'; ScanInventoryFailed='管理员只读采集失败'; ScanInventoryTimeout='管理员只读采集超过 60 秒；进程状态确认前将保持安全锁定。'
+        ScanRequestingInventory='正在请求管理员只读授权'; ScanCollectingInventory='正在读取完整服务和计划任务'; ScanValidatingInventory='正在验证受保护扫描结果'; ScanLimitedWarning='计划任务和完整服务信息未检查，本次结果不能判断电脑是否干净。'; ScanInventoryReadonly='只读取服务和计划任务，不会修改系统设置。'; ScanInventoryFailed='管理员只读采集失败'; ScanInventoryTimeout='管理员只读采集超过 180 秒；进程状态确认前将保持安全锁定。'
         ReviewErrorSummary='待处理清单已过期，必须重新扫描。'; ReviewNoMutation='没有执行任何系统修改。'
         BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
         ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
@@ -66,7 +66,7 @@ $script:I18N = @{
         BtnScan='Start Scan'; ScanHint='Scan only reads, changes nothing'; Scanning='Scanning, please wait…'
         ScanPhaseInitial='Checking services, startup items, scheduled tasks, and processes'; ScanPhaseSystemInfo='Reading system information'; ScanPhaseProcesses='Checking high-usage processes'; ScanPhaseServices='Checking system services'; ScanPhaseAutoStart='Checking startup items'; ScanPhaseTasks='Checking scheduled tasks'; ScanPhaseRules='Matching safety rules'; ScanPhaseReport='Generating scan report'
         ScanResultSummary='{0} safe item(s), {1} observation(s)'; ScanErrorSummary='Scan failed: {0}'; ScanNoMutation='The scan did not change any system settings.'; ScanStatusStart='startup'; ScanStatusOutput='output read'; ScanStatusResults='result processing'; ScanStatusTimeout='timeout'
-        ScanRequestingInventory='Requesting administrator read-only access'; ScanCollectingInventory='Reading the complete service and scheduled-task inventory'; ScanValidatingInventory='Validating the protected scan result'; ScanLimitedWarning='Scheduled tasks and complete service information were not checked; this scan cannot declare the PC clean.'; ScanInventoryReadonly='This reads services and scheduled tasks only and changes no system settings.'; ScanInventoryFailed='Administrator read-only inventory failed'; ScanInventoryTimeout='Administrator read-only inventory exceeded 60 seconds; safety lock remains until process state is confirmed.'
+        ScanRequestingInventory='Requesting administrator read-only access'; ScanCollectingInventory='Reading the complete service and scheduled-task inventory'; ScanValidatingInventory='Validating the protected scan result'; ScanLimitedWarning='Scheduled tasks and complete service information were not checked; this scan cannot declare the PC clean.'; ScanInventoryReadonly='This reads services and scheduled tasks only and changes no system settings.'; ScanInventoryFailed='Administrator read-only inventory failed'; ScanInventoryTimeout='Administrator read-only inventory exceeded 180 seconds; safety lock remains until process state is confirmed.'
         ReviewErrorSummary='The pending review is stale and must be rescanned.'; ReviewNoMutation='No system settings were changed.'
         BtnLoad='Load Pending Items'; PendingHint='Risk & evidence shown; check items to process (unverified = observe only, unchecked)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Check items, then go to tab 3.'
         ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
@@ -288,7 +288,7 @@ $script:InventoryDeadlineUtc = [DateTime]::MinValue
 $script:InventoryUnknownProbeCount = 0
 $script:InventoryInProgress = $false
 $script:InventoryLifecycle = 'idle'
-$script:InventoryTimeoutSeconds = 60
+$script:InventoryTimeoutSeconds = 180
 $script:StatePanels = @('IdlePanel','ScanningPanel','ResultsPanel','ReviewPanel','ExecutingPanel','CompletedPanel','ErrorPanel')
 
 function Test-GuiInventoryBusy {
@@ -1562,6 +1562,7 @@ function Start-GuiScan {
 
 $window.FindName('BtnStartScan').Add_Click({ Start-GuiScan })
 $window.FindName('BtnRetry').Add_Click({ Start-GuiScan })
+$window.FindName('BtnRescan').Add_Click({ Start-GuiScan })
 function Dismiss-GuiResults {
     $script:ReviewedPendingSnapshot = $null
     $script:ReviewedPendingGenerationSha256 = $null
@@ -1594,6 +1595,9 @@ $window.FindName('BtnOpenReview').Add_Click({
         $list.ItemsSource = $null
         $list.ItemsSource = $items
         $list.Items.Refresh()
+        $suspiciousList.ItemsSource = $null
+        $suspiciousList.ItemsSource = $suspiciousItems
+        $suspiciousList.Items.Refresh()
         Update-GuiReviewCounts -Items $items
         $script:ReviewedPendingSnapshot = $pending
         $script:ReviewedPendingGenerationSha256 = $reviewSnapshot.Sha256
