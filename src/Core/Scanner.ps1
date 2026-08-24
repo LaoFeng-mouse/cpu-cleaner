@@ -259,8 +259,13 @@ function ConvertTo-ServiceProcessStartTimeUtc {
         if ($Value -is [datetimeoffset]) {
             $utc = $Value.ToUniversalTime()
         } elseif ($Value -is [datetime]) {
-            if ($Value.Kind -ne [DateTimeKind]::Utc) { return $null }
-            $utc = [datetimeoffset]::new($Value)
+            if ($Value.Kind -eq [DateTimeKind]::Utc) {
+                $utc = [datetimeoffset]::new($Value)
+            } elseif ($Value.Kind -eq [DateTimeKind]::Local) {
+                $utc = [datetimeoffset]::new($Value.ToUniversalTime())
+            } else {
+                return $null
+            }
         } else {
             return $null
         }

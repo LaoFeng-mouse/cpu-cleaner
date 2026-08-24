@@ -243,6 +243,8 @@ Describe 'Profile 加载' {
     It '完整且一致的服务进程快照生成 stop_service_process 五字段执行身份' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $binary = Join-Path $TestDrive 'wsctrl11.exe'
+        $localCreationDate = [datetime]::SpecifyKind([datetime]'2026-08-24T09:02:03.4567890', [DateTimeKind]::Local)
+        $expectedStartTimeUtc = $localCreationDate.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)
         [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
         $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
             execution_class = 'manual_impact'; necessity = 'optional'
@@ -257,7 +259,7 @@ Describe 'Profile 加载' {
             }
             [pscustomobject]@{
                 ProcessId = 4321; Name = 'wsctrl11.exe'; ExecutablePath = $binary
-                CreationDate = [datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03.4567890', [DateTimeKind]::Utc)
+                CreationDate = $localCreationDate
             }
         } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
         try {
@@ -272,7 +274,7 @@ Describe 'Profile 加载' {
             $hits[0].process_id | Should -Be 4321
             $hits[0].process_name | Should -BeExactly 'wsctrl11.exe'
             $hits[0].process_path | Should -BeExactly $binary
-            $hits[0].process_start_time_utc | Should -Match '^2026-08-24T01:02:03\.4567890Z$'
+            $hits[0].process_start_time_utc | Should -BeExactly $expectedStartTimeUtc
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
@@ -409,7 +411,7 @@ Describe 'Profile 加载' {
         @{ label='utc-datetime'; value=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03.4567890',[DateTimeKind]::Utc); expected='2026-08-24T01:02:03.4567890Z' }
         @{ label='offset-normalized'; value=[datetimeoffset]::Parse('2026-08-24T09:02:03.4567890+08:00'); expected='2026-08-24T01:02:03.4567890Z' }
         @{ label='unspecified'; value=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03',[DateTimeKind]::Unspecified); expected=$null }
-        @{ label='local'; value=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03',[DateTimeKind]::Local); expected=$null }
+        @{ label='local-normalized'; value=[datetime]::SpecifyKind([datetime]'2026-08-24T09:02:03.4567890',[DateTimeKind]::Local); expected=([datetime]::SpecifyKind([datetime]'2026-08-24T09:02:03.4567890',[DateTimeKind]::Local).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)) }
         @{ label='malformed'; value='2026-08-24T01:02:03Z'; expected=$null }
         @{ label='pre-1970'; value=[datetime]::SpecifyKind([datetime]'1969-12-31T23:59:59',[DateTimeKind]::Utc); expected=$null }
         @{ label='null'; value=$null; expected=$null }
