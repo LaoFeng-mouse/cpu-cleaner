@@ -1158,14 +1158,25 @@ function Merge-PendingStatus($ExecutionResult) {
         $executionKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
         foreach ($expectedAction in @($script:ExecutionActions)) { [void]$executionKeys.Add((Get-PendingIdentityKey $expectedAction)) }
         if (@($ExecutionResult.Items).Count -ne $executionKeys.Count) { throw 'pending merge result count does not match this execution.' }
+        $mergedKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
         foreach ($item in @($ExecutionResult.Items)) {
-            if ($item -isnot [System.Tuple[string,string]]) { throw 'pending merge result item is not an immutable identity/status pair.' }
-            $key = $item.Item1
-            $status = $item.Item2
+            if ($item -isnot [System.Collections.ObjectModel.ReadOnlyDictionary[string,string]] -or $item.Count -ne 4) {
+                throw 'pending merge result item is not an immutable terminal result record.'
+            }
+            foreach ($field in @('IdentityKey','Status','ResultReason','FailureStage')) {
+                if (-not $item.ContainsKey($field)) { throw "pending merge result record is missing $field." }
+            }
+            $key = $item['IdentityKey']
+            $status = $item['Status']
+            $reason = $item['ResultReason']
+            $failureStage = $item['FailureStage']
+            if (-not $mergedKeys.Add($key)) { throw 'pending merge result identity set contains duplicates.' }
             if (-not $executionKeys.Contains($key)) { throw 'pending merge identity is outside this execution.' }
             if ($status -cnotin @('success','failed','skipped','manual_required')) { throw 'pending merge status is not terminal.' }
             if (-not $mainByKey.ContainsKey($key)) { throw 'pending merge identity is absent from reviewed generation.' }
             $mainByKey[$key].status = $status
+            $mainByKey[$key] | Add-Member -NotePropertyName result_reason -NotePropertyValue $reason -Force
+            $mainByKey[$key] | Add-Member -NotePropertyName failure_stage -NotePropertyValue $failureStage -Force
         }
         $updatedBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson -InputObject $main))
         try {
@@ -2040,20 +2051,30 @@ function Read-GuiStrictExecutionResult {
         $key = Get-PendingIdentityKey $action
         if (-not $resultKeys.Add($key)) { throw 'execution result identity set contains duplicates.' }
         if (-not $expectedKeys.Contains($key)) { throw 'execution result identity does not match this execution.' }
-        if ([string]$action.status -cnotin @('success','failed','skipped','manual_required')) {
+        $statusProperty = $action.PSObject.Properties['status']
+        if ($null -eq $statusProperty -or $statusProperty.Value -isnot [string] -or
+            $statusProperty.Value -cnotin @('success','failed','skipped','manual_required')) {
             throw 'execution result contains a non-terminal action status.'
         }
     }
     $actionCopies = [System.Collections.Generic.List[object]]::new()
-    $resultPairs = [System.Collections.Generic.List[System.Tuple[string,string]]]::new()
+    $resultRecords = [System.Collections.Generic.List[object]]::new()
     $statusMap = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
     foreach ($action in $items) {
+        $metadata = Get-GuiValidatedTerminalResultMetadata -Action $action
         $copy = Copy-PendingActionForSubset $action
         $copy.status = [string]$action.status
+        $copy | Add-Member -NotePropertyName result_reason -NotePropertyValue $metadata.ResultReason -Force
+        $copy | Add-Member -NotePropertyName failure_stage -NotePropertyValue $metadata.FailureStage -Force
         $key = Get-PendingIdentityKey $copy
         $status = [string]$copy.status
         $actionCopies.Add($copy)
-        $resultPairs.Add([System.Tuple[string,string]]::new($key, $status))
+        $recordValues = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+        $recordValues.Add('IdentityKey', $key)
+        $recordValues.Add('Status', $status)
+        $recordValues.Add('ResultReason', $metadata.ResultReason)
+        $recordValues.Add('FailureStage', $metadata.FailureStage)
+        $resultRecords.Add([System.Collections.ObjectModel.ReadOnlyDictionary[string,string]]::new($recordValues))
         $statusMap.Add($key, $status)
     }
     $rows = [System.Collections.Generic.List[object]]::new()
@@ -2063,11 +2084,46 @@ function Read-GuiStrictExecutionResult {
     foreach ($name in @('success','failed','skipped','manual_required')) { $summaryMap.Add($name, [int]$summaryValues[$name]) }
     return [pscustomobject]@{
         Actions = $actionCopies.AsReadOnly()
-        Items = $resultPairs.AsReadOnly()
+        Items = $resultRecords.AsReadOnly()
         StatusByIdentity = [System.Collections.ObjectModel.ReadOnlyDictionary[string,string]]::new($statusMap)
         Summary = [System.Collections.ObjectModel.ReadOnlyDictionary[string,int]]::new($summaryMap)
         Rows = $rows.AsReadOnly()
     }
+}
+
+function Get-GuiValidatedTerminalResultMetadata {
+    param([Parameter(Mandatory=$true)]$Action)
+    $reasonProperty = $Action.PSObject.Properties['result_reason']
+    if ($null -eq $reasonProperty -or $reasonProperty.Value -isnot [string]) {
+        throw 'execution result_reason must be a scalar string.'
+    }
+    $reason = $reasonProperty.Value.Trim()
+    if ([string]::IsNullOrWhiteSpace($reason) -or $reason.Length -gt 500) {
+        throw 'execution result_reason length is invalid.'
+    }
+    foreach ($character in $reason.ToCharArray()) {
+        if ([char]::IsControl($character)) { throw 'execution result_reason contains a control character.' }
+    }
+    if ($reason -match '[A-Za-z]:[\\/]' -or $reason -match '\\\\' -or
+        $reason -match '(?i)\b(?:bearer|token|secret|password)\b\s*[:= ]\s*\S+' -or
+        $reason -match '(?i)System\.Management\.Automation|ScriptStackTrace|StackTrace|(?:^|\s)at\s+\S+') {
+        throw 'execution result_reason contains unsafe diagnostic detail.'
+    }
+
+    $stageProperty = $Action.PSObject.Properties['failure_stage']
+    $failureStage = ''
+    if ($null -ne $stageProperty) {
+        if ($stageProperty.Value -isnot [string]) { throw 'execution failure_stage must be a scalar string.' }
+        $failureStage = $stageProperty.Value
+    }
+    if ([string]$Action.status -ceq 'failed') {
+        if ($failureStage -cnotin @('authorization','backup','mutation','verification','result_persistence')) {
+            throw 'failed execution result requires a legal failure_stage.'
+        }
+    } elseif (-not [string]::IsNullOrEmpty($failureStage)) {
+        throw 'non-failed execution result must not contain failure_stage.'
+    }
+    return [pscustomobject]@{ ResultReason=$reason; FailureStage=$failureStage }
 }
 
 function Get-GuiExecutionSummaryFromActions {

@@ -1174,12 +1174,28 @@ Describe '勾选视图 (v1.5.5)' {
             param([Parameter(Mandatory=$true)][string]$Path)
             $pending = Read-GuiPendingFile -Path $Path
             $script:ExecutionActions = @($pending.actions)
-            $pairs = [System.Collections.Generic.List[System.Tuple[string,string]]]::new()
+            $records = [System.Collections.Generic.List[object]]::new()
             foreach ($action in @($pending.actions)) {
-                $pairs.Add([System.Tuple[string,string]]::new((Get-PendingIdentityKey $action), [string]$action.status))
+                $status = [string]$action.status
+                $reason = if ($action.PSObject.Properties['result_reason']) { [string]$action.result_reason } else { '测试终态结果' }
+                $stage = if ($status -ceq 'failed') { 'mutation' } else { '' }
+                $values = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+                $values.Add('IdentityKey', (Get-PendingIdentityKey $action))
+                $values.Add('Status', $status)
+                $values.Add('ResultReason', $reason)
+                $values.Add('FailureStage', $stage)
+                $records.Add([System.Collections.ObjectModel.ReadOnlyDictionary[string,string]]::new($values))
             }
-            $result = [pscustomobject]@{ Items=$pairs.AsReadOnly() }
+            $result = [pscustomobject]@{ Items=$records.AsReadOnly() }
             Merge-PendingStatus $result
+        }
+
+        function Set-GuiTestTerminalMetadata {
+            param([Parameter(Mandatory=$true)]$Action)
+            $Action | Add-Member -NotePropertyName result_reason -NotePropertyValue '测试终态结果' -Force
+            $stage = if ([string]$Action.status -ceq 'failed') { 'mutation' } else { '' }
+            $Action | Add-Member -NotePropertyName failure_stage -NotePropertyValue $stage -Force
+            return $Action
         }
     }
 
@@ -2976,7 +2992,7 @@ Describe '勾选视图 (v1.5.5)' {
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $oldRoot = $script:Root; $script:Root = $tempRoot
         $action = (New-GuiReviewPendingFixture).actions[0]
-        $resultAction = $action.PSObject.Copy(); $resultAction.status = 'success'
+        $resultAction = $action.PSObject.Copy(); $resultAction.status = 'success'; $null = Set-GuiTestTerminalMetadata $resultAction
         $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($resultAction); resolved=@(); observations=@(); suspicious=@() }
         $path = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
@@ -3077,6 +3093,7 @@ Describe '勾选视图 (v1.5.5)' {
             $skipped = (New-GuiReviewPendingFixture -ActionServiceName 'S3').actions[0].PSObject.Copy(); $skipped.id='skipped-row'; $skipped.status='skipped'
             $manual = (New-GuiReviewPendingFixture -ActionServiceName 'S4').actions[0].PSObject.Copy(); $manual.id='manual-row'; $manual.status='manual_required'
             $success.status='success'
+            foreach ($terminal in @($success,$failed,$skipped,$manual)) { $null = Set-GuiTestTerminalMetadata $terminal }
             $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($success,$failed,$skipped,$manual); resolved=@(); observations=@(); suspicious=@() }
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
             [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
@@ -3116,6 +3133,7 @@ Describe '勾选视图 (v1.5.5)' {
                 $script:ExecutionResultReadCount++
                 $action = $expected.PSObject.Copy()
                 $action.status = if ($script:ExecutionResultReadCount -eq 1) { 'success' } else { 'pending' }
+                if ($action.status -ceq 'success') { $null = Set-GuiTestTerminalMetadata $action }
                 return [pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() }
             }
             $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
@@ -3150,6 +3168,8 @@ Describe '勾选视图 (v1.5.5)' {
 
             $successResult = $success.PSObject.Copy(); $successResult.status = 'success'
             $failedResult = $failed.PSObject.Copy(); $failedResult.status = 'failed'
+            $null = Set-GuiTestTerminalMetadata $successResult
+            $null = Set-GuiTestTerminalMetadata $failedResult
             $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($successResult,$failedResult); resolved=@(); observations=@(); suspicious=@() }
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
             [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
@@ -3316,6 +3336,164 @@ Describe '勾选视图 (v1.5.5)' {
         $executionSection | Should -Match '\.WaitForExit\(0\)'
         $executionSection | Should -Not -Match '\.WaitForExit\(\s*\)'
         $source | Should -Not -Match 'function\s+Invoke-GuiCheckedExecution'
+    }
+
+    It 'Read-GuiStrictExecutionResult 从管理员结果文件保留结构化终态并用同一快照生成展示行' {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'ResultService').actions[0]
+        $actual = $expected.PSObject.Copy()
+        $actual.status = 'failed'
+        $actual | Add-Member -NotePropertyName result_reason -NotePropertyValue '当前实例已结束，但服务已自动重新拉起 PID 4321'
+        $actual | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'verification'
+        $path = Join-Path $TestDrive ('strict-result-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        $result = Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected)
+
+        $result.Actions[0].result_reason | Should -BeExactly $actual.result_reason
+        $result.Actions[0].failure_stage | Should -BeExactly 'verification'
+        $result.Items[0].IdentityKey | Should -BeExactly (Get-PendingIdentityKey $expected)
+        $result.Items[0].Status | Should -BeExactly 'failed'
+        $result.Items[0].ResultReason | Should -BeExactly $actual.result_reason
+        $result.Items[0].FailureStage | Should -BeExactly 'verification'
+        $result.Rows[0].Reason | Should -BeExactly $actual.result_reason
+        $result.Rows[0].FailureStageLabel | Should -BeExactly '失败阶段：结果复核'
+    }
+
+    It 'Read-GuiStrictExecutionResult 拒绝不可信的新结果诊断字段' -ForEach @(
+        @{ Label='missing reason'; Mutate={ param($a) } }
+        @{ Label='wrong reason type'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue @('不允许数组') } }
+        @{ Label='overlong reason'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue ('鼠' * 501) } }
+        @{ Label='control character'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue "失败`n隐藏行" } }
+        @{ Label='raw path'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue '失败位置 C:\\private\\secret.txt' } }
+        @{ Label='token'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue 'Bearer abcdefghijklmnop' } }
+        @{ Label='stack'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue 'System.Management.Automation.RuntimeException at Invoke-Clean' } }
+        @{ Label='missing failed stage'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue '安全失败说明' } }
+        @{ Label='unknown failed stage'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue '安全失败说明'; $a | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'cleanup' } }
+        @{ Label='stage wrong type'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue '安全失败说明'; $a | Add-Member -NotePropertyName failure_stage -NotePropertyValue @('verification') } }
+        @{ Label='status wrong type'; Mutate={ param($a); $a.status=@('failed'); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue '安全失败说明'; $a | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'verification' } }
+    ) {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'InvalidResultService').actions[0]
+        $actual = $expected.PSObject.Copy()
+        $actual.status = 'failed'
+        & $Mutate $actual
+        $path = Join-Path $TestDrive ('invalid-result-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        { Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected) } |
+            Should -Throw -Because $Label
+    }
+
+    It 'Read-GuiStrictExecutionResult 拒绝非失败终态携带 failure_stage' {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'SuccessStageService').actions[0]
+        $actual = $expected.PSObject.Copy(); $actual.status = 'success'
+        $actual | Add-Member -NotePropertyName result_reason -NotePropertyValue '服务已安全停止'
+        $actual | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'verification'
+        $path = Join-Path $TestDrive ('invalid-success-stage-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        { Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected) } | Should -Throw
+    }
+
+    It 'Read-GuiStrictExecutionResult 按稳定标识拒绝重复和未知结果条目' -ForEach @(
+        @{ Label='duplicate'; Mutate={ param($rows); $rows[1].id=$rows[0].id; $rows[1].service_name=$rows[0].service_name } }
+        @{ Label='unknown'; Mutate={ param($rows); $rows[1].service_name='UnknownResultService' } }
+    ) {
+        $first = (New-GuiReviewPendingFixture -ActionServiceName 'ExpectedOne').actions[0]
+        $second = (New-GuiReviewPendingFixture -ActionServiceName 'ExpectedTwo').actions[0].PSObject.Copy(); $second.id='expected-two'
+        $actual = @($first.PSObject.Copy(), $second.PSObject.Copy())
+        foreach ($row in $actual) { $row.status='success'; $null = Set-GuiTestTerminalMetadata $row }
+        & $Mutate $actual
+        $path = Join-Path $TestDrive ('identity-result-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=$actual; resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        { Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($first,$second) } |
+            Should -Throw -Because $Label
+    }
+
+    It '畸形结果 reason 失败关闭且只给安全通用提示' {
+        $tempRoot = Join-Path $TestDrive ('unsafe-result-prompt-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $oldRoot = $script:Root; $script:Root = $tempRoot
+        try {
+            $expected = (New-GuiReviewPendingFixture -ActionServiceName 'UnsafeReasonService').actions[0]
+            $mainPath = Join-Path $tempRoot 'pending_actions.json'
+            [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+                pending_schema_version=3; actions=@($expected); resolved=@(); observations=@(); suspicious=@()
+            })), [System.Text.UTF8Encoding]::new($false))
+            Set-GuiReviewedGenerationFromFile $mainPath
+            $actual = $expected.PSObject.Copy(); $actual.status='failed'
+            $actual | Add-Member -NotePropertyName result_reason -NotePropertyValue 'Bearer abcdefghijklmnop'
+            $actual | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'mutation'
+            $subsetPath = Join-Path $tempRoot 'unsafe-subset.json'
+            [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+                pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+            })), [System.Text.UTF8Encoding]::new($false))
+            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=2 }
+            $script:ExecutionTimer = New-ExecutionFakeTimer
+            $script:ExecutionTempPath = $subsetPath
+            $script:ExecutionActions = @($expected)
+            $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+            Set-GuiState executing -Force
+
+            Complete-ExecutionPoll | Should -BeTrue
+
+            $script:GuiState | Should -BeExactly 'error'
+            $visible = $script:Win.FindName('ErrorSummaryText').Text + $script:Win.FindName('ErrorMutationText').Text
+            $visible | Should -Not -Match 'Bearer|abcdefghijklmnop'
+            (@($script:Win.FindName('CompletedList').ItemsSource | ForEach-Object { $_.Reason }) -join ' ') |
+                Should -Not -Match 'Bearer|abcdefghijklmnop'
+        } finally { $script:Root = $oldRoot }
+    }
+
+    It 'Merge-PendingStatus 只从不可变结果记录合并 status reason stage' {
+        $tmpRoot = Join-Path $TestDrive ('gui-merge-diagnostics-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $action = (New-GuiReviewPendingFixture -ActionServiceName 'MergeDiagnosticsService').actions[0]
+        $mainPath = Join-Path $tmpRoot 'pending_actions.json'
+        [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+        $resultAction = $action.PSObject.Copy(); $resultAction.status = 'failed'
+        $resultAction | Add-Member -NotePropertyName result_reason -NotePropertyValue '当前实例仍在运行'
+        $resultAction | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'verification'
+        $subsetPath = Join-Path $tmpRoot 'subset.json'
+        [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($resultAction); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+        $oldRoot = $script:Root; $script:Root = $tmpRoot
+        try {
+            Set-GuiReviewedGenerationFromFile $mainPath
+            $script:ExecutionActions = @($action)
+            $result = Read-GuiStrictExecutionResult -Path $subsetPath -ExpectedActions @($action)
+            Merge-PendingStatus $result
+        } finally { $script:Root = $oldRoot }
+
+        $merged = Get-Content -LiteralPath $mainPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $merged.actions[0].status | Should -BeExactly 'failed'
+        $merged.actions[0].result_reason | Should -BeExactly '当前实例仍在运行'
+        $merged.actions[0].failure_stage | Should -BeExactly 'verification'
+    }
+
+    It '幻想落地完成行显示目标、结果、具体原因和友好失败阶段并支持长文本换行' {
+        $list = $script:Win.FindName('CompletedList')
+        $list.ItemTemplate | Should -Not -BeNullOrEmpty
+        $xaml = Get-Content -LiteralPath (Join-Path $script:GuiRoot 'src\Gui\MainWindow.xaml') -Raw -Encoding UTF8
+        $xaml | Should -Match 'Text="\{Binding Name\}"'
+        $xaml | Should -Match 'Text="\{Binding StateLabel\}"'
+        $xaml | Should -Match 'Text="\{Binding Reason\}"[^>]*TextWrapping="Wrap"'
+        $xaml | Should -Match 'Text="\{Binding FailureStageLabel\}"'
+        $xaml | Should -Match 'CompletedList[^>]*MaxHeight="[3-9][0-9]{2}"'
+        $xaml | Should -Match 'CompletedList[^>]*ScrollViewer\.VerticalScrollBarVisibility="Auto"'
+        $script:Win.FindName('BtnRescan') | Should -Not -BeNullOrEmpty
+        $script:Win.FindName('BtnRestore') | Should -Not -BeNullOrEmpty
     }
 
     It 'pending identity 区分 action、PID/path 和 matcher provenance' {
@@ -3544,10 +3722,15 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.File]::WriteAllBytes($mainPath, $mainBytes)
         Set-GuiReviewedGenerationFromFile $mainPath
         $resultAction = $action.PSObject.Copy(); $resultAction.status = 'success'
-        $pairs = [System.Collections.Generic.List[System.Tuple[string,string]]]::new()
-        $pairs.Add([System.Tuple[string,string]]::new((Get-PendingIdentityKey $resultAction), 'success'))
+        $values = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+        $values.Add('IdentityKey', (Get-PendingIdentityKey $resultAction))
+        $values.Add('Status', 'success')
+        $values.Add('ResultReason', '测试终态结果')
+        $values.Add('FailureStage', '')
+        $records = [System.Collections.Generic.List[object]]::new()
+        $records.Add([System.Collections.ObjectModel.ReadOnlyDictionary[string,string]]::new($values))
         $script:ExecutionActions = @($action)
-        $result = [pscustomobject]@{ Items=$pairs.AsReadOnly() }
+        $result = [pscustomobject]@{ Items=$records.AsReadOnly() }
         Mock Write-GuiPendingBytesToLockedStream {
             param($Stream, $Bytes)
             $Stream.Position = 0
