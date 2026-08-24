@@ -251,6 +251,106 @@ function Get-SuspiciousProcesses($TopProcs, $ProfileHits = @()) {
 }
 
 # ---------- 4. 服务列表 ----------
+function ConvertTo-ServiceProcessStartTimeUtc {
+    param($Value)
+
+    try {
+        $utc = $null
+        if ($Value -is [datetimeoffset]) {
+            $utc = $Value.ToUniversalTime()
+        } elseif ($Value -is [datetime]) {
+            $utc = [datetimeoffset]::new($Value.ToUniversalTime())
+        } else {
+            return $null
+        }
+        if ($utc.Year -lt 1970) { return $null }
+        return $utc.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        return $null
+    }
+}
+
+function Get-ServiceProcessExecutionIdentity {
+    param([Parameter(Mandatory=$true)]$Service)
+
+    $failure = {
+        param([string]$Reason)
+        [pscustomobject]@{ Success = $false; Reason = $Reason }
+    }
+
+    if ([string]$Service.State -cne 'Running') {
+        return & $failure '服务未处于 Running 状态，无法建立当前进程身份。'
+    }
+
+    $processId = 0L
+    if (-not [int64]::TryParse([string]$Service.ProcessId, [Globalization.NumberStyles]::Integer,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$processId) -or
+        $processId -le 0 -or $processId -gt [int]::MaxValue) {
+        return & $failure '服务没有有效的正整数 PID，无法安全结束进程。'
+    }
+
+    $serviceBinaryPath = Get-ServiceBinaryPathFromPathName ([string]$Service.PathName)
+    if ([string]::IsNullOrWhiteSpace([string]$serviceBinaryPath) -or
+        -not [System.IO.Path]::IsPathRooted([string]$serviceBinaryPath)) {
+        return & $failure '服务二进制路径缺失或不是绝对路径，无法建立执行身份。'
+    }
+    try { $serviceBinaryPath = [System.IO.Path]::GetFullPath([string]$serviceBinaryPath) }
+    catch { return & $failure '服务二进制路径无效，无法建立执行身份。' }
+    if (-not [System.IO.File]::Exists($serviceBinaryPath)) {
+        return & $failure '服务二进制路径不存在，无法建立执行身份。'
+    }
+
+    try {
+        $processes = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $processId) -ErrorAction Stop)
+    } catch {
+        return & $failure ('无法读取服务进程身份: ' + $_.Exception.Message)
+    }
+    if ($processes.Count -ne 1 -or $null -eq $processes[0]) {
+        return & $failure '服务 PID 没有对应的唯一运行进程，无法安全结束。'
+    }
+    $process = $processes[0]
+
+    $actualProcessId = 0L
+    if (-not [int64]::TryParse([string]$process.ProcessId, [Globalization.NumberStyles]::Integer,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$actualProcessId) -or
+        $actualProcessId -ne $processId) {
+        return & $failure '服务 PID 与进程快照不一致，无法安全结束。'
+    }
+
+    $processName = [string]$process.Name
+    $expectedName = [System.IO.Path]::GetFileName($serviceBinaryPath)
+    if ([string]::IsNullOrWhiteSpace($processName) -or
+        -not [string]::Equals($processName, $expectedName, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return & $failure '进程名称与服务二进制名称不一致，无法安全结束。'
+    }
+
+    $processPath = [string]$process.ExecutablePath
+    if ([string]::IsNullOrWhiteSpace($processPath) -or -not [System.IO.Path]::IsPathRooted($processPath)) {
+        return & $failure '进程路径缺失或不是绝对路径，无法安全结束。'
+    }
+    try { $processPath = [System.IO.Path]::GetFullPath($processPath) }
+    catch { return & $failure '进程路径无效，无法建立执行身份。' }
+    if (-not [System.IO.File]::Exists($processPath) -or
+        -not [string]::Equals($processPath, $serviceBinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return & $failure '进程路径与服务二进制路径不一致，无法安全结束。'
+    }
+
+    $startTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
+    if ([string]::IsNullOrWhiteSpace([string]$startTimeUtc)) {
+        return & $failure '进程 UTC 启动时间缺失或格式无效，无法安全结束。'
+    }
+
+    return [pscustomobject]@{
+        Success = $true
+        Reason = ''
+        service_binary_path = $serviceBinaryPath
+        process_id = [int]$processId
+        process_name = $processName
+        process_path = $processPath
+        process_start_time_utc = $startTimeUtc
+    }
+}
+
 function Test-ServiceTriggerHint {
     param([Parameter(Mandatory=$true)]$Service)
 

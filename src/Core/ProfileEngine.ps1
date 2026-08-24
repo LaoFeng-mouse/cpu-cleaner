@@ -1,8 +1,11 @@
 ﻿# 特征库引擎 (v1.7.0 拆分): Schema 校验/迁移/匹配分发/Match-Profiles
 # ---------- v1.3: 特征库加载与校验 (Schema 2.0) ----------
 $script:ValidRisks   = @('high','medium','low')
-$script:ValidActions = @('disable_service','remove_autostart','disable_task','uninstall','investigate','none')
-$script:DangerousActions = @('disable_service','remove_autostart','disable_task','uninstall')
+$script:ValidActions = @('disable_service','stop_service_process','remove_autostart','disable_task','uninstall','investigate','none')
+$script:PersistentDangerousActions = @('disable_service','remove_autostart','disable_task','uninstall')
+$script:ManualImpactActions = @('disable_service','stop_service_process','remove_autostart','disable_task','uninstall')
+# Pending/执行器兼容: 所有可执行动作仍视为危险动作；profile 授权另行区分持久化自动动作。
+$script:DangerousActions = $script:ManualImpactActions
 $script:ValidCleanupExecutionClasses = @('automatic_safe','manual_impact')
 
 # 旧格式 v1 → v2 转换 (type/match/action → detect/actions)
@@ -25,7 +28,7 @@ function Convert-ProfilesV1ToV2($old) {
         }
         # v1.5.1 P0: 旧库规则一律视为未实测, 危险动作降级为 investigate (只报告)
         foreach ($ak in @($actions.Keys)) {
-            if ($script:DangerousActions -contains $actions[$ak]) { $actions[$ak] = 'investigate' }
+            if ($script:PersistentDangerousActions -contains $actions[$ak]) { $actions[$ak] = 'investigate' }
         }
         $newProfiles += [pscustomobject]@{
             id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
@@ -258,12 +261,15 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                 foreach ($ak in Get-ActionKeys $p.actions) {
                     $av = Get-ActionFor $p.actions $ak
                     if ($av -isnot [string] -or $script:ValidActions -cnotcontains $av) { $errors += "id=$($p.id) actions.$ak 非法: $av" }
+                    if ($av -ceq 'stop_service_process') {
+                        $errors += "id=$($p.id) stop_service_process 只允许 manual_actions.service"
+                    }
                 }
                 # safe=false 只能配 none/investigate
                 if ($p.safe -eq $false) {
                     foreach ($ak in Get-ActionKeys $p.actions) {
                         $av = Get-ActionFor $p.actions $ak
-                        if ($script:DangerousActions -ccontains $av) {
+                        if ($script:PersistentDangerousActions -ccontains $av) {
                             $errors += "id=$($p.id) safe=false 但 actions.$ak=$av (危险动作禁止)"
                         }
                     }
@@ -272,7 +278,7 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                 if ($hasTested -and $p.evidence.tested -is [bool] -and $p.evidence.tested -eq $false) {
                     foreach ($ak in Get-ActionKeys $p.actions) {
                         $av = Get-ActionFor $p.actions $ak
-                        if ($script:DangerousActions -ccontains $av) {
+                        if ($script:PersistentDangerousActions -ccontains $av) {
                             $errors += "id=$($p.id) evidence.tested=false 但 actions.$ak=$av (未实测规则禁止危险动作)"
                         }
                     }
@@ -298,7 +304,10 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                         if ($av -isnot [string] -or $script:ValidActions -cnotcontains $av) {
                             $errors += "id=$($p.id) manual_actions.$ak 非法: $av"
                         }
-                        if ($script:DangerousActions -ccontains $av) {
+                        if ($av -ceq 'stop_service_process' -and $ak -cne 'service') {
+                            $errors += "id=$($p.id) stop_service_process 只允许 manual_actions.service"
+                        }
+                        if ($script:ManualImpactActions -ccontains $av) {
                             $hasDangerousManualAction = $true
                         }
                     }
@@ -339,7 +348,7 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                 foreach ($ak in Get-ActionKeys $manualActions) {
                     $manualAction = Get-ActionFor $manualActions $ak
                     $normalAction = Get-ActionFor $p.actions $ak
-                    if (($script:DangerousActions -ccontains $manualAction) -and ($script:DangerousActions -ccontains $normalAction)) {
+                    if (($script:ManualImpactActions -ccontains $manualAction) -and ($script:PersistentDangerousActions -ccontains $normalAction)) {
                         $errors += "id=$($p.id) actions.$ak 和 manual_actions.$ak 不能同时声明危险动作"
                     }
                 }
@@ -370,7 +379,8 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
 
 # 构造一条命中记录 (结构化字段)
 function New-Hit {
-    param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $decision, $matchEvidence, $processId = 0, $processPath = '', $autostartValue = '')
+    param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $decision, $matchEvidence,
+        $processId = 0, $processPath = '', $autostartValue = '', $serviceBinaryPath = '', $processStartTimeUtc = '', $obsReason = '')
     $matchedPattern = ''
     $matchedType = ''
     $matchedField = ''
@@ -386,6 +396,7 @@ function New-Hit {
         hit_type = $hitType
         detail = $detail
         service_name = $srvName
+        service_binary_path = $serviceBinaryPath
         autostart_source = $autostartSource; autostart_name = $autostartName; autostart_value = $autostartValue
         task_path = $taskPath; process_name = $procName
         matched_pattern = $matchedPattern; matched_type = $matchedType; matched_field = $matchedField
@@ -395,7 +406,8 @@ function New-Hit {
         requires_confirmation = $decision.RequiresConfirmation
         impact_cn = $decision.ImpactCn
         cleanup_reason_cn = $decision.CleanupReasonCn
-        process_id = $processId; process_path = $processPath
+        process_id = $processId; process_path = $processPath; process_start_time_utc = $processStartTimeUtc
+        obs_reason = $obsReason
     }
 }
 
@@ -464,7 +476,7 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
     $isTested = $tested -is [bool] -and $tested -eq $true
 
     $automaticAuthorized = (
-        ($script:DangerousActions -ccontains $declaredAction) -and
+        ($script:PersistentDangerousActions -ccontains $declaredAction) -and
         ((Get-ObjectPropertyValue $profile 'safe') -is [bool]) -and
         ((Get-ObjectPropertyValue $profile 'safe') -eq $true) -and
         $isTested -and
@@ -484,8 +496,8 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
     }
 
     $manualAuthorized = (
-        ($script:DangerousActions -cnotcontains $declaredAction) -and
-        ($script:DangerousActions -ccontains $manualAction) -and
+        ($script:PersistentDangerousActions -cnotcontains $declaredAction) -and
+        ($script:ManualImpactActions -ccontains $manualAction) -and
         $isTested -and
         $hasNarrowEvidence -and
         $null -ne $policy -and
@@ -546,7 +558,29 @@ function Match-Profiles {
                 )
                 if ($matchEvidence) {
                     $decision = Get-HitExecutionDecision $p 'service' $matchEvidence
-                    $hits += New-Hit -p $p -hitType 'service' -detail "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)" -srvName $s.Name -autostartSource '' -autostartName '' -taskPath '' -procName '' -decision $decision -matchEvidence $matchEvidence
+                    $serviceBinaryPath = ''
+                    $processId = 0
+                    $processName = ''
+                    $processPath = ''
+                    $processStartTimeUtc = ''
+                    $obsReason = ''
+                    if ($decision.Action -ceq 'stop_service_process') {
+                        $identity = Get-ServiceProcessExecutionIdentity $s
+                        if ($identity.Success -eq $true) {
+                            $serviceBinaryPath = $identity.service_binary_path
+                            $processId = $identity.process_id
+                            $processName = $identity.process_name
+                            $processPath = $identity.process_path
+                            $processStartTimeUtc = $identity.process_start_time_utc
+                        } else {
+                            $decision.Action = 'investigate'
+                            $decision.ExecutionClass = 'observation'
+                            $decision.DefaultSelected = $false
+                            $decision.RequiresConfirmation = $false
+                            $obsReason = [string]$identity.Reason
+                        }
+                    }
+                    $hits += New-Hit -p $p -hitType 'service' -detail "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)" -srvName $s.Name -autostartSource '' -autostartName '' -taskPath '' -procName $processName -decision $decision -matchEvidence $matchEvidence -serviceBinaryPath $serviceBinaryPath -processId $processId -processPath $processPath -processStartTimeUtc $processStartTimeUtc -obsReason $obsReason
                 }
             }
         }

@@ -137,6 +137,173 @@ Describe 'Profile 加载' {
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
+    It 'stop_service_process 仅以 tested manual_impact service 动作加载' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $policy = [pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '只结束当前实例；不可恢复；服务可能重新拉起'
+            cleanup_reason_cn = '不使用联想电脑管家时减少当前常驻后台'
+        }
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy $policy -ManualActions ([pscustomobject]@{ service = 'stop_service_process' })
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        try {
+            $loaded = (Load-Profiles -Path $tmp).profiles[0]
+            Get-ManualActionFor $loaded 'service' | Should -BeExactly 'stop_service_process'
+            $decision = Get-HitExecutionDecision $loaded 'service' ([pscustomobject]@{ matched_type = 'exact' })
+            $decision.Action | Should -BeExactly 'stop_service_process'
+            $decision.ExecutionClass | Should -BeExactly 'manual_impact'
+            $decision.DefaultSelected | Should -BeFalse
+            $decision.RequiresConfirmation | Should -BeTrue
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'actions.service=stop_service_process 被拒绝为非手动声明' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '影响'; cleanup_reason_cn = '原因'
+        })
+        $profile.actions.service = 'stop_service_process'
+        $profile.manual_actions.service = 'none'
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        try { { Load-Profiles -Path $tmp } | Should -Throw '*stop_service_process 只允许 manual_actions.service*' }
+        finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'stop_service_process 拒绝非 service manual key 和 automatic_safe 形状' -TestCases @(
+        @{ label = 'process-key'; key = 'process'; executionClass = 'manual_impact'; expected = '*stop_service_process 只允许 manual_actions.service*' }
+        @{ label = 'automatic-safe'; key = 'service'; executionClass = 'automatic_safe'; expected = '*危险 manual_actions 必须使用 manual_impact*' }
+    ) {
+        param($label, $key, $executionClass, $expected)
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $manual = [pscustomobject]@{}
+        $manual | Add-Member -NotePropertyName $key -NotePropertyValue 'stop_service_process'
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class = $executionClass; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '影响'; cleanup_reason_cn = '原因'
+        }) -ManualActions $manual
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        try { { Load-Profiles -Path $tmp } | Should -Throw $expected }
+        finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'stop_service_process 拒绝不完整的 manual_impact 安全形状: <label>' -TestCases @(
+        @{ label = 'untested'; tested = $false; defaultSelected = $false; requiresConfirmation = $true; expected = '*manual_impact 要求 evidence.tested=true*' }
+        @{ label = 'default-selected'; tested = $true; defaultSelected = $true; requiresConfirmation = $true; expected = '*manual_impact 要求 default_selected=false*' }
+        @{ label = 'no-confirmation'; tested = $true; defaultSelected = $false; requiresConfirmation = $false; expected = '*manual_impact 要求 requires_confirmation=true*' }
+    ) {
+        param($label, $tested, $defaultSelected, $requiresConfirmation, $expected)
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $defaultSelected; requires_confirmation = $requiresConfirmation
+            impact_cn = '影响'; cleanup_reason_cn = '原因'
+        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_process' }) -Evidence ([pscustomobject]@{ tested = $tested })
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        try { { Load-Profiles -Path $tmp } | Should -Throw $expected }
+        finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'stop_service_process 只由 exact 或 path 实际 matcher 授权' -TestCases @(
+        @{ matcher = 'exact'; expectedAction = 'stop_service_process'; expectedClass = 'manual_impact' }
+        @{ matcher = 'path'; expectedAction = 'stop_service_process'; expectedClass = 'manual_impact' }
+        @{ matcher = 'contains'; expectedAction = 'investigate'; expectedClass = 'observation' }
+        @{ matcher = 'regex'; expectedAction = 'investigate'; expectedClass = 'observation' }
+    ) {
+        param($matcher, $expectedAction, $expectedClass)
+        $profile = & $script:NewDecisionTestProfile -Safe $false -Action 'none' -ManualAction 'stop_service_process' -CleanupPolicy ([pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
+        })
+
+        $decision = Get-HitExecutionDecision $profile 'service' ([pscustomobject]@{ matched_type = $matcher })
+
+        $decision.Action | Should -BeExactly $expectedAction
+        $decision.ExecutionClass | Should -BeExactly $expectedClass
+    }
+
+    It '完整且一致的服务进程快照生成 stop_service_process 五字段执行身份' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $binary = Join-Path $TestDrive 'wsctrl11.exe'
+        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
+        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_process' })
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        $script:ProfileFile = $tmp
+        Mock Get-CimInstance {
+            [pscustomobject]@{
+                ProcessId = 4321; Name = 'wsctrl11.exe'; ExecutablePath = $binary
+                CreationDate = [datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03.4567890', [DateTimeKind]::Utc)
+            }
+        } -ParameterFilter { $ClassName -eq 'Win32_Process' }
+        try {
+            $hits = @(Match-Profiles -Services @([pscustomobject]@{
+                Name = 'HRWSCCtrl'; DisplayName = 'Lenovo Security Center'; State = 'Running'; StartMode = 'Manual'
+                PathName = ('"' + $binary + '" -service'); ProcessId = 4321
+            }) -AutoStarts @() -Tasks @() -TopProcs @())
+
+            $hits.Count | Should -Be 1
+            $hits[0].action | Should -BeExactly 'stop_service_process'
+            $hits[0].service_binary_path | Should -BeExactly $binary
+            $hits[0].process_id | Should -Be 4321
+            $hits[0].process_name | Should -BeExactly 'wsctrl11.exe'
+            $hits[0].process_path | Should -BeExactly $binary
+            $hits[0].process_start_time_utc | Should -Match '^2026-08-24T01:02:03\.4567890Z$'
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'stop_service_process 身份不完整或不一致时降级并给出具体观察原因: <label>' -TestCases @(
+        @{ label = 'non-positive-pid'; processId = 0; binaryExists = $true; processMode = 'valid' }
+        @{ label = 'missing-binary'; processId = 4321; binaryExists = $false; processMode = 'valid' }
+        @{ label = 'missing-process'; processId = 4321; binaryExists = $true; processMode = 'missing' }
+        @{ label = 'name-mismatch'; processId = 4321; binaryExists = $true; processMode = 'name-mismatch' }
+        @{ label = 'path-mismatch'; processId = 4321; binaryExists = $true; processMode = 'path-mismatch' }
+        @{ label = 'missing-start'; processId = 4321; binaryExists = $true; processMode = 'missing-start' }
+    ) {
+        param($label, $processId, $binaryExists, $processMode)
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $binary = Join-Path $TestDrive ($label + '-wsctrl11.exe')
+        $otherBinary = Join-Path $TestDrive ($label + '-other.exe')
+        if ($binaryExists) { [System.IO.File]::WriteAllBytes($binary, [byte[]](1)) }
+        [System.IO.File]::WriteAllBytes($otherBinary, [byte[]](2))
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class = 'manual_impact'; necessity = 'optional'
+            default_selected = $false; requires_confirmation = $true
+            impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
+        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_process' })
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        $script:ProfileFile = $tmp
+        Mock Get-CimInstance {
+            if ($processMode -ceq 'missing') { return @() }
+            [pscustomobject]@{
+                ProcessId = 4321
+                Name = if ($processMode -ceq 'name-mismatch') { 'other.exe' } else { [System.IO.Path]::GetFileName($binary) }
+                ExecutablePath = if ($processMode -ceq 'path-mismatch') { $otherBinary } else { $binary }
+                CreationDate = if ($processMode -ceq 'missing-start') { $null } else { [datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03', [DateTimeKind]::Utc) }
+            }
+        } -ParameterFilter { $ClassName -eq 'Win32_Process' }
+        try {
+            $hits = @(Match-Profiles -Services @([pscustomobject]@{
+                Name = 'HRWSCCtrl'; DisplayName = 'Lenovo Security Center'; State = 'Running'; StartMode = 'Manual'
+                PathName = ('"' + $binary + '" -service'); ProcessId = $processId
+            }) -AutoStarts @() -Tasks @() -TopProcs @())
+
+            $hits.Count | Should -Be 1
+            $hits[0].action | Should -BeExactly 'investigate'
+            $hits[0].execution_class | Should -BeExactly 'observation'
+            $hits[0].default_selected | Should -BeFalse
+            [string]::IsNullOrWhiteSpace([string]$hits[0].obs_reason) | Should -BeFalse
+            $hits[0].obs_reason | Should -Match '身份|PID|路径|进程|启动时间'
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
     It '缺少 manual_actions 时 Get-ManualActionFor 返回 none' {
         $profile = [pscustomobject]@{ actions = [pscustomobject]@{ service = 'disable_service' } }
         Get-ManualActionFor $profile 'service' | Should -BeExactly 'none'

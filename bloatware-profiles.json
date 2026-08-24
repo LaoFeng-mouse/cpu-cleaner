@@ -352,7 +352,7 @@
                          "name_cn":  "联想安全中心组件",
                          "risk":  "low",
                          "safe":  false,
-                         "reason_cn":  "联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需禁用",
+                         "reason_cn":  "联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需结束当前进程",
                          "detect":  {
                                         "services":  [
                                                          {
@@ -382,15 +382,15 @@
                                          "process":  "none"
                                      },
                          "manual_actions":  {
-                                                "service":  "disable_service"
+                                                "service":  "stop_service_process"
                                             },
                          "cleanup_policy":  {
                                                 "execution_class":  "manual_impact",
                                                 "necessity":  "optional",
                                                 "default_selected":  false,
                                                 "requires_confirmation":  true,
-                                                "impact_cn":  "可能影响联想电脑管家的安全状态、主动防护和通知",
-                                                "cleanup_reason_cn":  "不使用联想电脑管家时可减少常驻后台"
+                                                "impact_cn":  "只结束当前 wsctrl11.exe 实例；不可恢复；联想服务可能自动重新拉起",
+                                                "cleanup_reason_cn":  "不使用联想电脑管家时可结束当前安全中心后台进程"
                                             },
                          "evidence":  {
                                           "tested":  true,
