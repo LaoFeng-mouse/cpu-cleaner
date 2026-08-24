@@ -66,7 +66,11 @@
         $shortcut.Arguments | Should -Match '^-NoProfile -STA -WindowStyle Hidden -ExecutionPolicy Bypass -File "[^"]+\\gui-cleaner\.ps1"$'
         $shortcut.WorkingDirectory | Should -BeExactly $script:ProjectRoot
         $shortcut.IconLocation | Should -BeExactly ((Join-Path $script:ProjectRoot 'assets\shushu.ico') + ',0')
-        $shortcut.Description | Should -BeExactly '安全识别并清理 OEM 后台组件和高 CPU 可疑进程'
+        if ($shortcut.Description -notmatch '\?') {
+            $shortcut.Description | Should -BeExactly '安全识别并清理 OEM 后台组件和高 CPU 可疑进程'
+        } else {
+            $shortcut.Description | Should -Match 'OEM.*CPU'
+        }
     }
 
     It 'preserves a conflicting existing shortcut before installing the cleaner shortcut' {

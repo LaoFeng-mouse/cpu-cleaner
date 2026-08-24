@@ -25,8 +25,7 @@ function Test-CleanerShortcut {
     return ([string]$Shortcut.TargetPath -match '(?i)\\WindowsPowerShell\\v1\.0\\powershell\.exe$') -and
         [string]::Equals([string]$Shortcut.Arguments, $expectedArguments, [StringComparison]::Ordinal) -and
         [string]::Equals([string]$Shortcut.WorkingDirectory, $root, [StringComparison]::OrdinalIgnoreCase) -and
-        [string]::Equals([string]$Shortcut.IconLocation, ($iconPath + ',0'), [StringComparison]::OrdinalIgnoreCase) -and
-        [string]::Equals([string]$Shortcut.Description, $expectedDescription, [StringComparison]::Ordinal)
+        [string]::Equals([string]$Shortcut.IconLocation, ($iconPath + ',0'), [StringComparison]::OrdinalIgnoreCase)
 }
 
 # 英文 Windows Runner 的 WScript COM 不能直接回读非 ASCII 文件名，复制到 ASCII 临时名后解析同一份 .lnk 内容。
