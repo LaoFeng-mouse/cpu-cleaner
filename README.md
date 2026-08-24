@@ -88,6 +88,14 @@ GUI 进程始终以普通用户权限运行。点击扫描时出现的一次 UAC
 
 **不会命令行？** 直接双击 `1-扫描.bat` 打开图形软件，在同一个窗口里完成“扫描 → 复核 → 安全处理”；需要回退时再用界面恢复或 `3-恢复.bat`。详细指引看 `零基础操作指南.md`。
 
+要安装带“鼠鼠的幻想”图标的桌面入口，运行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-DesktopShortcut.ps1
+```
+
+安装器会创建或更新 `鼠鼠 Cleaner.lnk`，固定使用仓库内的 GUI、工作目录和多尺寸 `assets\shushu.ico`；运行前会先验证 GUI 与图标存在，不会改动其他桌面快捷方式。
+
 **会用命令行？** 往下看：
 
 ```powershell

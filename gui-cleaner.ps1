@@ -26,7 +26,7 @@ if ($existing -and -not $script:TestMode) {
 # ---------- 中英文文案 ----------
 $script:I18N = @{
     'zh' = @{
-        AppName='鼠鼠cleaner'; SubTitle='识别可以宽，执行必须窄'; Privilege='普通权限'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
+        AppName='鼠鼠 Cleaner'; SubTitle='识别可以宽，执行必须窄'; Privilege='普通权限'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
         Stage1='1 轻盈幻想'; Stage2='2 看清现实'; Stage3='3 谨慎整理'; Stage4='4 幻想落地'
         IdleBody='扫描只读，不会修改系统。'; ResultsNoMutation='目前尚未修改任何内容。'; ExecutingBody='正在逐项处理；每项均会备份并复核。'
         BtnStartScan='开始安全扫描'; BtnOpenReview='查看处理建议'; BtnSkipReview='这次先不处理'; BtnExecute='处理已选择项目'; BtnRescan='重新扫描'; BtnRetry='重试'
@@ -198,11 +198,35 @@ function Apply-Language {
 
 # ---------- 鼠鼠风格 XAML ----------
 . (Join-Path $script:Root 'src\Gui\Presentation.ps1')
+$script:GuiIconWarning = ''
+function Set-GuiWindowIcon {
+    param([Parameter(Mandatory=$true)]$Window, [Parameter(Mandatory=$true)][string]$Path)
+    $stream = $null
+    try {
+        if (-not [System.IO.File]::Exists($Path)) { throw "icon file missing: $Path" }
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+            $stream,
+            [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat,
+            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        )
+        if ($decoder.Frames.Count -lt 1) { throw 'icon decoder returned no frames' }
+        $Window.Icon = $decoder.Frames[0]
+        $script:GuiIconWarning = ''
+        return $true
+    } catch {
+        $script:GuiIconWarning = 'icon load warning: ' + $_.Exception.Message
+        return $false
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
 $xamlPath = Join-Path $script:Root 'src\Gui\MainWindow.xaml'
 if (-not (Test-Path -LiteralPath $xamlPath)) { throw "GUI layout missing: $xamlPath" }
 [xml]$xaml = Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
+$null = Set-GuiWindowIcon -Window $window -Path (Join-Path $script:Root 'assets\shushu.ico')
 
 # 鼠鼠页面形象图: 用绝对路径 (Image Source 相对路径按工作目录解析, 不可靠)
 $script:ImgMap = [ordered]@{

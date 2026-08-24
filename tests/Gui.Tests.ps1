@@ -202,7 +202,7 @@ Describe 'GUI 壳 (无窗口)' {
 
     It '语言切换 zh/en 更新标题' {
         $script:Lang = 'zh'; Apply-Language
-        $script:Win.FindName('TitleMain').Text | Should -Be '鼠鼠cleaner'
+        $script:Win.FindName('TitleMain').Text | Should -Be '鼠鼠 Cleaner'
         $script:Lang = 'en'; Apply-Language
         $script:Win.FindName('TitleMain').Text | Should -Be 'Shushu Cleaner'
         $script:Lang = 'zh'; Apply-Language
@@ -1473,6 +1473,19 @@ Describe '勾选视图 (v1.5.5)' {
         $items[1].matched_type | Should -Be 'exact'
         $items[1].CanExecute | Should -BeFalse
         $items[1].IsChecked | Should -BeFalse
+    }
+
+    It 'uses the unified mouse Cleaner title and real window icon' {
+        $script:Win.Title | Should -BeExactly '鼠鼠 Cleaner'
+        $script:Win.Icon | Should -Not -BeNullOrEmpty
+        $script:Win.Icon.Decoder.Frames.Count | Should -BeGreaterThan 0
+    }
+
+    It 'keeps GUI startup alive and records a diagnostic when the icon is missing' {
+        $originalIcon = $script:Win.Icon
+        { Set-GuiWindowIcon -Window $script:Win -Path (Join-Path $TestDrive 'missing.ico') } | Should -Not -Throw
+        $script:GuiIconWarning | Should -Match 'icon'
+        $script:Win.Icon = $originalIcon
     }
 
     It 'projects automatic manual resolved and observation groups from the reviewed schema snapshot' {

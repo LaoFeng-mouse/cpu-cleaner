@@ -1,7 +1,7 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:sys="clr-namespace:System;assembly=mscorlib"
-        Title="鼠鼠cleaner" Width="1040" Height="760" MinWidth="900" MinHeight="680"
+        Title="鼠鼠 Cleaner" Width="1040" Height="760" MinWidth="900" MinHeight="680"
         WindowStartupLocation="CenterScreen" Background="#FFF6DC"
         FontFamily="Microsoft YaHei UI" FontSize="13"
         AutomationProperties.Name="鼠鼠 Cleaner 安全整理工具">
