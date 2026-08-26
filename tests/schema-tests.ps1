@@ -19,6 +19,14 @@ function Get-ChangelogVersionBlock($text, $version) {
     if (-not $match.Success) { return '' }
     return $match.Value
 }
+function Get-ReadmeCurrentReleaseContract($text) {
+    $currentLines = @([string]$text -split '\r?\n' | Where-Object {
+        $_ -match '^\s*-\s+v1\.8\.1（(?:待发布|未发布)' -or
+        ($_ -match '自动测试' -and $_ -match 'HRWSCCtrl' -and
+            $_ -match '30 秒真实机器验收')
+    })
+    return $currentLines -join "`n"
+}
 function Test-GuiSafeResultContract($text) {
     $requiredFound = $false
     $previousWasContract = $false
@@ -50,29 +58,35 @@ function Test-GuiSafeResultContract($text) {
     }
     return $requiredFound
 }
-function Test-ChangelogNoUnsupportedCompletionClaim($text) {
-    $normalized = [regex]::Replace([string]$text, '[\s，,；;。：:！？!?、]+', '')
+function Test-NoUnsupportedCompletionClaim($text) {
     $releaseSubjects = '(?:正式发布|发布|推送)'
     $acceptanceSubjects = '(?:真实机器验收|真实验收|真实UAC验收|UAC验收|真实UAC|30秒(?:真实机器|实机)?验收|真实清理)'
-    $completionStates = '(?:完成|成功|通过|正式)'
-    $allowedNegativeClaims = @(
-        '不宣称已经验收发布或推送',
-        '目标版本1\.8\.1（?(?:未|尚未|没有|未能)发布）?',
-        '没有执行真实清理或UAC',
-        '不宣称(?:已经)?(?:发布|推送|验收)',
-        "不(?:代表|宣称)(?:已经)?$completionStates*(?:$acceptanceSubjects|$releaseSubjects)",
-        "不(?:代表|宣称)(?:已经)?(?:$acceptanceSubjects|$releaseSubjects)$completionStates*",
-        "(?:未|尚未|没有|未能)$completionStates*(?:$acceptanceSubjects|$releaseSubjects)",
-        "(?:$acceptanceSubjects|$releaseSubjects)(?:未|尚未|没有|未能)$completionStates*",
-        "(?:$acceptanceSubjects|$releaseSubjects)仍待人工(?:执行|验收)?",
-        '没有执行真实清理',
-        '不宣称真实清理(?:完成|成功)'
-    )
-    foreach ($allowedNegativeClaim in $allowedNegativeClaims) {
-        $normalized = [regex]::Replace($normalized, $allowedNegativeClaim, '')
+    $allSubjects = "(?:$acceptanceSubjects|$releaseSubjects)"
+    $releaseSignals = '(?:已经|现已|已|正式|对外|完成|成功|通过)'
+    $acceptanceSignals = '(?:已经|现已|已|正式|完成|成功|通过)'
+    $negativeSignals = '(?:未|尚未|没有|未能|不宣称|不代表|不等同|不能替代|仍待|等待|待人工)'
+
+    foreach ($clause in @([string]$text -split '[\r\n。！？；;.!?]+')) {
+        $normalized = [regex]::Replace([string]$clause, '[\s，,：:、/`()（）\[\]\*#_-]+', '')
+        if (-not $normalized) { continue }
+
+        $allowedNegativeClaims = @(
+            "目标版本.{0,12}?$negativeSignals.{0,8}?$releaseSubjects",
+            "$negativeSignals.{0,16}?$allSubjects(?:$releaseSignals|$acceptanceSignals)*",
+            "$allSubjects.{0,16}?$negativeSignals(?:$releaseSignals|$acceptanceSignals)*"
+        )
+        foreach ($allowedNegativeClaim in $allowedNegativeClaims) {
+            $normalized = [regex]::Replace($normalized, $allowedNegativeClaim, '')
+        }
+
+        $unsupportedRelease = "$releaseSignals.{0,16}$releaseSubjects|$releaseSubjects.{0,16}$releaseSignals"
+        $unsupportedAcceptance = "$acceptanceSignals.{0,16}$acceptanceSubjects|$acceptanceSubjects.{0,16}$acceptanceSignals"
+        if ($normalized -match $unsupportedRelease -or
+            $normalized -match $unsupportedAcceptance) {
+            return $false
+        }
     }
-    $unsupported = "(?:已|已经)$releaseSubjects|正式发布|(?:已|已经)?$completionStates+(?:$acceptanceSubjects|$releaseSubjects)|(?:$acceptanceSubjects|$releaseSubjects)(?:已|已经)?$completionStates+"
-    return $normalized -notmatch $unsupported
+    return $true
 }
 
 # 测试 Load-Profiles 对给定 JSON 的加载结果
@@ -182,7 +196,10 @@ Assert-Equal 'README GUI 仅显示严格验证和净化后的安全字段' (Test
 Assert-Match 'README 明确 30 秒真实机器验收待完成' $readmeText '(还需要|仍待)[^\r\n]{0,40}30 秒真实机器验收|30 秒真实机器验收[^\r\n]{0,40}仍待'
 Assert-NotMatch 'README 禁止 HRWSCCtrl 绑定 disable_service' $readmeText '(?i)HRWSCCtrl[^\r\n]{0,240}(manual_actions\.service=disable_service|通过[^\r\n]{0,80}disable_service|尝试禁用|禁用它)|disable_service[^\r\n]{0,160}HRWSCCtrl'
 Assert-Match 'README 版本记录包含 v1.8.1 未发布与待验收' $readmeText '(?m)^- .*v1\.8\.1（(?:待发布|未发布)[^\r\n]*HRWSCCtrl[^\r\n]*30 秒[^\r\n]*(?:待人工|待验收|仍待)'
-Assert-Equal 'README 禁止无否定上下文的完成声称' (Test-ChangelogNoUnsupportedCompletionClaim $readmeText) $true
+$readmeCurrent181 = Get-ReadmeCurrentReleaseContract $readmeText
+Assert-Match 'README 当前区域包含 v1.8.1 待发布记录' $readmeCurrent181 '(?m)^- v1\.8\.1（待发布）'
+Assert-NotMatch 'README 当前区域排除 v1.8.0 历史记录' $readmeCurrent181 '(?m)^- .*v1\.8\.0'
+Assert-Equal 'README 当前区域禁止无否定上下文的完成声称' (Test-NoUnsupportedCompletionClaim $readmeCurrent181) $true
 
 # SECURITY：信任边界、失败关闭与安全展示
 Assert-Match 'SECURITY 明确六字段执行前复验' $securityText '执行前复验服务/路径/PID/进程名/进程路径/启动时间'
@@ -190,7 +207,7 @@ Assert-Match 'SECURITY 身份漂移失败关闭' $securityText '(任一|任何).
 Assert-Match 'SECURITY replacement PID 失败关闭' $securityText '任意正 replacement PID[\s\S]{0,100}`?failed/verification`?'
 Assert-Equal 'SECURITY GUI 仅显示严格验证和净化后的安全字段' (Test-GuiSafeResultContract $securityText) $true
 Assert-Match 'SECURITY 自动测试不等同真实验收' $securityText '自动测试不等同真实机器验收'
-Assert-Equal 'SECURITY 禁止无否定上下文的完成声称' (Test-ChangelogNoUnsupportedCompletionClaim $securityText) $true
+Assert-Equal 'SECURITY 禁止无否定上下文的完成声称' (Test-NoUnsupportedCompletionClaim $securityText) $true
 
 # CHANGELOG：只审查 Unreleased 中目标 1.8.1，旧版本历史措辞不参与发布契约
 Assert-Match 'CHANGELOG Unreleased 目标版本为 1.8.1 未发布' $changelogTarget181 '(?m)^## \[Unreleased\][\s\S]{0,160}目标版本[：:]?\s*1\.8\.1[^\r\n]{0,30}未发布'
@@ -200,17 +217,22 @@ Assert-Match 'CHANGELOG 目标 1.8.1 记录 restart 检测和结果字段' $chan
 Assert-Match 'CHANGELOG 目标 1.8.1 记录持久动作安全恢复边界' $changelogTarget181 '`?disable_service`?[\s/、,，]+`?remove_autostart`?[\s/、,，]+`?disable_task`?[\s\S]{0,160}(备份.{0,30}恢复|可恢复)'
 Assert-Match 'CHANGELOG 目标 1.8.1 明确真实操作未执行且验收待人工' $changelogTarget181 '没有执行真实清理或 UAC[\s\S]{0,300}30 秒真实机器验收仍待人工执行'
 Assert-Match 'CHANGELOG 目标 1.8.1 明确未发布未推送未验收' $changelogTarget181 '不宣称已经验收、发布或推送'
-Assert-Equal 'CHANGELOG 目标 1.8.1 禁止无否定上下文的完成声称' (Test-ChangelogNoUnsupportedCompletionClaim $changelogTarget181) $true
+Assert-Equal 'CHANGELOG 目标 1.8.1 禁止无否定上下文的完成声称' (Test-NoUnsupportedCompletionClaim $changelogTarget181) $true
 
 # 反例必须失败，证明安全 GUI 与未验收契约不是只检查关键词存在
 $unsafeGuiFixture = 'GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，同时显示原始异常、路径、token、堆栈。'
 Assert-Equal 'GUI 安全字段契约拒绝原始异常泄漏反例' (Test-GuiSafeResultContract $unsafeGuiFixture) $false
 $unsupportedReleaseFixture = "## [1.8.1] - 2026-08-26`n真实机器验收完成，已发布并已推送；真实清理成功。"
-Assert-Equal 'CHANGELOG 契约拒绝完成发布反例' (Test-ChangelogNoUnsupportedCompletionClaim $unsupportedReleaseFixture) $false
+Assert-Equal 'CHANGELOG 契约拒绝完成发布反例' (Test-NoUnsupportedCompletionClaim $unsupportedReleaseFixture) $false
 $reverseUnsupportedReleaseFixture = '已完成真实机器验收。'
-Assert-Equal 'CHANGELOG 契约拒绝前置完成语序反例' (Test-ChangelogNoUnsupportedCompletionClaim $reverseUnsupportedReleaseFixture) $false
+Assert-Equal 'CHANGELOG 契约拒绝前置完成语序反例' (Test-NoUnsupportedCompletionClaim $reverseUnsupportedReleaseFixture) $false
 $negativeReleaseFixture = '真实机器验收仍待人工执行，未发布、未推送，不宣称已经验收。'
-Assert-Equal 'CHANGELOG 契约允许明确否定的发布验收措辞' (Test-ChangelogNoUnsupportedCompletionClaim $negativeReleaseFixture) $true
+Assert-Equal 'CHANGELOG 契约允许明确否定的发布验收措辞' (Test-NoUnsupportedCompletionClaim $negativeReleaseFixture) $true
+$readmeScopeFixture = "- v1.8.1（待发布）：当前目标仍待发布。`n- v1.8.0（历史）：v1.8.0已正式发布。"
+$readmeScopeResult = Get-ReadmeCurrentReleaseContract $readmeScopeFixture
+Assert-Match 'README 范围夹具包含当前 v1.8.1' $readmeScopeResult 'v1\.8\.1'
+Assert-NotMatch 'README 范围夹具排除历史 v1.8.0' $readmeScopeResult 'v1\.8\.0'
+Assert-Equal 'README 历史正式发布不影响当前区域' (Test-NoUnsupportedCompletionClaim $readmeScopeResult) $true
 
 $changelogContractCases = @(
     @{ name='拒绝已发布'; text='已发布。'; expected=$false },
@@ -221,7 +243,8 @@ $changelogContractCases = @(
     @{ name='拒绝真实验收通过'; text='真实验收通过。'; expected=$false },
     @{ name='拒绝真实验收成功'; text='真实验收成功。'; expected=$false },
     @{ name='拒绝已经完成真实机器验收'; text='已经完成真实机器验收。'; expected=$false },
-    @{ name='拒绝跨行真实机器验收完成'; text="真实机器验收`n完成。"; expected=$false },
+    # 保留旧跨行输入；换行现在是条款边界，不再把两条拼成完成声明。
+    @{ name='允许跨行独立条款不拼接'; text="真实机器验收`n完成。"; expected=$true },
     @{ name='拒绝冒号真实机器验收完成'; text='真实机器验收：完成。'; expected=$false },
     @{ name='拒绝冒号已经发布'; text='已经：发布。'; expected=$false },
     @{ name='拒绝冒号已经推送'; text='已经：推送。'; expected=$false },
@@ -234,6 +257,8 @@ $changelogContractCases = @(
     @{ name='拒绝完成推送'; text='完成推送。'; expected=$false },
     @{ name='拒绝真实清理正式完成'; text='真实清理正式完成。'; expected=$false },
     @{ name='拒绝成功通过 30 秒实机验收'; text='成功通过 30 秒实机验收。'; expected=$false },
+    @{ name='拒绝带修饰词的正式对外发布'; text='版本现已正式对外发布。'; expected=$false },
+    @{ name='拒绝带修饰词的 30 秒验收通过'; text='30 秒实机验收已经顺利通过。'; expected=$false },
     @{ name='拒绝真实清理完成'; text='真实清理完成。'; expected=$false },
     @{ name='拒绝真实清理成功'; text='真实清理成功。'; expected=$false },
     @{ name='允许未发布'; text='未发布。'; expected=$true },
@@ -260,10 +285,12 @@ $changelogContractCases = @(
     @{ name='允许真实 UAC 验收仍待人工'; text='真实 UAC 验收仍待人工执行。'; expected=$true },
     @{ name='允许 30 秒实机验收尚未完成'; text='30 秒实机验收尚未完成。'; expected=$true },
     @{ name='允许不宣称发布完成'; text='不宣称发布完成。'; expected=$true },
-    @{ name='允许没有完成真实清理'; text='没有完成真实清理。'; expected=$true }
+    @{ name='允许没有完成真实清理'; text='没有完成真实清理。'; expected=$true },
+    @{ name='允许跨句等待发布与文档完成'; text='等待发布。完成文档整理。'; expected=$true },
+    @{ name='允许当前目标仍待发布'; text='当前目标仍待发布。'; expected=$true }
 )
 foreach ($case in $changelogContractCases) {
-    Assert-Equal ("CHANGELOG 表驱动: " + $case.name) (Test-ChangelogNoUnsupportedCompletionClaim $case.text) $case.expected
+    Assert-Equal ("CHANGELOG 表驱动: " + $case.name) (Test-NoUnsupportedCompletionClaim $case.text) $case.expected
 }
 
 $guiContractCases = @(
