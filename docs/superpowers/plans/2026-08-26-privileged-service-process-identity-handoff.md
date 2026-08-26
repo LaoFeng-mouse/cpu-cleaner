@@ -522,12 +522,14 @@ In `ProcessStop.Tests.ps1`, create a valid pending action whose identity came fr
 
 ```powershell
 $result.status | Should -BeExactly 'skipped'
-$result.failure_stage | Should -BeExactly 'authorization'
+$result.failure_stage | Should -BeExactly ''
 $result.result_reason | Should -Match '启动时间|身份|重新扫描'
 Assert-MockCalled Stop-Process -Times 0 -Exactly
 ```
 
 Repeat for current PID and current path drift. This locks the rule that trusted inventory is scan evidence only; `ActionEngine.ps1` must still re-read administrator process identity before mutation.
+
+实施过程中发现此处需要勘误，以保留严格终态 schema：身份漂移为 `skipped`，`failure_stage` 保持为空，安全的 `result_reason` 说明授权与重新扫描。
 
 - [ ] **Step 2: Add the GUI selection fixture**
 

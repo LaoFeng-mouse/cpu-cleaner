@@ -21,11 +21,18 @@
 10. **执行后验证与安全结果**：每个动作执行完重新读取真实状态；每项结果持久化并写回 `result_reason` / `failure_stage`，GUI 仅显示通过严格验证和安全净化的 `result_reason` / `failure_stage`。验证失败标记 `failed`，不假装成功
 11. **持久动作备份 + 一次性动作隔离**：持久动作 `disable_service` / `remove_autostart` / `disable_task` 在执行前备份并可通过可信恢复包恢复。`stop_process` 和 `stop_service_process` 是用户单独确认的一次性、非持久动作，不进入恢复包，因此不可通过恢复包恢复；它们不删除文件或修改自启
 12. **HRWSCCtrl 精确实例约束**：`stop_service_process` 仅结束本次精确绑定的 HRWSCCtrl 当前进程，不停止或禁用服务，不修改 `StartMode`。执行前复验服务/路径/PID/进程名/进程路径/启动时间；六字段任一变化或不一致即失败关闭，拒绝执行并要求重新扫描。旧 PID 退出后进行约 5 秒稳定验证，出现任意正 replacement PID（`> 0`）即记录为 `failed/verification`
-13. **特征库供应链**：`-Mode update` 支持 SHA256 校验（配置 `ProfileSha256Url` 后强制校验，不一致拒绝替换）；建议发布方配套发布 `.sha256` 文件
+13. **受保护清单版本**：只接受整数 `inventory_schema_version: 2`。v1、缺失版本和未来 v3+ 均拒绝并要求重新扫描；不自动迁移，也不静默迁移
+14. **服务进程身份状态机**：`complete` 必须来自 `service_name` 的 `exact` 命中并通过稳定验证，且原子携带 PID、进程名、完全限定路径、严格 UTC 启动时间，之后才可能成为可选动作。`not_running` 和 `unavailable` 始终是观察项、不可执行，并要求重新扫描
+15. **只读采集与故障隔离**：管理员采集器保持只读，使用两次服务快照包围唯一进程身份采集。单条记录失败只产生经过净化的 `unavailable`；其他记录继续独立处理，不会被错误标记为失败
+16. **内部可信来源标记**：内部 `ProcessIdentitySource` 仅在受保护 inventory 包验证通过后附加，不序列化到 pending 或执行子集。任何带有 `ProcessIdentitySource` 的已复核动作都失败关闭并拒绝执行
+17. **普通扫描的数据边界**：普通扫描不再需要读取受保护的 `Win32_Process.ExecutablePath`；它消费受信证据及其中由两次服务快照验证的身份
+18. **服务名授权边界**：`stop_service_process` 只接受 `exact` 的 `service_name` 来源；显示名 exact、显示名 contains、显示名 regex 以及服务名 contains/regex 都不授权该动作
+19. **管理员执行时再绑定**：管理员执行仍重新读取唯一当前服务/进程，并比较 PID、进程名、完全限定路径和严格 UTC 启动时间。任何身份漂移都令 `status='skipped'`、`failure_stage` 为空，并用安全净化的 `result_reason` 提示授权不足和重新扫描；`failure_stage` 仅供 `status='failed'` 终态使用
+20. **特征库供应链**：`-Mode update` 支持 SHA256 校验（配置 `ProfileSha256Url` 后强制校验，不一致拒绝替换）；建议发布方配套发布 `.sha256` 文件
 
 ## 测试与实机边界
 
-本次 matcher provenance 与可选清理的自动测试全部使用 Mock 或非破坏性夹具。自动测试不等同真实机器验收：测试通过不代表已经完成真实 UAC、用户勾选与二次确认、停服务、删除注册表自启项、禁用计划任务、执行后状态核对或恢复闭环。HRWSCCtrl 还需执行独立的 30 秒真实机器验收，观察旧 PID 退出后是否被服务重新拉起；真实系统 mutation 仍需人工验收，本次文档更新没有执行这些操作。
+本次 matcher provenance 与可选清理的自动测试全部使用 Mock 或非破坏性夹具。自动测试不等同真实机器验收：测试通过不代表已经完成真实 UAC、用户勾选与二次确认、停服务、删除注册表自启项、禁用计划任务、执行后状态核对或恢复闭环。HRWSCCtrl 的重启及 0 秒 / 5 秒 / 30 秒真实回读验收尚未完成，执行前仍需新鲜的用户批准；真实系统 mutation 仍需人工验收，本次文档更新没有执行这些操作。v1.8.1 未发布、未推送、未完成真实清理验证。
 
 ## 已知限制（透明声明）
 

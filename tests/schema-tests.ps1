@@ -233,6 +233,7 @@ $cleanerText = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Enco
 $readmeText = Get-Content (Join-Path $projectRoot 'README.md') -Raw -Encoding UTF8
 $securityText = Get-Content (Join-Path $projectRoot 'SECURITY.md') -Raw -Encoding UTF8
 $changelogText = Get-Content (Join-Path $projectRoot 'CHANGELOG.md') -Raw -Encoding UTF8
+$identityPlanText = Get-Content (Join-Path $projectRoot 'docs\superpowers\plans\2026-08-26-privileged-service-process-identity-handoff.md') -Raw -Encoding UTF8
 $changelogTarget181 = Get-ChangelogVersionBlock $changelogText 'Unreleased'
 
 Assert-Match '版本精确为 1.8.1' $cleanerText '(?m)^\$script:Version = ''1\.8\.1''$'
@@ -246,6 +247,8 @@ Assert-Match 'README 明确一次性不可恢复且 StartMode 不变' $readmeTex
 Assert-Match 'README 明确约 5 秒与正 replacement PID 失败' $readmeText '旧 PID[\s\S]{0,100}约 5 秒[\s\S]{0,160}任意正 replacement PID[\s\S]{0,120}`?failed/verification`?'
 Assert-Equal 'README GUI 仅显示严格验证和净化后的安全字段' (Test-GuiSafeResultContract $readmeText) $true
 Assert-Match 'README 明确 30 秒真实机器验收待完成' $readmeText '(还需要|仍待)[^\r\n]{0,40}30 秒真实机器验收|30 秒真实机器验收[^\r\n]{0,40}仍待'
+Assert-Match 'README 说明受保护 inventory v2 完整身份才可选' $readmeText 'inventory_schema_version:?\s*2[\s\S]{0,300}complete[\s\S]{0,180}HRWSCCtrl[\s\S]{0,180}(可选|勾选)'
+Assert-Match 'README 说明非完整身份只观察并重新扫描' $readmeText '(not_running|unavailable)[\s\S]{0,160}(只观察|不可执行)[\s\S]{0,120}重新扫描'
 Assert-NotMatch 'README 禁止 HRWSCCtrl 绑定 disable_service' $readmeText '(?i)HRWSCCtrl[^\r\n]{0,240}(manual_actions\.service=disable_service|通过[^\r\n]{0,80}disable_service|尝试禁用|禁用它)|disable_service[^\r\n]{0,160}HRWSCCtrl'
 Assert-Match 'README 版本记录包含 v1.8.1 未发布与待验收' $readmeText '(?m)^- .*v1\.8\.1（(?:待发布|未发布)[^\r\n]*HRWSCCtrl[^\r\n]*30 秒[^\r\n]*(?:待人工|待验收|仍待)'
 $readmeCurrent181 = Get-ReadmeCurrentReleaseContract $readmeText
@@ -257,8 +260,20 @@ Assert-Equal 'README 当前区域禁止无否定上下文的完成声称' (Test-
 Assert-Match 'SECURITY 明确六字段执行前复验' $securityText '执行前复验服务/路径/PID/进程名/进程路径/启动时间'
 Assert-Match 'SECURITY 身份漂移失败关闭' $securityText '(任一|任何).{0,30}(变化|不一致)[^\r\n]{0,80}(拒绝|失败关闭|重新扫描)'
 Assert-Match 'SECURITY replacement PID 失败关闭' $securityText '任意正 replacement PID[\s\S]{0,100}`?failed/verification`?'
+Assert-Match 'SECURITY inventory v2 拒绝旧版未来版且不迁移' $securityText 'inventory_schema_version:?\s*2[\s\S]{0,220}(v1|旧版)[\s\S]{0,100}(未来|future|v3)[\s\S]{0,180}(重新扫描|fresh scan)[\s\S]{0,100}(不自动迁移|不静默迁移)'
+Assert-Match 'SECURITY complete 身份四字段与精确服务名来源' $securityText 'complete[\s\S]{0,260}(service_name|服务名)[\s\S]{0,100}exact[\s\S]{0,320}PID[\s\S]{0,120}进程名[\s\S]{0,120}(完全限定路径|完整路径)[\s\S]{0,120}(严格 UTC|UTC 启动时间)'
+Assert-Match 'SECURITY not_running unavailable 仅观察不可执行' $securityText 'not_running[\s\S]{0,180}unavailable[\s\S]{0,220}(只观察|观察项)[\s\S]{0,120}(不可执行|不能执行)[\s\S]{0,120}重新扫描'
+Assert-Match 'SECURITY 只读采集双服务快照和单记录隔离' $securityText '(只读|read-only)[\s\S]{0,260}(两次|两个|双)服务快照[\s\S]{0,260}(唯一进程身份|唯一身份)[\s\S]{0,300}(单条|每条|逐条)[\s\S]{0,140}(净化|sanitized)[\s\S]{0,120}unavailable[\s\S]{0,180}(其他记录|兄弟记录|同级记录)'
+Assert-Match 'SECURITY marker 仅在可信包验证后附加且不序列化' $securityText 'ProcessIdentitySource[\s\S]{0,220}(可信包|受保护包|inventory 包)[\s\S]{0,120}(验证通过|验证成功|完成验证)[\s\S]{0,260}(不序列化|不得序列化)[\s\S]{0,120}(pending|执行子集|subset)'
+Assert-Match 'SECURITY marker 执行动作失败关闭' $securityText 'ProcessIdentitySource[\s\S]{0,500}(带有|携带|含有).{0,40}(reviewed action|已复核动作|执行动作)[\s\S]{0,120}(失败关闭|拒绝执行)'
+Assert-Match 'SECURITY 普通扫描消费可信证据与双快照' $securityText '(普通扫描|normal scan)[\s\S]{0,260}(不再需要|无需)[\s\S]{0,160}Win32_Process[\s\S]{0,80}ExecutablePath[\s\S]{0,300}(可信证据|受信证据)[\s\S]{0,160}(两次|两个|双)服务快照'
+Assert-Match 'SECURITY 只有 exact service_name 授权服务进程停止' $securityText 'stop_service_process[\s\S]{0,260}exact[\s\S]{0,100}service_name[\s\S]{0,280}(显示名|display.?name)[\s\S]{0,180}(contains|regex)[\s\S]{0,180}(不授权|不能授权|不得授权)'
+Assert-Match 'SECURITY 漂移为 skipped 且 failure_stage 为空' $securityText '(漂移|变化|不一致)[\s\S]{0,200}status.?=.?`?skipped`?[\s\S]{0,140}failure_stage[\s\S]{0,80}(空|empty)[\s\S]{0,220}result_reason[\s\S]{0,120}(重新扫描|rescan)'
+Assert-Match 'SECURITY failure_stage 仅供 failed 终态' $securityText 'failure_stage[\s\S]{0,120}(仅|只).{0,40}(status.?=.?`?failed`?|failed 终态)'
 Assert-Equal 'SECURITY GUI 仅显示严格验证和净化后的安全字段' (Test-GuiSafeResultContract $securityText) $true
 Assert-Match 'SECURITY 自动测试不等同真实验收' $securityText '自动测试不等同真实机器验收'
+Assert-Match 'SECURITY 重启及真实 0 5 30 秒验收与批准仍未完成' $securityText '(重启|restart)[\s\S]{0,120}0 秒[\s/、,，]+5 秒[\s/、,，]+30 秒[\s\S]{0,180}(尚未完成|仍未完成|待完成)[\s\S]{0,180}(用户批准|用户确认|人工批准)'
+Assert-Match 'SECURITY v1.8.1 未发布未推送未实机清理验证' $securityText 'v1\.8\.1[\s\S]{0,160}未发布[\s/、,，]+未推送[\s/、,，]+(未通过真实清理验证|未验证真实清理|未完成真实清理验证)'
 Assert-Equal 'SECURITY 禁止无否定上下文的完成声称' (Test-NoUnsupportedCompletionClaim $securityText) $true
 
 # CHANGELOG：只审查 Unreleased 中目标 1.8.1，旧版本历史措辞不参与发布契约
@@ -267,9 +282,16 @@ Assert-NotMatch 'CHANGELOG 不得存在正式 1.8.1 标题' $changelogText '(?m)
 Assert-Match 'CHANGELOG 目标 1.8.1 记录真实故障和修复' $changelogTarget181 '\*\*真实故障\*\*[\s\S]{0,500}\*\*最小修复\*\*'
 Assert-Match 'CHANGELOG 目标 1.8.1 记录 restart 检测和结果字段' $changelogTarget181 '\*\*重启检测\*\*[\s\S]{0,500}`?result_reason`?[\s/、,，]+`?failure_stage`?'
 Assert-Match 'CHANGELOG 目标 1.8.1 记录持久动作安全恢复边界' $changelogTarget181 '`?disable_service`?[\s/、,，]+`?remove_autostart`?[\s/、,，]+`?disable_task`?[\s\S]{0,160}(备份.{0,30}恢复|可恢复)'
+Assert-Match 'CHANGELOG 目标 1.8.1 记录 v2 身份交接' $changelogTarget181 'inventory_schema_version:?\s*2[\s\S]{0,260}(服务进程身份|process identity)[\s\S]{0,220}(重新扫描|拒绝 v1|v1.{0,30}拒绝)'
+Assert-Match 'CHANGELOG 目标 1.8.1 记录 marker 失败关闭边界' $changelogTarget181 'ProcessIdentitySource[\s\S]{0,260}(不序列化|不得序列化)[\s\S]{0,180}(失败关闭|拒绝执行)'
 Assert-Match 'CHANGELOG 目标 1.8.1 明确真实操作未执行且验收待人工' $changelogTarget181 '没有执行真实清理或 UAC[\s\S]{0,300}30 秒真实机器验收仍待人工执行'
 Assert-Match 'CHANGELOG 目标 1.8.1 明确未发布未推送未验收' $changelogTarget181 '不宣称已经验收、发布或推送'
 Assert-Equal 'CHANGELOG 目标 1.8.1 禁止无否定上下文的完成声称' (Test-NoUnsupportedCompletionClaim $changelogTarget181) $true
+
+# 实施计划勘误：保持严格终态 schema，skipped 不占用 failed 专属 failure_stage
+Assert-Match 'Task 4 身份漂移断言 skipped 且 failure_stage 为空' $identityPlanText '\$result\.status \| Should -BeExactly ''skipped''[\s\S]{0,120}\$result\.failure_stage \| Should -BeExactly ''''[\s\S]{0,160}\$result\.result_reason \| Should -Match ''[^'']*(授权|重新扫描|身份)[^'']*'''
+Assert-NotMatch 'Task 4 不再把 skipped 漂移写成 authorization failure_stage' $identityPlanText '\$result\.status \| Should -BeExactly ''skipped''[\s\S]{0,120}\$result\.failure_stage \| Should -BeExactly ''authorization'''
+Assert-Match 'Task 4 记录实施中发现严格终态 schema 勘误' $identityPlanText '(实施过程中|实现过程中).{0,40}(发现|识别).{0,80}(严格终态 schema|严格的终态 schema)'
 
 # 反例必须失败，证明安全 GUI 与未验收契约不是只检查关键词存在
 $unsafeGuiFixture = 'GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，同时显示原始异常、路径、token、堆栈。'

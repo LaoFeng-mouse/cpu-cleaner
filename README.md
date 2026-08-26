@@ -72,6 +72,8 @@
 
 其中，联想通知与诊断计划任务属于推荐/自动安全项；`HRWSCCtrl`（联想 Windows Security Center）属于可选有影响项：必要性是 `optional`，默认不选，只有用户主动勾选后才会弹出二次确认。它可能影响联想电脑管家的安全状态、主动防护和通知。确认后，工具只结束本次精确绑定的当前 `wsctrl11.exe` 进程实例，不停止或禁用服务，不修改 `StartMode`；`HRWSCCtrl` 的宽匹配命中仍只进入“仅观察”，不能执行。
 
+受保护清单使用 `inventory_schema_version: 2`。只有服务进程身份状态为 `complete` 且验证稳定，`HRWSCCtrl` 才会成为可选项；`not_running` 或 `unavailable` 只观察、不可执行，并提示重新扫描。
+
 `stop_service_process` 是一次性、非持久动作，不进入恢复包，因此不可通过恢复包恢复。执行前会复验服务/路径/PID/进程名/进程路径/启动时间，只对六项均与扫描快照一致的当前实例操作。旧 PID 退出后继续进行约 5 秒稳定验证；期间服务出现任意正 replacement PID（`> 0`）都记录为 `failed/verification`，不会把自动重新拉起误报成成功。
 
 执行清单中的每项结果都会持久化并写回 `result_reason` / `failure_stage`；GUI 只显示经过严格验证和安全净化的 `result_reason` / `failure_stage`。持久动作 `disable_service` / `remove_autostart` / `disable_task` 仍在修改前备份并可通过可信恢复包恢复，与一次性结束进程严格分开。
