@@ -179,6 +179,7 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
             execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
             impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
         }
+        $script:pendingStop.PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
         $script:currentIdentity = [pscustomobject]@{
             service_name='HRWSCCtrl'; service_binary_path=$script:binary; process_id=[int]4321
             process_name='wsctrl11.exe'; process_path=$script:binary
@@ -218,14 +219,14 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
     }
 
     It 'skips every recorded identity drift without mutation' -TestCases @(
-        @{ field='service_name'; value='OtherSvc'; reason='service name' }
-        @{ field='service_binary_path'; value='C:\Other\wsctrl11.exe'; reason='service binary path' }
-        @{ field='process_id'; value=[int]4322; reason='PID' }
-        @{ field='process_name'; value='other.exe'; reason='process name' }
-        @{ field='process_path'; value='C:\Other\wsctrl11.exe'; reason='process path' }
-        @{ field='process_start_time_utc'; value='2026-08-24T01:02:04.0000000Z'; reason='start time' }
+        @{ field='service_name'; value='OtherSvc'; reason='service name'; administratorDrift=$false }
+        @{ field='service_binary_path'; value='C:\Other\wsctrl11.exe'; reason='service binary path'; administratorDrift=$false }
+        @{ field='process_id'; value=[int]4322; reason='PID'; administratorDrift=$true }
+        @{ field='process_name'; value='other.exe'; reason='process name'; administratorDrift=$false }
+        @{ field='process_path'; value='C:\Other\wsctrl11.exe'; reason='process path'; administratorDrift=$true }
+        @{ field='process_start_time_utc'; value='2026-08-24T01:02:04.0000000Z'; reason='start time'; administratorDrift=$true }
     ) {
-        param($field, $value, $reason)
+        param($field, $value, $reason, $administratorDrift)
         $current = $script:currentIdentity.PSObject.Copy()
         $current.$field = $value
         Mock Get-CurrentServiceProcessIdentity { [pscustomobject]@{ Identity=$current; Reason='' } }
@@ -234,7 +235,9 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
 
         $result.status | Should -BeExactly 'skipped'
         $result.result_reason | Should -Match $reason
-        $result.failure_stage | Should -BeNullOrEmpty
+        if ($administratorDrift) { $result.failure_stage | Should -BeExactly 'authorization' }
+        else { $result.failure_stage | Should -BeNullOrEmpty }
+        [string]::IsNullOrWhiteSpace([string]$result.result_reason) | Should -BeFalse
         Should -Invoke Stop-Process -Times 0 -Exactly
     }
 
@@ -253,7 +256,30 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         $result.status | Should -BeExactly 'skipped'
         $result.result_reason | Should -Match 'rescan'
         $result.failure_stage | Should -BeNullOrEmpty
+        [string]::IsNullOrWhiteSpace([string]$result.result_reason) | Should -BeFalse
         Should -Invoke Stop-Process -Times 0 -Exactly
+    }
+
+    It 'does not persist the trusted inventory source marker as execution authorization' {
+        $upstream = $script:pendingStop.PSObject.Copy()
+        $upstream | Add-Member -NotePropertyName ProcessIdentitySource -NotePropertyValue 'trusted_inventory_v2'
+        $policy = [pscustomobject]@{
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
+        }
+
+        $persisted = New-PendingPersistedHit -Hit $upstream -Policy $policy -Status 'pending'
+        $json = ConvertTo-Json -InputObject ([pscustomobject]@{
+            pending_schema_version=3; actions=@($persisted); resolved=@(); observations=@(); suspicious=@()
+        }) -Depth 8
+
+        $upstream.ProcessIdentitySource | Should -BeExactly 'trusted_inventory_v2'
+        $persisted.PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+        $persisted.service_name | Should -BeExactly 'HRWSCCtrl'
+        foreach ($field in @('service_binary_path','process_id','process_name','process_path','process_start_time_utc')) {
+            $persisted.PSObject.Properties.Name | Should -Contain $field
+        }
+        $json | Should -Not -Match 'ProcessIdentitySource|trusted_inventory_v2'
     }
 
     It 'records a sanitized mutation failure when Stop-Process is denied' {

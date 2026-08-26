@@ -113,6 +113,27 @@ Describe 'GUI presentation model' {
         $manual.GroupLabel | Should -BeExactly '可选清理'
     }
 
+    It 'presents HRWSCCtrl manual review and identity fallback observation without a clean conclusion' {
+        $safeReason = '受保护扫描没有提供完整服务进程身份，请重新扫描。'
+        $manual = Get-GuiReviewPresentation -Branch actions -Name '联想安全中心组件 HRWSCCtrl' -ExecutionClass manual_impact -Necessity optional -ImpactCn '只结束当前实例' -CleanupReasonCn '减少当前后台'
+        $observation = Get-GuiReviewPresentation -Branch observations -Name '联想安全中心组件 HRWSCCtrl' -ExecutionClass observation -Necessity informational -ImpactCn $safeReason -CleanupReasonCn $safeReason
+
+        $manual.CanExecute | Should -BeTrue
+        $manual.IsChecked | Should -BeFalse
+        $manual.NeedsConfirmation | Should -BeTrue
+        $manual.AutomationName | Should -Match 'HRWSCCtrl'
+        $manual.NecessityLabel | Should -BeExactly '必要性：optional'
+        $manual.ImpactText | Should -BeExactly '影响：只结束当前实例'
+        $manual.CleanupReasonText | Should -BeExactly '清理原因：减少当前后台'
+
+        $observation.CanExecute | Should -BeFalse
+        $observation.IsChecked | Should -BeFalse
+        $observation.NeedsConfirmation | Should -BeFalse
+        $observation.ImpactText | Should -BeExactly ('影响：' + $safeReason)
+        $observation.CleanupReasonText | Should -BeExactly ('清理原因：' + $safeReason)
+        ($observation | ConvertTo-Json -Depth 4) | Should -Not -Match '成功|电脑.*干净|clean computer|success'
+    }
+
     It 'formats exact matcher provenance without granting authority' {
         $raw = [pscustomobject]@{
             hit_type='service'; service_name='ExactSvc'; action='disable_service'

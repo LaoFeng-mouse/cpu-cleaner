@@ -1054,6 +1054,38 @@ Describe '勾选视图 (v1.5.5)' {
             }
         }
 
+        function New-GuiHRWSCCtrlPendingFixture {
+            param([switch]$Observation)
+            $safeReason = '受保护扫描没有提供完整服务进程身份，请重新扫描。'
+            $row = [pscustomobject]@{
+                id='lenovo-hrwscctrl'; vendor='Lenovo'; name_cn='联想安全中心组件 HRWSCCtrl'
+                hit_type='service'; action=$(if ($Observation) { 'investigate' } else { 'stop_service_process' })
+                status=$(if ($Observation) { '观察' } else { 'pending' }); detail='HRWSCCtrl'; reason_cn=$(if ($Observation) { $safeReason } else { '用户确认后仅结束当前服务进程实例' })
+                service_name='HRWSCCtrl'; matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+                execution_class=$(if ($Observation) { 'observation' } else { 'manual_impact' })
+                necessity=$(if ($Observation) { 'informational' } else { 'optional' }); default_selected=$false
+                requires_confirmation=$(if ($Observation) { $false } else { $true })
+                impact_cn=$(if ($Observation) { $safeReason } else { '只结束当前实例，联想安全中心功能可能暂时中断' })
+                cleanup_reason_cn=$(if ($Observation) { $safeReason } else { '不使用该功能时减少当前后台占用' })
+            }
+            if ($Observation) {
+                $row | Add-Member -NotePropertyName obs_reason -NotePropertyValue $safeReason
+            } else {
+                $row | Add-Member -NotePropertyName service_binary_path -NotePropertyValue 'C:\Program Files\Lenovo Security Center\wsctrl11.exe'
+                $row | Add-Member -NotePropertyName process_id -NotePropertyValue ([int]4321)
+                $row | Add-Member -NotePropertyName process_name -NotePropertyValue 'wsctrl11.exe'
+                $row | Add-Member -NotePropertyName process_path -NotePropertyValue 'C:\Program Files\Lenovo Security Center\wsctrl11.exe'
+                $row | Add-Member -NotePropertyName process_start_time_utc -NotePropertyValue '2026-08-24T01:02:03.0000000Z'
+            }
+            $actions = [object[]]@()
+            $observations = [object[]]@()
+            if ($Observation) { $observations = [object[]]@($row) } else { $actions = [object[]]@($row) }
+            return [pscustomobject]@{
+                pending_schema_version=[int64]3; generated='trusted inventory handoff'
+                actions=$actions; resolved=[object[]]@(); observations=$observations; suspicious=[object[]]@()
+            }
+        }
+
         function New-GuiFourGroupPendingFixture {
             $pending = New-GuiReviewPendingFixture
             $manual = $pending.actions[0].PSObject.Copy()
@@ -1128,6 +1160,21 @@ Describe '勾选视图 (v1.5.5)' {
             $list.Items.Clear()
             foreach ($item in @(Get-PendingViewItems -Pending $pending)) { [void]$list.Items.Add($item) }
             return [pscustomobject]@{ Pending=$pending; List=$list }
+        }
+
+        function Set-GuiReviewedPendingFixture {
+            param([Parameter(Mandatory=$true)]$Pending)
+            Set-GuiState review -Force
+            $script:ReviewedPendingSnapshot = $Pending
+            $keys = [System.Collections.Generic.List[string]]::new()
+            foreach ($key in @(Get-GuiValidatedActionIdentityKeys -Pending $Pending)) { $keys.Add($key) }
+            $script:ReviewedActionIdentityKeys = $keys.AsReadOnly()
+            $list = $script:Win.FindName('PendingList')
+            $list.ItemsSource = $null
+            $list.Items.Clear()
+            foreach ($item in @(Get-PendingViewItems -Pending $Pending)) { [void]$list.Items.Add($item) }
+            Update-GuiExecuteAvailability -List $list
+            return [pscustomobject]@{ Pending=$Pending; List=$list }
         }
 
         function Set-GuiReviewedImpactExecutionFixture {
@@ -2064,6 +2111,49 @@ Describe '勾选视图 (v1.5.5)' {
         $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
     }
 
+    It 'HRWSCCtrl review row is initially optional and enables execution through the real checkbox route' {
+        $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture)
+        $row = @($fixture.List.Items)[0]
+
+        $row.CanExecute | Should -BeTrue
+        $row.IsChecked | Should -BeFalse
+        $row.NeedsConfirmation | Should -BeTrue
+        $row.NecessityLabel | Should -BeExactly '必要性：optional'
+        $row.ImpactText | Should -BeExactly '影响：只结束当前实例，联想安全中心功能可能暂时中断'
+        $row.CleanupReasonText | Should -BeExactly '清理原因：不使用该功能时减少当前后台占用'
+        $row.AutomationName | Should -Match 'HRWSCCtrl'
+        $row._raw.service_name | Should -BeExactly 'HRWSCCtrl'
+        (Get-GuiExecutionTargetLabel -Item $row._raw) | Should -BeExactly 'wsctrl11.exe（PID 4321）'
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+
+        $row.IsChecked = $true
+        $fixture.List.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))
+
+        $row.IsChecked | Should -BeTrue
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeTrue
+    }
+
+    It 'HRWSCCtrl identity fallback is a nonselectable observation with the exact rescan reason' {
+        $safeReason = '受保护扫描没有提供完整服务进程身份，请重新扫描。'
+        $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture -Observation)
+        $row = @($fixture.List.Items)[0]
+
+        $row.CanExecute | Should -BeFalse
+        $row.IsChecked | Should -BeFalse
+        $row.NeedsConfirmation | Should -BeFalse
+        $row._raw.obs_reason | Should -BeExactly $safeReason
+        $row.ImpactText | Should -BeExactly ('影响：' + $safeReason)
+        $row.CleanupReasonText | Should -BeExactly ('清理原因：' + $safeReason)
+        ($row | ConvertTo-Json -Depth 8) | Should -Not -Match '成功|电脑.*干净|clean computer|success'
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+
+        $row.IsChecked = $true
+        $row.CanExecute = $true
+        Mock Start-Process { throw 'observation must not launch administrator clean' }
+        Start-GuiExecution -List $fixture.List | Should -BeFalse
+        Assert-MockCalled Start-Process -Times 0 -Exactly
+    }
+
     It 'Get-CleanResultSummary 支持自定义路径 (-Path)' {
         $tmpRoot = Join-Path $env:TEMP ("gui_sum2_" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
@@ -2740,6 +2830,71 @@ Describe '勾选视图 (v1.5.5)' {
             $script:ReviewedActionIdentityKeys | Should -Be $identityKeys
             $script:GuiState | Should -Be 'review'
             $script:ExecutionLifecycle | Should -Be 'idle'
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It 'HRWSCCtrl high-impact confirmation rejects <Label> without subset or administrator launch' -TestCases @(
+        @{ Label='cancel'; Response=$null }
+        @{ Label='Boolean false'; Response=$false }
+        @{ Label='string true'; Response='true' }
+    ) {
+        param($Label, $Response)
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('hrwscctrl-no-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture)
+            $fixture.List.Items[0].IsChecked = $true
+            Mock Confirm-GuiImpactActions { return $Response }
+            Mock Start-Process { throw 'administrator clean must not start' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeFalse
+
+            Assert-MockCalled Confirm-GuiImpactActions -Times 1 -Exactly
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It 'HRWSCCtrl Boolean confirmation launches only its reviewed subset with matcher and identity provenance' {
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('hrwscctrl-yes-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture)
+            $fixture.Pending.PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+            $fixture.Pending.actions[0].PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+            $fixture.List.Items[0].IsChecked = $true
+            Mock Confirm-GuiImpactActions { return $true }
+            Mock Start-Process { return [pscustomobject]@{ HasExited=$false; ExitCode=0 } }
+            Mock New-Object { return (New-ExecutionFakeTimer) } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeTrue
+
+            Assert-MockCalled Confirm-GuiImpactActions -Times 1 -Exactly
+            Assert-MockCalled Start-Process -Times 1 -Exactly
+            $json = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8
+            $payload = $json | ConvertFrom-Json
+            @($payload.actions).Count | Should -Be 1
+            $action = $payload.actions[0]
+            $action.id | Should -BeExactly 'lenovo-hrwscctrl'
+            $action.service_name | Should -BeExactly 'HRWSCCtrl'
+            $action.matched_pattern | Should -BeExactly 'HRWSCCtrl'
+            $action.matched_type | Should -BeExactly 'exact'
+            $action.matched_field | Should -BeExactly 'service_name'
+            $action.service_binary_path | Should -BeExactly 'C:\Program Files\Lenovo Security Center\wsctrl11.exe'
+            $action.process_id | Should -Be 4321
+            $action.process_name | Should -BeExactly 'wsctrl11.exe'
+            $action.process_path | Should -BeExactly 'C:\Program Files\Lenovo Security Center\wsctrl11.exe'
+            $json | Should -Match '"process_start_time_utc"\s*:\s*"2026-08-24T01:02:03\.0000000Z"'
+            $action.PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+            $json | Should -Not -Match 'ProcessIdentitySource|trusted_inventory_v2'
         } finally {
             $env:TEMP = $oldTemp
         }
