@@ -2126,6 +2126,14 @@ Describe '勾选视图 (v1.5.5)' {
 
     It 'HRWSCCtrl identity fallback is a nonselectable observation with the exact rescan reason' {
         $safeReason = '受保护扫描没有提供完整服务进程身份，请重新扫描。'
+        $repositoryDiagnostics = Join-Path $script:GuiRoot 'diagnostics'
+        $repositoryDiagnosticsExistedBefore = Test-Path -LiteralPath $repositoryDiagnostics
+        $diagnosticsBefore = if ($repositoryDiagnosticsExistedBefore) {
+            @(Get-ChildItem -LiteralPath $repositoryDiagnostics -File |
+                Where-Object { $_.Name -match '^execution_(error|result)_' } |
+                ForEach-Object { $_.FullName } |
+                Sort-Object)
+        } else { @() }
         $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture -Observation)
         $row = @($fixture.List.Items)[0]
 
@@ -2141,8 +2149,19 @@ Describe '勾选视图 (v1.5.5)' {
         $row.IsChecked = $true
         $row.CanExecute = $true
         Mock Start-Process { throw 'observation must not launch administrator clean' }
+        Mock Save-GuiExecutionErrorDiagnostic { return 'D-0123456789ABCDEF' }
         Start-GuiExecution -List $fixture.List | Should -BeFalse
         Assert-MockCalled Start-Process -Times 0 -Exactly
+        Assert-MockCalled Save-GuiExecutionErrorDiagnostic -Times 1 -Exactly
+        $repositoryDiagnosticsExistedAfter = Test-Path -LiteralPath $repositoryDiagnostics
+        $diagnosticsAfter = if ($repositoryDiagnosticsExistedAfter) {
+            @(Get-ChildItem -LiteralPath $repositoryDiagnostics -File |
+                Where-Object { $_.Name -match '^execution_(error|result)_' } |
+                ForEach-Object { $_.FullName } |
+                Sort-Object)
+        } else { @() }
+        $repositoryDiagnosticsExistedAfter | Should -Be $repositoryDiagnosticsExistedBefore
+        ($diagnosticsAfter -join "`n") | Should -BeExactly ($diagnosticsBefore -join "`n")
     }
 
     It 'Get-CleanResultSummary 支持自定义路径 (-Path)' {
