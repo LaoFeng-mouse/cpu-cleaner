@@ -20,12 +20,64 @@ function Get-ChangelogVersionBlock($text, $version) {
     return $match.Value
 }
 function Get-ReadmeCurrentReleaseContract($text) {
-    $currentLines = @([string]$text -split '\r?\n' | Where-Object {
-        $_ -match '^\s*-\s+v1\.8\.1（(?:待发布|未发布)' -or
-        ($_ -match '自动测试' -and $_ -match 'HRWSCCtrl' -and
-            $_ -match '30 秒真实机器验收')
-    })
-    return $currentLines -join "`n"
+    $sections = @()
+    $lines = @([string]$text -split '\r?\n')
+    $itemLines = @()
+    $pendingBlankLines = @()
+    $itemIndent = -1
+
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = [string]$lines[$index]
+        if ($itemIndent -lt 0) {
+            $startMatch = [regex]::Match($line, '^(\s*)-\s+v1\.8\.1（(?:待发布|未发布)')
+            if ($startMatch.Success) {
+                $itemIndent = $startMatch.Groups[1].Value.Length
+                $itemLines = @($line)
+                $pendingBlankLines = @()
+            }
+            continue
+        }
+
+        if ($line -match '^\s*$') {
+            $pendingBlankLines += $line
+            continue
+        }
+
+        $headingMatch = [regex]::Match($line, '^(\s*)#{1,6}\s+')
+        $listMatch = [regex]::Match($line, '^(\s*)[-*+]\s+')
+        $indentMatch = [regex]::Match($line, '^(\s*)')
+        $endsItem = ($headingMatch.Success -and
+                $headingMatch.Groups[1].Value.Length -le $itemIndent) -or
+            ($listMatch.Success -and
+                $listMatch.Groups[1].Value.Length -le $itemIndent) -or
+            ($indentMatch.Groups[1].Value.Length -le $itemIndent)
+
+        if ($endsItem) {
+            $sections += ($itemLines -join "`n")
+            $itemIndent = -1
+            $itemLines = @()
+            $pendingBlankLines = @()
+            continue
+        }
+
+        if ($pendingBlankLines.Count -gt 0) {
+            $itemLines += $pendingBlankLines
+            $pendingBlankLines = @()
+        }
+        $itemLines += $line
+    }
+    if ($itemIndent -ge 0) {
+        $sections += ($itemLines -join "`n")
+    }
+
+    foreach ($paragraph in @([regex]::Split([string]$text, '(?:\r?\n){2,}'))) {
+        if ($paragraph -match '自动测试' -and
+            $paragraph -match 'HRWSCCtrl' -and
+            $paragraph -match '30 秒真实机器验收') {
+            $sections += [string]$paragraph
+        }
+    }
+    return $sections -join "`n`n"
 }
 function Test-GuiSafeResultContract($text) {
     $requiredFound = $false
@@ -233,6 +285,26 @@ $readmeScopeResult = Get-ReadmeCurrentReleaseContract $readmeScopeFixture
 Assert-Match 'README 范围夹具包含当前 v1.8.1' $readmeScopeResult 'v1\.8\.1'
 Assert-NotMatch 'README 范围夹具排除历史 v1.8.0' $readmeScopeResult 'v1\.8\.0'
 Assert-Equal 'README 历史正式发布不影响当前区域' (Test-NoUnsupportedCompletionClaim $readmeScopeResult) $true
+$readmeUnsafeContinuationFixture = @"
+- v1.8.1（待发布）：当前目标仍待发布。
+
+  版本现已正式对外发布。
+- v1.8.0（历史）：v1.8.0已正式发布。
+"@
+$readmeUnsafeContinuationResult = Get-ReadmeCurrentReleaseContract $readmeUnsafeContinuationFixture
+Assert-Match 'README 当前条目提取恶意缩进续行' $readmeUnsafeContinuationResult '版本现已正式对外发布'
+Assert-NotMatch 'README 恶意续行夹具排除 v1.8.0' $readmeUnsafeContinuationResult 'v1\.8\.0'
+Assert-Equal 'README 当前条目拒绝续行发布声称' (Test-NoUnsupportedCompletionClaim $readmeUnsafeContinuationResult) $false
+$readmeSafeContinuationFixture = @"
+- v1.8.1（未发布）：当前目标仍待发布。
+
+  30 秒验收仍待人工执行。
+- v1.8.0（历史）：v1.8.0已正式发布。
+"@
+$readmeSafeContinuationResult = Get-ReadmeCurrentReleaseContract $readmeSafeContinuationFixture
+Assert-Match 'README 当前条目提取合法缩进续行' $readmeSafeContinuationResult '30 秒验收仍待人工执行'
+Assert-NotMatch 'README 合法续行夹具排除 v1.8.0' $readmeSafeContinuationResult 'v1\.8\.0'
+Assert-Equal 'README 当前条目允许续行待人工声明' (Test-NoUnsupportedCompletionClaim $readmeSafeContinuationResult) $true
 
 $changelogContractCases = @(
     @{ name='拒绝已发布'; text='已发布。'; expected=$false },
