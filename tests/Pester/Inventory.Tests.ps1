@@ -427,6 +427,18 @@ Describe 'strict privileged inventory JSON and package shape' {
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
     }
 
+    It 'accepts unavailable service identity with UInt32 max PID' {
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        $service = $package.services[0]
+        $service.ProcessIdentityStatus = 'unavailable'
+        $service.ProcessId = [uint32]::MaxValue
+        $service.ProcessName = ''
+        $service.ProcessPath = ''
+        $service.ProcessStartTimeUtc = ''
+
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
+    }
+
     It 'rejects legacy schema v1 packages' {
         $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
         $package.inventory_schema_version = 1

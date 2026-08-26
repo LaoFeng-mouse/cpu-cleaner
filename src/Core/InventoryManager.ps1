@@ -292,7 +292,7 @@ function Assert-InventoryServiceRecord($Record, [datetimeoffset]$GeneratedUtc) {
         if (-not (Test-InventoryString $Record.$name)) { throw "Inventory service $name is invalid." }
     }
     if (-not (Test-InventoryString $Record.PathName $true)) { throw 'Inventory service PathName is invalid.' }
-    if (-not (Test-InventoryInteger $Record.ProcessId) -or [int64]$Record.ProcessId -lt 0 -or [uint64]$Record.ProcessId -gt [uint64][int]::MaxValue) {
+    if (-not (Test-InventoryInteger $Record.ProcessId) -or [int64]$Record.ProcessId -lt 0 -or [uint64]$Record.ProcessId -gt [uint64][uint32]::MaxValue) {
         throw 'Inventory service ProcessId is invalid.'
     }
     if ($Record.ProcessIdentityStatus -isnot [string] -or
@@ -304,7 +304,8 @@ function Assert-InventoryServiceRecord($Record, [datetimeoffset]$GeneratedUtc) {
     }
 
     if ($Record.ProcessIdentityStatus -ceq 'complete') {
-        if ($Record.State -cne 'Running' -or [int64]$Record.ProcessId -le 0) {
+        if ($Record.State -cne 'Running' -or [int64]$Record.ProcessId -le 0 -or
+            [uint64]$Record.ProcessId -gt [uint64][int]::MaxValue) {
             throw 'Inventory service complete process identity state or PID is invalid.'
         }
         if (-not (Test-InventoryBoundedCleanString $Record.ProcessName $script:MaxInventoryProcessNameLength) -or
