@@ -20,7 +20,7 @@
 9. **双重摘要绑定**：执行子集的 pending 文件 SHA-256 与已确认 `manual_impact` 身份摘要同时绑定并校验；任一清单、身份或确认范围改变都拒绝执行
 10. **执行后验证与安全结果**：每个动作执行完重新读取真实状态；每项结果持久化并写回 `result_reason` / `failure_stage`，GUI 仅显示通过严格验证和安全净化的 `result_reason` / `failure_stage`。验证失败标记 `failed`，不假装成功
 11. **持久动作备份 + 一次性动作隔离**：持久动作 `disable_service` / `remove_autostart` / `disable_task` 在执行前备份并可通过可信恢复包恢复。`stop_process` 和 `stop_service_process` 是用户单独确认的一次性、非持久动作，不进入恢复包，因此不可通过恢复包恢复；它们不删除文件或修改自启
-12. **HRWSCCtrl 精确实例约束**：`stop_service_process` 仅结束本次精确绑定的 HRWSCCtrl 当前进程，不停止或禁用服务，不修改 `StartMode`。执行前复验服务/路径/PID/进程名/进程路径/启动时间；旧 PID 退出后进行约 5 秒稳定验证，出现任意正 replacement PID（`> 0`）即记录为 `failed/verification`
+12. **HRWSCCtrl 精确实例约束**：`stop_service_process` 仅结束本次精确绑定的 HRWSCCtrl 当前进程，不停止或禁用服务，不修改 `StartMode`。执行前复验服务/路径/PID/进程名/进程路径/启动时间；六字段任一变化或不一致即失败关闭，拒绝执行并要求重新扫描。旧 PID 退出后进行约 5 秒稳定验证，出现任意正 replacement PID（`> 0`）即记录为 `failed/verification`
 13. **特征库供应链**：`-Mode update` 支持 SHA256 校验（配置 `ProfileSha256Url` 后强制校验，不一致拒绝替换）；建议发布方配套发布 `.sha256` 文件
 
 ## 测试与实机边界

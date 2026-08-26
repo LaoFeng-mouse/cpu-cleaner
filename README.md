@@ -239,7 +239,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sha256`。危险动作只接受实际命中的 `exact`，或命中 `autostart_value` / `task_path` / `process_path` 的 `path`；`contains` / `regex` 只能识别，不能因为规则声明了动作或 `allow_auto` 就获得执行资格。
 
-可选清理规则还应声明 `cleanup_policy`：`execution_class`、必要性、默认选择、是否需要确认、中文影响和清理原因。`HRWSCCtrl` 通过 `manual_actions.service=disable_service` 进入手动路径；它不是自动安全项。
+可选清理规则还应声明 `cleanup_policy`：`execution_class`、必要性、默认选择、是否需要确认、中文影响和清理原因。`HRWSCCtrl` 通过 `manual_actions.service=stop_service_process` 进入手动路径；它不是自动安全项，默认不选，必须二次确认，且只执行一次性、不可恢复的当前进程实例结束，不修改服务 `StartMode`。
 
 **程序启动时自动校验，错误规则直接拒绝加载：**
 - 当前特征库格式为 Schema 3.0；Schema 2.0 可在加载时迁移，未来版本拒绝加载。特征库迁移规则与 pending 清单必须使用 schema 3、且不自动迁移的规则相互独立

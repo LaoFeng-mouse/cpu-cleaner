@@ -9,6 +9,25 @@ function Assert-Match($name, $actual, $pattern) {
     if ([string]$actual -match $pattern) { $script:pass++; Write-Host "  PASS: $name" -ForegroundColor Green }
     else { $script:fail++; Write-Host "  FAIL: $name => 未匹配 $pattern" -ForegroundColor Red }
 }
+function Assert-NotMatch($name, $actual, $pattern) {
+    if ([string]$actual -notmatch $pattern) { $script:pass++; Write-Host "  PASS: $name" -ForegroundColor Green }
+    else { $script:fail++; Write-Host "  FAIL: $name => 不应匹配 $pattern" -ForegroundColor Red }
+}
+function Get-ChangelogVersionBlock($text, $version) {
+    $escapedVersion = [regex]::Escape([string]$version)
+    $match = [regex]::Match([string]$text, "(?ms)^## \[$escapedVersion\][^\r\n]*\r?\n.*?(?=^## \[|\z)")
+    if (-not $match.Success) { return '' }
+    return $match.Value
+}
+function Test-GuiSafeResultContract($text) {
+    $required = 'GUI[\s\S]{0,120}(只|仅)显示[\s\S]{0,160}严格验证[\s\S]{0,80}安全净化[\s\S]{0,100}`?result_reason`?[\s/、,，]+`?failure_stage`?'
+    $unsafe = 'GUI[\s\S]{0,160}(同时|还会|并会)[\s\S]{0,80}(原始异常|原始路径|token|堆栈)'
+    return ([string]$text -match $required) -and ([string]$text -notmatch $unsafe)
+}
+function Test-ChangelogNoUnsupportedCompletionClaim($text) {
+    $unsupported = '(真实机器验收|真实验收)[^\r\n]{0,30}(?<!未)(通过|完成|成功)|(?<!未)(通过|完成|成功)[^\r\n]{0,30}(真实机器验收|真实验收)|(?<!未)已(发布|推送)|真实清理[^\r\n]{0,30}(?<!未)(成功|完成)|(?<!未)(成功|完成)[^\r\n]{0,30}真实清理'
+    return [string]$text -notmatch $unsupported
+}
 
 # 测试 Load-Profiles 对给定 JSON 的加载结果
 function Test-Load($name, $jsonContent, $expectOk) {
@@ -97,26 +116,50 @@ Test-Load 'stop_service_process 拒绝 tested=false' ('{"schema_version":3,"prof
 Test-Load 'stop_service_process 拒绝 default_selected=true' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"default_selected":false', '"default_selected":true') + ']}') $false
 Test-Load 'stop_service_process 拒绝 requires_confirmation=false' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"requires_confirmation":true', '"requires_confirmation":false') + ']}') $false
 
-# 12. v1.8.1 发布文本必须准确描述一次性 HRWSCCtrl 修复及验收边界
+# 12. v1.8.1 文档分别承担自己的用户、安全与历史契约，禁止跨文档拼接代答
 $cleanerText = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
 $readmeText = Get-Content (Join-Path $projectRoot 'README.md') -Raw -Encoding UTF8
 $securityText = Get-Content (Join-Path $projectRoot 'SECURITY.md') -Raw -Encoding UTF8
 $changelogText = Get-Content (Join-Path $projectRoot 'CHANGELOG.md') -Raw -Encoding UTF8
-$releaseDocs = $readmeText + "`n" + $securityText + "`n" + $changelogText
+$changelog181 = Get-ChangelogVersionBlock $changelogText '1.8.1'
 
 Assert-Match '版本精确为 1.8.1' $cleanerText '(?m)^\$script:Version = ''1\.8\.1''$'
 Assert-Match '脚本标题版本精确为 1.8.1' $cleanerText '(?m)^#  CPU 后台整理工具 v1\.8\.1 \(cpu-cleaner\.ps1\)'
-Assert-Match '仅结束本次精确绑定的 HRWSCCtrl 进程' $releaseDocs 'HRWSCCtrl[\s\S]{0,500}(精确绑定|绑定)[\s\S]{0,200}(当前|本次).{0,40}(进程|实例)'
-Assert-Match '不修改 StartMode' $releaseDocs '(不修改|不会修改).{0,20}`?StartMode`?'
-Assert-Match '一次性动作非持久且不可由恢复包恢复' $releaseDocs '(非持久|一次性)[\s\S]{0,160}(不可.{0,20}恢复包.{0,20}恢复|不进入恢复包)'
-Assert-Match '执行前复验六项身份' $releaseDocs '执行前[\s\S]{0,240}服务[\s/、,，]+路径[\s/、,，]+PID[\s/、,，]+进程名[\s/、,，]+进程路径[\s/、,，]+启动时间'
-Assert-Match '旧 PID 退出后约 5 秒稳定验证' $releaseDocs '旧\s*PID.{0,80}(约\s*5\s*秒|5\s*秒.{0,20}稳定)'
-Assert-Match '任意正 replacement PID 均为 verification 失败' $releaseDocs '(任意|任何).{0,20}(正|>\s*0).{0,20}(replacement PID|替代 PID|新 PID)[\s\S]{0,120}(failed|失败)[/、,，\s]+`?verification`?'
-Assert-Match '每项结果持久化 result_reason 和 failure_stage' $releaseDocs '每项.{0,40}(持久化|写回)[\s\S]{0,120}`?result_reason`?[\s/、,，]+`?failure_stage`?'
-Assert-Match 'GUI 仅显示安全结果字段' $releaseDocs 'GUI.{0,80}(安全|净化|验证)[\s\S]{0,120}`?result_reason`?[\s/、,，]+`?failure_stage`?'
-Assert-Match '持久动作仍备份可恢复' $releaseDocs '`?disable_service`?[\s/、,，]+`?remove_autostart`?[\s/、,，]+`?disable_task`?[\s\S]{0,160}(备份.{0,30}恢复|可恢复)'
-Assert-Match '自动测试不等同真实机器验收' $releaseDocs '自动测试.{0,80}(不等同|不能替代).{0,40}真实机器'
-Assert-Match '真实机器验收窗口为 30 秒' $releaseDocs '30\s*秒.{0,40}真实机器验收|真实机器.{0,40}30\s*秒'
+
+# README：用户行为与可见结果
+Assert-Match 'README 明确 HRWSCCtrl 使用 stop_service_process' $readmeText '`?HRWSCCtrl`?[\s\S]{0,180}`?manual_actions\.service=stop_service_process`?'
+Assert-Match 'README 明确默认不选和二次确认' $readmeText 'HRWSCCtrl[\s\S]{0,240}默认不选[\s\S]{0,100}二次确认'
+Assert-Match 'README 明确一次性不可恢复且 StartMode 不变' $readmeText 'stop_service_process[\s\S]{0,180}(一次性|非持久)[\s\S]{0,160}不可.{0,20}恢复包.{0,20}恢复[\s\S]{0,500}不修改 `?StartMode`?|不修改 `?StartMode`?[\s\S]{0,500}stop_service_process[\s\S]{0,180}(一次性|非持久)[\s\S]{0,160}不可.{0,20}恢复包.{0,20}恢复'
+Assert-Match 'README 明确约 5 秒与正 replacement PID 失败' $readmeText '旧 PID[\s\S]{0,100}约 5 秒[\s\S]{0,160}任意正 replacement PID[\s\S]{0,120}`?failed/verification`?'
+Assert-Equal 'README GUI 仅显示严格验证和净化后的安全字段' (Test-GuiSafeResultContract $readmeText) $true
+Assert-Match 'README 明确 30 秒真实机器验收待完成' $readmeText '(还需要|仍待)[^\r\n]{0,40}30 秒真实机器验收'
+Assert-NotMatch 'README 禁止 HRWSCCtrl 绑定 disable_service' $readmeText '(?i)HRWSCCtrl[^\r\n]{0,240}(manual_actions\.service=disable_service|通过[^\r\n]{0,80}disable_service|尝试禁用|禁用它)|disable_service[^\r\n]{0,160}HRWSCCtrl'
+
+# SECURITY：信任边界、失败关闭与安全展示
+Assert-Match 'SECURITY 明确六字段执行前复验' $securityText '执行前复验服务/路径/PID/进程名/进程路径/启动时间'
+Assert-Match 'SECURITY 身份漂移失败关闭' $securityText '(任一|任何).{0,30}(变化|不一致)[^\r\n]{0,80}(拒绝|失败关闭|重新扫描)'
+Assert-Match 'SECURITY replacement PID 失败关闭' $securityText '任意正 replacement PID[\s\S]{0,100}`?failed/verification`?'
+Assert-Equal 'SECURITY GUI 仅显示严格验证和净化后的安全字段' (Test-GuiSafeResultContract $securityText) $true
+Assert-Match 'SECURITY 自动测试不等同真实验收' $securityText '自动测试不等同真实机器验收'
+
+# CHANGELOG：只审查 1.8.1，旧版本历史措辞不参与发布契约
+Assert-Match 'CHANGELOG 1.8.1 区块存在' $changelog181 '(?m)^## \[1\.8\.1\]'
+Assert-Match 'CHANGELOG 1.8.1 记录真实故障和修复' $changelog181 '\*\*真实故障\*\*[\s\S]{0,500}\*\*最小修复\*\*'
+Assert-Match 'CHANGELOG 1.8.1 记录 restart 检测和结果字段' $changelog181 '\*\*重启检测\*\*[\s\S]{0,500}`?result_reason`?[\s/、,，]+`?failure_stage`?'
+Assert-Match 'CHANGELOG 1.8.1 记录持久动作安全恢复边界' $changelog181 '`?disable_service`?[\s/、,，]+`?remove_autostart`?[\s/、,，]+`?disable_task`?[\s\S]{0,160}(备份.{0,30}恢复|可恢复)'
+Assert-Match 'CHANGELOG 1.8.1 明确真实操作未执行且验收待人工' $changelog181 '没有执行真实清理或 UAC[\s\S]{0,300}30 秒真实机器验收仍待人工执行'
+Assert-Match 'CHANGELOG 1.8.1 明确未发布未推送未验收' $changelog181 '不宣称已经验收、发布或推送'
+Assert-Equal 'CHANGELOG 1.8.1 禁止无否定上下文的完成声称' (Test-ChangelogNoUnsupportedCompletionClaim $changelog181) $true
+
+# 反例必须失败，证明安全 GUI 与未验收契约不是只检查关键词存在
+$unsafeGuiFixture = 'GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，同时显示原始异常、路径、token、堆栈。'
+Assert-Equal 'GUI 安全字段契约拒绝原始异常泄漏反例' (Test-GuiSafeResultContract $unsafeGuiFixture) $false
+$unsupportedReleaseFixture = "## [1.8.1] - 2026-08-26`n真实机器验收完成，已发布并已推送；真实清理成功。"
+Assert-Equal 'CHANGELOG 契约拒绝完成发布反例' (Test-ChangelogNoUnsupportedCompletionClaim $unsupportedReleaseFixture) $false
+$reverseUnsupportedReleaseFixture = '已完成真实机器验收。'
+Assert-Equal 'CHANGELOG 契约拒绝前置完成语序反例' (Test-ChangelogNoUnsupportedCompletionClaim $reverseUnsupportedReleaseFixture) $false
+$negativeReleaseFixture = '真实机器验收仍待人工执行，未发布、未推送，不宣称已经验收。'
+Assert-Equal 'CHANGELOG 契约允许明确否定的发布验收措辞' (Test-ChangelogNoUnsupportedCompletionClaim $negativeReleaseFixture) $true
 
 Write-Host "`n结果: $pass 通过, $fail 失败" -ForegroundColor Cyan
 if ($fail -gt 0) { throw 'SCHEMA TESTS FAILED' } else { Write-Host 'ALL SCHEMA TESTS PASSED' -ForegroundColor Green }
