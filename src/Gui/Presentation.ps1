@@ -151,6 +151,52 @@ function Format-GuiMatcherDetail {
     ) -join [Environment]::NewLine
 }
 
+function Get-GuiSafeStableTargetFallback {
+    param($Item)
+    foreach ($propertyName in @('target','matched_pattern','id')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $property.Value -isnot [string]) { continue }
+        $value = $property.Value.Trim()
+        if ([string]::IsNullOrWhiteSpace($value) -or $value.Length -gt 200) { continue }
+        $hasControl = $false
+        foreach ($character in $value.ToCharArray()) {
+            if ([char]::IsControl($character)) { $hasControl = $true; break }
+        }
+        if ($hasControl -or $value -match '[A-Za-z]:[\\/]' -or $value -match '\\\\' -or
+            $value -match '(?i)\b(?:bearer|token|secret|password)\b\s*[:= ]\s*\S+' -or
+            $value -match '(?i)System\.Management\.Automation|ScriptStackTrace|StackTrace') { continue }
+        return $value
+    }
+    return '已验证目标'
+}
+
+function Get-GuiExecutionTargetLabel {
+    param($Item)
+    $hitType = [string]$Item.hit_type
+    $action = [string]$Item.action
+    if ($hitType -cin @('process','service_process') -or $action -ceq 'stop_service_process') {
+        $processName = [string]$Item.process_name
+        $processId = $Item.process_id
+        if (-not [string]::IsNullOrWhiteSpace($processName) -and
+            ($processId -is [int32] -or $processId -is [int64]) -and [int64]$processId -gt 0) {
+            return ('{0}（PID {1}）' -f $processName.Trim(), [int64]$processId)
+        }
+    }
+    switch ($hitType) {
+        'service' {
+            if (-not [string]::IsNullOrWhiteSpace([string]$Item.service_name)) { return ([string]$Item.service_name).Trim() }
+        }
+        'task' {
+            if (-not [string]::IsNullOrWhiteSpace([string]$Item.task_path)) { return ([string]$Item.task_path).Trim() }
+        }
+        'autostart' {
+            $parts = @([string]$Item.autostart_source, [string]$Item.autostart_name) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() }
+            if ($parts.Count -gt 0) { return ($parts -join ' / ') }
+        }
+    }
+    return Get-GuiSafeStableTargetFallback -Item $Item
+}
+
 function ConvertTo-GuiExecutionRows {
     param($Items)
     foreach ($item in @($Items)) {
@@ -173,13 +219,13 @@ function ConvertTo-GuiExecutionRows {
             default { '' }
         }
         $reason = if ($status -cin @('success','failed','skipped','manual_required')) {
-            $resultReason = [string]$item.result_reason
-            if ([string]::IsNullOrWhiteSpace($resultReason)) { [string]$item.reason_cn } else { $resultReason }
+            [string]$item.result_reason
         } else {
             [string]$item.reason_cn
         }
         [pscustomobject]@{
             Name              = $item.name_cn
+            TargetLabel       = Get-GuiExecutionTargetLabel -Item $item
             Action            = $item.action
             State             = $status
             StateLabel        = $label

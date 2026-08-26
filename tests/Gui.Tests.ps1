@@ -2416,7 +2416,10 @@ Describe '勾选视图 (v1.5.5)' {
 
             Assert-MockCalled Start-Process -Times 0 -Exactly
             @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
-            $script:Win.FindName('ErrorDetailText').Text | Should -Match 'scan'
+            $detail = $script:Win.FindName('ErrorDetailText').Text
+            $detail | Should -Match 'GUI-EXEC-START-FAILED'
+            $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+            $detail | Should -Not -Match 'pending review shape|scan|diagnostics|shushu_pending'
         } finally {
             $script:Root = $oldRoot
             $env:TEMP = $oldTemp
@@ -2435,7 +2438,7 @@ Describe '勾选视图 (v1.5.5)' {
         try {
             [System.IO.File]::WriteAllText($sentinel, 'keep', [System.Text.UTF8Encoding]::new($false))
             $fixture = Set-GuiReviewedExecutionFixture
-            Mock Start-Process { throw 'simulated UAC failure' }
+            Mock Start-Process { throw 'C:\internal\x token=secret ScriptStackTrace' }
 
             Start-GuiExecution -List $fixture.List | Should -BeFalse
 
@@ -2444,6 +2447,10 @@ Describe '勾选视图 (v1.5.5)' {
             @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json' | Where-Object { $_.FullName -ne $sentinel }).Count | Should -Be 0
             $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未授权'
             $script:Win.FindName('ErrorMutationText').Text | Should -Match '未开始处理'
+            $detail = $script:Win.FindName('ErrorDetailText').Text
+            $detail | Should -Match 'GUI-EXEC-START-FAILED'
+            $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+            $detail | Should -Not -Match 'C:\\internal|token=secret|ScriptStackTrace|diagnostics|shushu_pending'
         } finally {
             $script:Root = $oldRoot
             $env:TEMP = $oldTemp
@@ -2489,8 +2496,8 @@ Describe '勾选视图 (v1.5.5)' {
     }
 
     It '管理员进程启动后 timer <FailurePoint> 失败立即安全脱离且保留进程和 subset' -TestCases @(
-        @{ FailurePoint='construct'; FailureMessage='injected timer construction failure' }
-        @{ FailurePoint='start'; FailureMessage='injected timer start failure' }
+        @{ FailurePoint='construct'; FailureMessage='C:\internal\x token=secret ScriptStackTrace construct' }
+        @{ FailurePoint='start'; FailureMessage='C:\internal\x token=secret ScriptStackTrace start' }
     ) {
         param($FailurePoint, $FailureMessage)
         $oldTemp = $env:TEMP
@@ -2506,7 +2513,7 @@ Describe '勾选视图 (v1.5.5)' {
                 $timer = [pscustomobject]@{ Stopped=$false; Started=$false; TickHandler=$null; Interval=$null }
                 $timer | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.Stopped = $true }
                 $timer | Add-Member -MemberType ScriptMethod -Name Add_Tick -Value { param($handler); $this.TickHandler = $handler }
-                $timer | Add-Member -MemberType ScriptMethod -Name Start -Value { throw 'injected timer start failure' }
+                $timer | Add-Member -MemberType ScriptMethod -Name Start -Value { throw 'C:\internal\x token=secret ScriptStackTrace start' }
                 return $timer
             } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
 
@@ -2532,8 +2539,10 @@ Describe '勾选视图 (v1.5.5)' {
             $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未知'
             $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
             $script:Win.FindName('ErrorMutationText').Text | Should -Not -Match '未开始'
-            $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($FailureMessage))
-            $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($path))
+            $detail = $script:Win.FindName('ErrorDetailText').Text
+            $detail | Should -Match 'GUI-EXEC-STATUS-UNKNOWN'
+            $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+            $detail | Should -Not -Match 'C:\\internal|token=secret|ScriptStackTrace|diagnostics|shushu_pending'
         } finally {
             if ($script:ExecutionTempPath -and (Test-Path -LiteralPath $script:ExecutionTempPath)) { Remove-Item -LiteralPath $script:ExecutionTempPath -Force }
             $script:ExecutionProcess = $null
@@ -2954,7 +2963,7 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It '运行中轮询从 subset 刷新逐项真实状态且暂时读失败保留旧显示' {
+    It '运行中轮询只显示可信快照的固定 executing 文案且不读取结果终态文案' {
         $oldTemp = $env:TEMP
         $tempRoot = Join-Path $TestDrive ('running-refresh-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
@@ -2968,18 +2977,22 @@ Describe '勾选视图 (v1.5.5)' {
 
             $payload = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $payload.actions[0].status = 'failed'
+            $payload.actions[0] | Add-Member -NotePropertyName result_reason -NotePropertyValue 'UNTRUSTED_RUNNING C:\internal\x token=secret ScriptStackTrace'
+            $payload.actions[0] | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'mutation'
             [System.IO.File]::WriteAllText($script:ExecutionTempPath, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
 
             Complete-ExecutionPoll | Should -BeFalse
             $rows = @($script:Win.FindName('ExecutionList').ItemsSource)
             $rows.Count | Should -Be 1
-            $rows[0].State | Should -Be 'failed'
-            $rows[0].StateLabel | Should -Be '失败'
+            $rows[0].State | Should -Be 'running'
+            $rows[0].StateLabel | Should -Be '执行中'
+            $rows[0].Reason | Should -BeExactly '正在等待管理员处理结果。'
+            (($rows | ConvertTo-Json -Depth 20)) | Should -Not -Match 'UNTRUSTED_RUNNING|C:\\internal|token=secret|ScriptStackTrace'
             $script:GuiState | Should -Be 'executing'
 
             [System.IO.File]::WriteAllText($script:ExecutionTempPath, '{temporarily incomplete', [System.Text.UTF8Encoding]::new($false))
             Complete-ExecutionPoll | Should -BeFalse
-            @($script:Win.FindName('ExecutionList').ItemsSource)[0].State | Should -Be 'failed'
+            @($script:Win.FindName('ExecutionList').ItemsSource)[0].State | Should -Be 'running'
             $script:GuiState | Should -Be 'executing'
         } finally {
             Clear-GuiExecutionResources -RemoveTemp -ProcessExitConfirmed
@@ -3000,7 +3013,7 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
         Set-GuiReviewedGenerationFromFile $mainPath
         $process = [pscustomobject]@{ ExitCode=0; ProbeCalls=0 }
-        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); $this.ProbeCalls++; if ($this.ProbeCalls -eq 1) { throw 'probe method failed' }; return $true }
+        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); $this.ProbeCalls++; if ($this.ProbeCalls -eq 1) { throw 'C:\internal\x token=secret ScriptStackTrace' }; return $true }
         $timer = New-ExecutionFakeTimer
         $script:ExecutionProcess = $process; $script:ExecutionTimer = $timer; $script:ExecutionTempPath = $path
         $script:ExecutionActions = @($action); $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
@@ -3018,6 +3031,11 @@ Describe '勾选视图 (v1.5.5)' {
         Test-Path -LiteralPath $path | Should -BeTrue
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未知'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
+        $detail = $script:Win.FindName('ErrorDetailText').Text
+        $detail | Should -Match 'GUI-EXEC-STATUS-UNKNOWN'
+        $detail | Should -Match '重试：1/3'
+        $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+        $detail | Should -Not -Match 'C:\\internal|token=secret|ScriptStackTrace|diagnostics|shushu_pending'
 
         Complete-ExecutionPoll | Should -BeTrue
         $script:GuiState | Should -Be 'completed'
@@ -3054,8 +3072,9 @@ Describe '勾选视图 (v1.5.5)' {
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $path = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($path, '{}', [System.Text.UTF8Encoding]::new($false))
-        $process = [pscustomobject]@{ ExitCode=$null }
+        $process = [pscustomobject]@{}
         $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); return $true }
+        $process | Add-Member -MemberType ScriptProperty -Name ExitCode -Value { throw 'C:\internal\x token=secret ScriptStackTrace' }
         $timer = New-ExecutionFakeTimer
         $script:ExecutionProcess = $process; $script:ExecutionTimer = $timer; $script:ExecutionTempPath = $path
         $script:ExecutionActions = @(); $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
@@ -3078,7 +3097,11 @@ Describe '勾选视图 (v1.5.5)' {
         Test-Path -LiteralPath $path | Should -BeTrue
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未知'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
-        $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($path))
+        $detail = $script:Win.FindName('ErrorDetailText').Text
+        $detail | Should -Match 'GUI-EXEC-STATUS-UNKNOWN'
+        $detail | Should -Match '重试：3/3'
+        $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+        $detail | Should -Not -Match 'C:\\internal|token=secret|ScriptStackTrace|diagnostics|shushu_pending'
         $script:Win.FindName('CompletedSummaryText').Text | Should -Not -Match 'Done|执行完成'
     }
 
@@ -3285,7 +3308,7 @@ Describe '勾选视图 (v1.5.5)' {
         $oldRoot = $script:Root
         $script:Root = $tempRoot
         $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
-        $brokenBytes = [System.Text.UTF8Encoding]::new($false).GetBytes('{broken json')
+        $brokenBytes = [System.Text.UTF8Encoding]::new($false).GetBytes('{"bad":"C:\\internal\\x token=secret ScriptStackTrace"')
         [System.IO.File]::WriteAllBytes($subsetPath, $brokenBytes)
         $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=$exitCode }
         $script:ExecutionTimer = New-ExecutionFakeTimer
@@ -3300,8 +3323,21 @@ Describe '勾选视图 (v1.5.5)' {
         $diagnostics = @(Get-ChildItem -LiteralPath (Join-Path $tempRoot 'diagnostics') -File)
         $diagnostics.Count | Should -Be 1
         [System.IO.File]::ReadAllBytes($diagnostics[0].FullName) | Should -Be $brokenBytes
-        $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($diagnostics[0].FullName))
+        $detail = $script:Win.FindName('ErrorDetailText').Text
+        $detail | Should -Match 'GUI-EXEC-RESULT-INVALID'
+        $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+        $detail | Should -Not -Match 'C:\\internal|token=secret|ScriptStackTrace|diagnostics|shushu_pending'
         Test-Path -LiteralPath $subsetPath | Should -BeFalse
+    }
+
+    It '诊断 ID 只接受受控诊断文件名且保存失败显示固定提示' {
+        $tempPath = Join-Path $TestDrive ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
+        $id = Get-GuiDiagnosticIdFromPath -Path $tempPath
+        $detail = Format-GuiSafeExecutionErrorDetail -Code 'GUI-EXEC-RESULT-INVALID' -DiagnosticId $id
+
+        $id | Should -BeExactly ''
+        $detail | Should -Match '诊断保存失败'
+        $detail | Should -Not -Match 'shushu_pending|diagnostics|[A-Za-z]:\\'
     }
 
     It 'exit <exitCode> 结果身份、终态或退出契约不可信时拒绝 completed 并保全诊断证据' -TestCases @(
@@ -3408,6 +3444,65 @@ Describe '勾选视图 (v1.5.5)' {
         $result.Items[0].FailureStage | Should -BeExactly 'verification'
         $result.Rows[0].Reason | Should -BeExactly $actual.result_reason
         $result.Rows[0].FailureStageLabel | Should -BeExactly '失败阶段：结果复核'
+    }
+
+    It 'Read-GuiStrictExecutionResult 只从可信 expected action 取得展示元数据' {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'TrustedDisplayService').actions[0]
+        $actual = $expected.PSObject.Copy()
+        $actual.status = 'success'
+        $actual.name_cn = "UNTRUSTED_NAME C:\internal\x`n控制"
+        $actual.reason_cn = 'UNTRUSTED_REASON token=secret ScriptStackTrace'
+        $actual.execution_class = 'UNTRUSTED_CLASS C:\internal\x'
+        $actual.impact_cn = 'UNTRUSTED_IMPACT token=secret'
+        $actual.cleanup_reason_cn = 'UNTRUSTED_CLEANUP ScriptStackTrace'
+        $actual | Add-Member -NotePropertyName result_reason -NotePropertyValue '服务已安全停止'
+        $actual | Add-Member -NotePropertyName failure_stage -NotePropertyValue ''
+        $path = Join-Path $TestDrive ('trusted-display-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        $result = Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected)
+
+        $result.Actions[0].name_cn | Should -BeExactly $expected.name_cn
+        $result.Actions[0].reason_cn | Should -BeExactly $expected.reason_cn
+        $result.Actions[0].execution_class | Should -BeExactly $expected.execution_class
+        $result.Actions[0].impact_cn | Should -BeExactly $expected.impact_cn
+        $result.Rows[0].Name | Should -BeExactly $expected.name_cn
+        $result.Rows[0].TargetLabel | Should -BeExactly $expected.service_name
+        (($result.Actions | ConvertTo-Json -Depth 20) + ($result.Rows | ConvertTo-Json -Depth 20)) |
+            Should -Not -Match 'UNTRUSTED_|C:\\internal|token=secret|ScriptStackTrace'
+    }
+
+    It 'Read-GuiStrictExecutionResult 将合法旧 reason_cn 严格验证并规范化为 result_reason' {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'LegacyReasonService').actions[0]
+        $actual = $expected.PSObject.Copy(); $actual.status = 'success'; $actual.reason_cn = '  旧结果：服务已安全处理  '
+        $path = Join-Path $TestDrive ('legacy-reason-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        $result = Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected)
+
+        $result.Actions[0].result_reason | Should -BeExactly '旧结果：服务已安全处理'
+        $result.Rows[0].Reason | Should -BeExactly '旧结果：服务已安全处理'
+    }
+
+    It 'Read-GuiStrictExecutionResult 拒绝恶意旧 reason_cn' -ForEach @(
+        @{ Value=('鼠' * 501) }
+        @{ Value="失败`n隐藏" }
+        @{ Value='C:\internal\x' }
+        @{ Value='token=secret' }
+        @{ Value='ScriptStackTrace at Invoke-Clean' }
+    ) {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'UnsafeLegacyReasonService').actions[0]
+        $actual = $expected.PSObject.Copy(); $actual.status = 'success'; $actual.reason_cn = $Value
+        $path = Join-Path $TestDrive ('unsafe-legacy-reason-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        { Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected) } | Should -Throw
     }
 
     It 'Read-GuiStrictExecutionResult 拒绝不可信的新结果诊断字段' -ForEach @(
@@ -3537,10 +3632,13 @@ Describe '勾选视图 (v1.5.5)' {
         $xaml = Get-Content -LiteralPath (Join-Path $script:GuiRoot 'src\Gui\MainWindow.xaml') -Raw -Encoding UTF8
         $xaml | Should -Match 'Text="\{Binding Name\}"'
         $xaml | Should -Match 'Text="\{Binding StateLabel\}"'
+        $xaml | Should -Match '(?s)CompletedList.*?<Grid>\s*<Grid\.ColumnDefinitions><ColumnDefinition Width="\*"/><ColumnDefinition Width="Auto"/></Grid\.ColumnDefinitions>.*?Text="\{Binding Name\}"[^>]*TextWrapping="Wrap".*?Grid\.Column="1"[^>]*Text="\{Binding StateLabel\}"'
+        $xaml | Should -Match 'Text="\{Binding TargetLabel, StringFormat=目标：\{0\}\}"[^>]*TextWrapping="Wrap"'
         $xaml | Should -Match 'Text="\{Binding Reason\}"[^>]*TextWrapping="Wrap"'
-        $xaml | Should -Match 'Text="\{Binding FailureStageLabel\}"'
+        $xaml | Should -Match 'Text="\{Binding FailureStageLabel\}"[^>]*TextWrapping="Wrap"'
         $xaml | Should -Match 'CompletedList[^>]*MaxHeight="[3-9][0-9]{2}"'
         $xaml | Should -Match 'CompletedList[^>]*ScrollViewer\.VerticalScrollBarVisibility="Auto"'
+        $xaml | Should -Match 'CompletedList[^>]*ScrollViewer\.HorizontalScrollBarVisibility="Disabled"'
         $script:Win.FindName('BtnRescan') | Should -Not -BeNullOrEmpty
         $script:Win.FindName('BtnRestore') | Should -Not -BeNullOrEmpty
     }

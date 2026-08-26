@@ -159,18 +159,6 @@ Describe 'GUI presentation model' {
         $rows[2].StateLabel | Should -Be '等待执行'
     }
 
-    It '合法旧终态结果在 result_reason 缺失或为空时回退 reason_cn' {
-        $rows = @(ConvertTo-GuiExecutionRows @(
-            [pscustomobject]@{ name_cn='旧成功项'; action='disable_service'; status='success'; reason_cn='旧结果：服务已处理' },
-            [pscustomobject]@{ name_cn='旧跳过项'; action='disable_task'; status='skipped'; result_reason=''; reason_cn='旧结果：目标已变化' },
-            [pscustomobject]@{ name_cn='新结果项'; action='uninstall'; status='manual_required'; result_reason='新结果：请手动处理'; reason_cn='不应优先的旧原因' }
-        ))
-
-        $rows[0].Reason | Should -BeExactly '旧结果：服务已处理'
-        $rows[1].Reason | Should -BeExactly '旧结果：目标已变化'
-        $rows[2].Reason | Should -BeExactly '新结果：请手动处理'
-    }
-
     It '逐项展示终态目标、结果和经验证的 result_reason' {
         $rows = @(ConvertTo-GuiExecutionRows @(
             [pscustomobject]@{ name_cn='服务 A'; action='disable_service'; status='success'; result_reason='服务已停止'; reason_cn='不应显示的旧原因' },
@@ -186,6 +174,20 @@ Describe 'GUI presentation model' {
         $rows[1].Reason | Should -Not -BeExactly '失败'
         $rows[1].FailureStage | Should -BeExactly 'verification'
         $rows[1].FailureStageLabel | Should -BeExactly '失败阶段：结果复核'
+    }
+
+    It '按可信动作类型生成非空且精确区分的 TargetLabel' {
+        $rows = @(ConvertTo-GuiExecutionRows @(
+            [pscustomobject]@{ name_cn='服务规则'; hit_type='service'; service_name='Svc.One'; action='disable_service'; status='success'; result_reason='完成' },
+            [pscustomobject]@{ name_cn='服务规则'; hit_type='service'; service_name='Svc.Two'; action='disable_service'; status='success'; result_reason='完成' },
+            [pscustomobject]@{ name_cn='任务规则'; hit_type='task'; task_path='\Vendor\Task One'; action='disable_task'; status='success'; result_reason='完成' },
+            [pscustomobject]@{ name_cn='任务规则'; hit_type='task'; task_path='\Vendor\Task Two'; action='disable_task'; status='success'; result_reason='完成' },
+            [pscustomobject]@{ name_cn='启动项'; hit_type='autostart'; autostart_source='HKCU Run'; autostart_name='MouseAgent'; action='remove_autostart'; status='success'; result_reason='完成' },
+            [pscustomobject]@{ name_cn='进程'; hit_type='process'; process_name='mouse.exe'; process_id=4321; action='investigate'; status='success'; result_reason='完成' }
+        ))
+
+        @($rows.TargetLabel) | Should -Be @('Svc.One','Svc.Two','\Vendor\Task One','\Vendor\Task Two','HKCU Run / MouseAgent','mouse.exe（PID 4321）')
+        @($rows.TargetLabel | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count | Should -Be 0
     }
 
     It '为所有合法失败阶段提供友好中文' -ForEach @(

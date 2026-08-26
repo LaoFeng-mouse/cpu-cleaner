@@ -2029,7 +2029,68 @@ function Get-GuiExecutionProcessStatus {
         }
         return [pscustomobject]@{ State='exited'; ExitCode=[int]$exitCode; Detail='' }
     } catch {
-        return [pscustomobject]@{ State='unknown'; ExitCode=$null; Detail=$_.Exception.ToString() }
+        return [pscustomobject]@{ State='unknown'; ExitCode=$null; Detail='GUI-EXEC-STATUS-UNKNOWN'; InternalDetail=$_.Exception.ToString() }
+    }
+}
+
+function ConvertTo-GuiTrustedRunningRows {
+    param($Actions)
+    $runningItems = foreach ($action in @($Actions)) {
+        $copy = Copy-PendingActionForSubset $action
+        $copy.status = 'running'
+        $copy.reason_cn = '正在等待管理员处理结果。'
+        $copy.PSObject.Properties.Remove('result_reason')
+        $copy.PSObject.Properties.Remove('failure_stage')
+        $copy
+    }
+    return @(ConvertTo-GuiExecutionRows $runningItems)
+}
+
+function Get-GuiDiagnosticIdFromPath {
+    param([AllowEmptyString()][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    $name = [System.IO.Path]::GetFileName($Path)
+    if ($name -match '(?i)^(?:execution_result_[0-9]{8}_[0-9]{6}_[0-9]{3}_|execution_error_)(?<id>[0-9a-f]{32})\.(?:json|txt)$') {
+        return 'D-' + $Matches['id'].Substring(0,16).ToUpperInvariant()
+    }
+    return ''
+}
+
+function Format-GuiSafeExecutionErrorDetail {
+    param(
+        [Parameter(Mandatory=$true)][ValidatePattern('^GUI-EXEC-[A-Z-]{3,40}$')][string]$Code,
+        [Nullable[int]]$ExitCode,
+        [int]$Retry = 0,
+        [int]$RetryLimit = 0,
+        [AllowEmptyString()][string]$DiagnosticId = ''
+    )
+    $lines = @('错误码：' + $Code)
+    if ($null -ne $ExitCode) { $lines += '退出码：' + $ExitCode.Value }
+    if ($RetryLimit -gt 0) { $lines += ('重试：{0}/{1}' -f $Retry, $RetryLimit) }
+    if ($DiagnosticId -cmatch '^D-[0-9A-F]{16}$') {
+        $lines += '诊断已保存：' + $DiagnosticId
+    } else {
+        $lines += '诊断保存失败。'
+    }
+    return ($lines -join [Environment]::NewLine)
+}
+
+function Save-GuiExecutionErrorDiagnostic {
+    param(
+        [Parameter(Mandatory=$true)][string]$Code,
+        [AllowEmptyString()][string]$InternalDetail = '',
+        [AllowEmptyString()][string]$SourcePath = ''
+    )
+    try {
+        $directory = Join-Path $script:Root 'diagnostics'
+        [void][System.IO.Directory]::CreateDirectory($directory)
+        $token = [guid]::NewGuid().ToString('N')
+        $destination = Join-Path $directory ('execution_error_' + $token + '.txt')
+        $content = @($Code, $InternalDetail, $SourcePath) -join [Environment]::NewLine
+        [System.IO.File]::WriteAllText($destination, $content, [System.Text.UTF8Encoding]::new($true))
+        return Get-GuiDiagnosticIdFromPath -Path $destination
+    } catch {
+        return ''
     }
 }
 
@@ -2037,14 +2098,16 @@ function Read-GuiStrictExecutionResult {
     param([Parameter(Mandatory=$true)][string]$Path, [Parameter(Mandatory=$true)]$ExpectedActions)
     $pending = Read-GuiPendingFile -Path $Path
     $null = Assert-GuiPendingEnvelopeShape $pending
-    Assert-GuiPendingPresentationShape -Pending $pending
     $items = @($pending.actions)
     $expected = @($ExpectedActions)
     if ($items.Count -ne $expected.Count) { throw 'execution result action count does not match this execution.' }
 
     $expectedKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $expectedByKey = [System.Collections.Generic.Dictionary[string,object]]::new([System.StringComparer]::Ordinal)
     foreach ($action in $expected) {
-        if (-not $expectedKeys.Add((Get-PendingIdentityKey $action))) { throw 'execution expected identity set contains duplicates.' }
+        $key = Get-PendingIdentityKey $action
+        if (-not $expectedKeys.Add($key)) { throw 'execution expected identity set contains duplicates.' }
+        $expectedByKey.Add($key, $action)
     }
     $resultKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($action in $items) {
@@ -2062,7 +2125,8 @@ function Read-GuiStrictExecutionResult {
     $statusMap = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
     foreach ($action in $items) {
         $metadata = Get-GuiValidatedTerminalResultMetadata -Action $action
-        $copy = Copy-PendingActionForSubset $action
+        $resultKey = Get-PendingIdentityKey $action
+        $copy = Copy-PendingActionForSubset $expectedByKey[$resultKey]
         $copy.status = [string]$action.status
         $copy | Add-Member -NotePropertyName result_reason -NotePropertyValue $metadata.ResultReason -Force
         $copy | Add-Member -NotePropertyName failure_stage -NotePropertyValue $metadata.FailureStage -Force
@@ -2094,10 +2158,19 @@ function Read-GuiStrictExecutionResult {
 function Get-GuiValidatedTerminalResultMetadata {
     param([Parameter(Mandatory=$true)]$Action)
     $reasonProperty = $Action.PSObject.Properties['result_reason']
-    if ($null -eq $reasonProperty -or $reasonProperty.Value -isnot [string]) {
+    if ($null -ne $reasonProperty -and $reasonProperty.Value -isnot [string]) {
         throw 'execution result_reason must be a scalar string.'
     }
-    $reason = $reasonProperty.Value.Trim()
+    $reasonValue = if ($null -eq $reasonProperty -or [string]::IsNullOrWhiteSpace([string]$reasonProperty.Value)) {
+        $legacyProperty = $Action.PSObject.Properties['reason_cn']
+        if ($null -eq $legacyProperty -or $legacyProperty.Value -isnot [string]) {
+            throw 'execution result_reason must be a scalar string.'
+        }
+        $legacyProperty.Value
+    } else {
+        $reasonProperty.Value
+    }
+    $reason = $reasonValue.Trim()
     if ([string]::IsNullOrWhiteSpace($reason) -or $reason.Length -gt 500) {
         throw 'execution result_reason length is invalid.'
     }
@@ -2156,10 +2229,9 @@ function Enter-GuiExecutionSafeDetach {
     Invoke-GuiTimerStop $script:ExecutionTimer
     $script:ExecutionLifecycle = 'detached'
     $script:ExecutionInProgress = $false
-    $diagnosticDetail = $Detail
-    if ($diagnosticDetail) { $diagnosticDetail += [Environment]::NewLine }
-    $diagnosticDetail += 'Diagnostic subset: ' + $script:ExecutionTempPath
-    Set-GuiError -Summary (Get-Text 'ExecStatusUnknown') -Mutation (Get-Text 'ExecPartialPossible') -Detail $diagnosticDetail
+    $diagnosticId = Save-GuiExecutionErrorDiagnostic -Code 'GUI-EXEC-STATUS-UNKNOWN' -InternalDetail $Detail -SourcePath $script:ExecutionTempPath
+    $safeDetail = Format-GuiSafeExecutionErrorDetail -Code 'GUI-EXEC-STATUS-UNKNOWN' -Retry $script:ExecutionUnknownProbeCount -RetryLimit $script:ExecutionUnknownProbeLimit -DiagnosticId $diagnosticId
+    Set-GuiError -Summary (Get-Text 'ExecStatusUnknown') -Mutation (Get-Text 'ExecPartialPossible') -Detail $safeDetail
 }
 
 function Complete-ExecutionPoll {
@@ -2173,32 +2245,18 @@ function Complete-ExecutionPoll {
             if ($null -ne $script:ExecutionTimer) { $script:ExecutionTimer.Interval = [TimeSpan]::FromMilliseconds(500) }
             Set-GuiState executing -Force
         }
-        try {
-            $pending = Read-GuiPendingFile -Path $script:ExecutionTempPath
-            $null = Assert-GuiPendingEnvelopeShape $pending
-            Assert-GuiPendingPresentationShape -Pending $pending
-            $items = @($pending.actions)
-            $expected = @($script:ExecutionActions)
-            if ($items.Count -ne $expected.Count) { throw 'running subset action count changed.' }
-            for ($index = 0; $index -lt $items.Count; $index++) {
-                if ((Get-PendingIdentityKey $items[$index]) -cne (Get-PendingIdentityKey $expected[$index])) {
-                    throw 'running subset action identity changed.'
-                }
-            }
-            $window.FindName('ExecutionList').ItemsSource = @(ConvertTo-GuiExecutionRows $items)
-        } catch {
-            # Elevated clean rewrites the subset while this timer reads it. Keep the last truthful rows and retry.
-        }
+        $window.FindName('ExecutionList').ItemsSource = @(ConvertTo-GuiTrustedRunningRows $script:ExecutionActions)
         return $false
     }
     if ($probe.State -eq 'unknown') {
         $script:ExecutionUnknownProbeCount++
         $script:ExecutionLifecycle = 'unknown'
         if ($script:ExecutionUnknownProbeCount -ge $script:ExecutionUnknownProbeLimit) {
-            Enter-GuiExecutionSafeDetach -Detail $probe.Detail
+            Enter-GuiExecutionSafeDetach -Detail $probe.InternalDetail
             return $true
         }
-        $detail = $probe.Detail + [Environment]::NewLine + ('Diagnostic subset: ' + $script:ExecutionTempPath) + [Environment]::NewLine + ('Probe retry: {0}/{1}' -f $script:ExecutionUnknownProbeCount, $script:ExecutionUnknownProbeLimit)
+        $diagnosticId = Save-GuiExecutionErrorDiagnostic -Code 'GUI-EXEC-STATUS-UNKNOWN' -InternalDetail $probe.InternalDetail -SourcePath $script:ExecutionTempPath
+        $detail = Format-GuiSafeExecutionErrorDetail -Code 'GUI-EXEC-STATUS-UNKNOWN' -Retry $script:ExecutionUnknownProbeCount -RetryLimit $script:ExecutionUnknownProbeLimit -DiagnosticId $diagnosticId
         Set-GuiError -Summary (Get-Text 'ExecStatusUnknown') -Mutation (Get-Text 'ExecPartialPossible') -Detail $detail
         if ($null -ne $script:ExecutionTimer) { $script:ExecutionTimer.Interval = [TimeSpan]::FromSeconds(1) }
         return $false
@@ -2224,9 +2282,9 @@ function Complete-ExecutionPoll {
             Set-GuiState completed
             $null = Clear-GuiExecutionResources -RemoveTemp -ProcessExitConfirmed
         } catch {
-            $failure = $_.Exception.ToString()
             $diagnosticPath = Save-GuiExecutionDiagnostic -Path $script:ExecutionTempPath
-            $detail = $failure + [Environment]::NewLine + 'Diagnostic: ' + $diagnosticPath
+            $diagnosticId = Get-GuiDiagnosticIdFromPath -Path $diagnosticPath
+            $detail = Format-GuiSafeExecutionErrorDetail -Code 'GUI-EXEC-RESULT-INVALID' -ExitCode $exitCode -DiagnosticId $diagnosticId
             Set-GuiError -Summary (Get-Text 'ExecResultReadFailed') -Mutation (Get-Text 'ExecPartialPossible') -Detail $detail
             $null = Clear-GuiExecutionResources -ProcessExitConfirmed
         }
@@ -2240,13 +2298,14 @@ function Complete-ExecutionPoll {
         $rows = @($result.Rows)
     } catch {
         $strictReadFailed = $true
-        $null = Save-GuiExecutionDiagnostic -Path $script:ExecutionTempPath
+        $diagnosticPath = Save-GuiExecutionDiagnostic -Path $script:ExecutionTempPath
+        $diagnosticId = Get-GuiDiagnosticIdFromPath -Path $diagnosticPath
     }
 
     try {
         $summary = (Get-Text 'ExecFailed') -f $exitCode
         $detail = if ($strictReadFailed) {
-            Get-Text 'ExecResultReadFailed'
+            Format-GuiSafeExecutionErrorDetail -Code 'GUI-EXEC-RESULT-INVALID' -ExitCode $exitCode -DiagnosticId $diagnosticId
         } else {
             Format-GuiExecutionDetail -Rows $rows
         }
@@ -2303,12 +2362,7 @@ function Start-GuiExecution {
         $pendingSha256 = Get-GuiFileSha256 -Path $script:ExecutionTempPath
         $script:ExecutionActions = @($payload.actions)
 
-        $runningItems = foreach ($action in @($payload.actions)) {
-            $copy = Copy-PendingActionForSubset $action
-            $copy.status = 'running'
-            $copy
-        }
-        $window.FindName('ExecutionList').ItemsSource = @(ConvertTo-GuiExecutionRows $runningItems)
+        $window.FindName('ExecutionList').ItemsSource = @(ConvertTo-GuiTrustedRunningRows $payload.actions)
 
         $cleanArguments = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$script:Root\cpu-cleaner.ps1`"",'-Mode','clean','-YesToAll','-PendingFileArg',"`"$script:ExecutionTempPath`"",'-PendingSha256Arg',$pendingSha256)
         if ($null -ne $confirmedImpactSha256) { $cleanArguments += @('-ConfirmedImpactSha256Arg',$confirmedImpactSha256) }
@@ -2324,11 +2378,13 @@ function Start-GuiExecution {
         $script:ExecutionTimer.Start()
         return $true
     } catch {
-        $detail = $_.Exception.ToString()
+        $internalDetail = $_.Exception.ToString()
         if ($startedProcess) {
-            Enter-GuiExecutionSafeDetach -Detail $detail
+            Enter-GuiExecutionSafeDetach -Detail $internalDetail
         } else {
+            $diagnosticId = Save-GuiExecutionErrorDiagnostic -Code 'GUI-EXEC-START-FAILED' -InternalDetail $internalDetail -SourcePath $script:ExecutionTempPath
             $null = Clear-GuiExecutionResources -RemoveTemp
+            $detail = Format-GuiSafeExecutionErrorDetail -Code 'GUI-EXEC-START-FAILED' -DiagnosticId $diagnosticId
             Set-GuiError -Summary (Get-Text 'ExecUnauthorized') -Mutation (Get-Text 'ExecNotStarted') -Detail $detail
         }
         return $false
