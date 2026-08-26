@@ -6,7 +6,7 @@
 [![PowerShell 5.1](https://img.shields.io/badge/PowerShell-5.1%2B-blue)]()
 [![Windows](https://img.shields.io/badge/Windows-10%2F11-0078d6)]()
 
-一键扫描 Windows 电脑的后台进程与预装软件，识别 OEM 全家桶和可疑后台，安全清理（自动备份、可恢复）。
+一键扫描 Windows 电脑的后台进程与预装软件，识别 OEM 全家桶和可疑后台；持久化变更自动备份、可恢复，一次性结束进程不可恢复。
 
 > 说明：工具名里的 "CPU" 是**入口信号**（用高 CPU 占用发现可疑后台），它不是 CPU 调度/降压/电源计划/核心优先级优化工具。
 
@@ -18,7 +18,7 @@
 - 华为 / Dell / HP / ASUS / 小米等品牌已写入特征库，但大多是 tested=false → 动作降级为 investigate（只报告、不自动处理）
 - 因此更准确的定位是：**联想部分机型已具备实战能力的 Windows 后台诊断工具 + 其他品牌的实验性识别框架**，尚不能宣称"任何品牌电脑都可以安全清理"
 - 多品牌实测覆盖是持续积累方向（扫描→人工确认→补 evidence 实测字段，见 CHANGELOG Unreleased 计划）
-- 自动测试全部使用 Mock 或非破坏性夹具；自动测试不等同真实机器验收，也不能替代真实 UAC、清理和恢复闭环。`HRWSCCtrl` 修复还需要单独完成 30 秒真实机器验收，观察旧 PID 退出后是否出现 replacement PID；实际 destructive clean 仍需管理员权限和用户确认
+- 自动测试全部使用 Mock 或非破坏性夹具；自动测试不等同真实机器验收，也不能替代真实 UAC、清理和恢复闭环。`HRWSCCtrl` 修复的 30 秒真实机器验收仍待人工执行，用于观察旧 PID 退出后是否出现 replacement PID；实际 destructive clean 仍需管理员权限和用户确认
 
 ```
 ├── gui-cleaner.ps1          鼠鼠风格图形界面（WPF，双击 bat 或命令行启动）
@@ -284,6 +284,7 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 
 ## 版本记录
 
+- v1.8.1（待发布）：修复 HRWSCCtrl 的一次性精确进程结束语义，不修改服务启动模式；30 秒真实机器验收仍待人工执行。
 - 2026-08-24 v1.8.0（联想可选清理与桌面 GUI）：Schema 3 matcher 来源绑定、可选 OEM 清理、受保护管理员扫描、一次性结束高 CPU 进程、鼠鼠 GUI 与桌面快捷方式；旧 pending 清单拒绝自动迁移，执行前重新验证当前身份与状态。
 - 2026-08-09 v1.7.0（模块化拆分）：cpu-cleaner.ps1 1539 行 → 主脚本 ~90 行 + src/Core/ 7 个域文件（Utils/ProfileEngine/Scanner/RiskEngine/ReportEngine/ActionEngine/BackupManager），dot-source 保持作用域共享；run-unit/CI analyzer 适配；测试 85+14 项。
 - 2026-08-09 v1.6.0（Schema 3.0 match_type）：detect 从字符串子串升级为显式 match_type（exact/contains/regex/path/publisher/sha256），**执行闸门**——危险动作必须是窄匹配（exact/path）才能自动执行，contains/regex 宽匹配默认降级 investigate（识别保留、执行收紧），实机验证过的规则可显式 execution.allow_auto=true 豁免；旧特征库加载自动迁移 v3（11 条联想实测规则保留自动资格）；测试 85+14 项。
