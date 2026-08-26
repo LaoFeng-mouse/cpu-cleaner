@@ -1,9 +1,11 @@
 # Trusted reader for nonce-bound privileged scan inventory packages.
-$script:InventorySchemaVersion = 1
+$script:InventorySchemaVersion = 2
 $script:MaxInventoryJsonBytes = 8MB
 $script:MaxInventoryJsonDepth = 12
 $script:MaxInventoryRecords = 20000
 $script:MaxInventoryReadyBytes = 256
+$script:MaxInventoryProcessNameLength = 260
+$script:MaxInventoryProcessPathLength = 32767
 $script:TrustedInventorySystemSid = 'S-1-5-18'
 $script:TrustedInventoryAdministratorsSid = 'S-1-5-32-544'
 
@@ -256,15 +258,91 @@ function Test-InventoryString($Value, [bool]$AllowEmpty = $false) {
     return ($AllowEmpty -or -not [string]::IsNullOrWhiteSpace($Value))
 }
 
-function Assert-InventoryServiceRecord($Record) {
-    $required = @('Name','DisplayName','State','StartMode','PathName','ProcessId')
+function ConvertFrom-InventoryCanonicalUtc([string]$Value) {
+    if ($Value -isnot [string] -or $Value -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$') {
+        throw 'Inventory UTC timestamp is invalid.'
+    }
+    $parsed = [datetimeoffset]::MinValue
+    $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+    if (-not [datetimeoffset]::TryParseExact($Value, "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
+            [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed) -or
+        $parsed.Offset -ne [timespan]::Zero) {
+        throw 'Inventory UTC timestamp is invalid.'
+    }
+    return $parsed
+}
+
+function Test-InventoryBoundedCleanString($Value, [int]$MaxLength) {
+    if ($Value -isnot [string] -or $MaxLength -lt 1 -or $Value.Length -eq 0 -or $Value.Length -gt $MaxLength) { return $false }
+    if ($Value -cne $Value.Trim()) { return $false }
+    return ($Value -cnotmatch '[\x00-\x1F\x7F-\x9F]')
+}
+
+function ConvertFrom-InventoryServicePathName([string]$PathName) {
+    if ($PathName -isnot [string] -or [string]::IsNullOrWhiteSpace($PathName) -or $PathName -cne $PathName.Trim()) { return $null }
+    if ($PathName -cmatch '^"([^"\r\n]+\.exe)"(?:\s+.*)?$') { return $matches[1] }
+    if ($PathName -cmatch '^([^\s"]+\.exe)(?:\s+.*)?$') { return $matches[1] }
+    return $null
+}
+
+function Assert-InventoryServiceRecord($Record, [datetimeoffset]$GeneratedUtc) {
+    $required = @('Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
     if (-not (Test-InventoryExactProperties $Record $required)) { throw 'Inventory service record fields are invalid.' }
     foreach ($name in @('Name','DisplayName','State','StartMode')) {
         if (-not (Test-InventoryString $Record.$name)) { throw "Inventory service $name is invalid." }
     }
     if (-not (Test-InventoryString $Record.PathName $true)) { throw 'Inventory service PathName is invalid.' }
-    if (-not (Test-InventoryInteger $Record.ProcessId) -or [int64]$Record.ProcessId -lt 0 -or [uint64]$Record.ProcessId -gt [uint64][uint32]::MaxValue) {
+    if (-not (Test-InventoryInteger $Record.ProcessId) -or [int64]$Record.ProcessId -lt 0 -or [uint64]$Record.ProcessId -gt [uint64][int]::MaxValue) {
         throw 'Inventory service ProcessId is invalid.'
+    }
+    if ($Record.ProcessIdentityStatus -isnot [string] -or
+        $Record.ProcessIdentityStatus -cnotin @('complete','not_running','unavailable')) {
+        throw 'Inventory service ProcessIdentityStatus is invalid.'
+    }
+    foreach ($name in @('ProcessName','ProcessPath','ProcessStartTimeUtc')) {
+        if ($Record.$name -isnot [string]) { throw "Inventory service $name is invalid." }
+    }
+
+    if ($Record.ProcessIdentityStatus -ceq 'complete') {
+        if ($Record.State -cne 'Running' -or [int64]$Record.ProcessId -le 0) {
+            throw 'Inventory service complete process identity state or PID is invalid.'
+        }
+        if (-not (Test-InventoryBoundedCleanString $Record.ProcessName $script:MaxInventoryProcessNameLength) -or
+            $Record.ProcessName -cne [System.IO.Path]::GetFileName($Record.ProcessName) -or
+            $Record.ProcessName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+            throw 'Inventory service ProcessName is invalid.'
+        }
+        if (-not (Test-InventoryBoundedCleanString $Record.ProcessPath $script:MaxInventoryProcessPathLength) -or
+            -not [System.IO.Path]::IsPathRooted($Record.ProcessPath)) {
+            throw 'Inventory service ProcessPath is invalid.'
+        }
+        try { $processPath = [System.IO.Path]::GetFullPath($Record.ProcessPath) }
+        catch { throw 'Inventory service ProcessPath is invalid.' }
+        if (-not [System.IO.File]::Exists($processPath) -or
+            -not [string]::Equals([System.IO.Path]::GetFileName($processPath), $Record.ProcessName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Inventory service process filename or path is invalid.'
+        }
+        $serviceBinary = ConvertFrom-InventoryServicePathName $Record.PathName
+        if ($serviceBinary -isnot [string] -or -not [System.IO.Path]::IsPathRooted($serviceBinary)) {
+            throw 'Inventory service PathName binary is invalid.'
+        }
+        try { $serviceBinary = [System.IO.Path]::GetFullPath($serviceBinary) }
+        catch { throw 'Inventory service PathName binary is invalid.' }
+        if (-not [string]::Equals($serviceBinary, $processPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Inventory service PathName binary does not match ProcessPath.'
+        }
+        try { $processStart = ConvertFrom-InventoryCanonicalUtc $Record.ProcessStartTimeUtc }
+        catch { throw 'Inventory service ProcessStartTimeUtc is invalid.' }
+        if ($processStart -gt $GeneratedUtc) { throw 'Inventory service process start time is after package generation.' }
+        return
+    }
+
+    if ($Record.ProcessName -cne '' -or $Record.ProcessPath -cne '' -or $Record.ProcessStartTimeUtc -cne '') {
+        throw 'Inventory service process identity must be completely empty.'
+    }
+    if ($Record.ProcessIdentityStatus -ceq 'not_running' -and
+        ($Record.State -ceq 'Running' -or [int64]$Record.ProcessId -ne 0)) {
+        throw 'Inventory service not_running state or PID is invalid.'
     }
 }
 
@@ -301,15 +379,9 @@ function Assert-InventoryPackageShape($Package, [string]$ExpectedNonce, [string]
     if ($Package.collector_sid -isnot [string] -or $Package.collector_sid -cne $ExpectedSid) {
         throw 'Inventory package collector SID mismatch.'
     }
-    if ($Package.generated_utc -isnot [string] -or
-        $Package.generated_utc -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$') {
-        throw 'Inventory package UTC timestamp is invalid.'
-    }
-    $generated = [datetimeoffset]::MinValue
-    $timestampStyles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
-    if (-not [datetimeoffset]::TryParseExact($Package.generated_utc, "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
-            [Globalization.CultureInfo]::InvariantCulture, $timestampStyles, [ref]$generated) -or
-        $generated.Offset -ne [timespan]::Zero) { throw 'Inventory package UTC timestamp is invalid.' }
+    if ($Package.generated_utc -isnot [string]) { throw 'Inventory package UTC timestamp is invalid.' }
+    try { $generated = ConvertFrom-InventoryCanonicalUtc $Package.generated_utc }
+    catch { throw 'Inventory package UTC timestamp is invalid.' }
     $nowOffset = [datetimeoffset]::new($UtcNow.ToUniversalTime())
     if ($generated -lt $nowOffset.AddMinutes(-5) -or $generated -gt $nowOffset.AddMinutes(1)) {
         throw 'Inventory package UTC timestamp is outside the trusted window.'
@@ -332,7 +404,7 @@ function Assert-InventoryPackageShape($Package, [string]$ExpectedNonce, [string]
     }
     foreach ($service in @($Package.services)) {
         if ($null -eq $service) { throw 'Inventory service record cannot be null.' }
-        Assert-InventoryServiceRecord $service
+        Assert-InventoryServiceRecord $service $generated
     }
     foreach ($task in @($Package.tasks)) {
         if ($null -eq $task) { throw 'Inventory task record cannot be null.' }
@@ -720,7 +792,7 @@ function Remove-StaleTrustedInventoryPackages {
 
 function ConvertTo-InventoryServiceRecord($Record) {
     if ($null -eq $Record) { throw 'Inventory service record cannot be null.' }
-    $required = @('Name','DisplayName','State','StartMode','PathName','ProcessId')
+    $required = @('Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
     $names = @($Record.PSObject.Properties.Name)
     foreach ($name in $required) {
         if ($names -cnotcontains $name) { throw "Inventory service collection is missing required field $name." }
@@ -732,6 +804,10 @@ function ConvertTo-InventoryServiceRecord($Record) {
         StartMode = $Record.StartMode
         PathName = $Record.PathName
         ProcessId = $Record.ProcessId
+        ProcessIdentityStatus = $Record.ProcessIdentityStatus
+        ProcessName = $Record.ProcessName
+        ProcessPath = $Record.ProcessPath
+        ProcessStartTimeUtc = $Record.ProcessStartTimeUtc
     }
 }
 

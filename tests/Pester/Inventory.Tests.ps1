@@ -10,20 +10,27 @@ BeforeAll {
 
     $script:ReaderSid = 'S-1-5-21-1000-1000-1000-1001'
     $script:Nonce = 'a' * 64
+    $script:TestServiceDirectory = Join-Path $TestDrive 'Program Files\Example'
+    $null = New-Item -ItemType Directory -Path $script:TestServiceDirectory -Force
+    $script:TestServiceExecutable = Join-Path $script:TestServiceDirectory 'service.exe'
+    [System.IO.File]::WriteAllBytes($script:TestServiceExecutable, [byte[]](1))
     if (-not (Get-Command Is-Admin -ErrorAction SilentlyContinue)) {
         function Is-Admin { return $false }
     }
 
     function New-TestInventoryPackage {
         param([datetime]$UtcNow = [datetime]::UtcNow)
+        $generated = $UtcNow.ToUniversalTime().AddSeconds(-10)
         return [pscustomobject][ordered]@{
-            inventory_schema_version = 1
+            inventory_schema_version = 2
             nonce = $script:Nonce
-            generated_utc = $UtcNow.AddSeconds(-10).ToString('o')
+            generated_utc = $generated.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)
             collector_sid = $script:ReaderSid
             services = @([pscustomobject][ordered]@{
                 Name='ExampleSvc'; DisplayName='Example Service'; State='Running'; StartMode='Auto'
-                PathName='C:\Program Files\Example\service.exe'; ProcessId=123
+                PathName=('"' + $script:TestServiceExecutable + '" --service'); ProcessId=123
+                ProcessIdentityStatus='complete'; ProcessName='service.exe'; ProcessPath=$script:TestServiceExecutable
+                ProcessStartTimeUtc=$generated.AddSeconds(-1).ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)
             })
             tasks = @([pscustomobject][ordered]@{
                 TaskName='Example Task'; TaskPath='\Vendor\'; State='Ready'; Author='Vendor'
@@ -63,10 +70,12 @@ BeforeAll {
 
 Describe 'trusted privileged inventory nonce and paths' {
     It 'defines the bounded inventory constants' {
-        $script:InventorySchemaVersion | Should -Be 1
+        $script:InventorySchemaVersion | Should -Be 2
         $script:MaxInventoryJsonBytes | Should -Be 8MB
         $script:MaxInventoryJsonDepth | Should -Be 12
         $script:MaxInventoryRecords | Should -Be 20000
+        $script:MaxInventoryProcessNameLength | Should -Be 260
+        $script:MaxInventoryProcessPathLength | Should -Be 32767
     }
 
     It 'accepts exactly 64 lowercase hexadecimal characters' {
@@ -80,6 +89,24 @@ Describe 'trusted privileged inventory nonce and paths' {
     ) {
         param($Value)
         Test-InventoryNonce $Value | Should -BeFalse
+    }
+
+    It 'accepts only bounded clean identity strings' {
+        Test-InventoryBoundedCleanString 'service.exe' 260 | Should -BeTrue
+        Test-InventoryBoundedCleanString 7 260 | Should -BeFalse
+        Test-InventoryBoundedCleanString '' 260 | Should -BeFalse
+        Test-InventoryBoundedCleanString ('a' * 261) 260 | Should -BeFalse
+        Test-InventoryBoundedCleanString ' service.exe' 260 | Should -BeFalse
+        Test-InventoryBoundedCleanString 'service.exe ' 260 | Should -BeFalse
+        Test-InventoryBoundedCleanString ("service$([char]0x7f).exe") 260 | Should -BeFalse
+    }
+
+    It 'parses only canonical zero-offset UTC timestamps' {
+        $parsed = ConvertFrom-InventoryCanonicalUtc '2026-08-13T00:00:00.1234567Z'
+        $parsed.Offset | Should -Be ([timespan]::Zero)
+        $parsed.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture) |
+            Should -BeExactly '2026-08-13T00:00:00.1234567Z'
+        { ConvertFrom-InventoryCanonicalUtc '2026-08-13T00:00:00.1234567+00:00' } | Should -Throw '*UTC timestamp*'
     }
 
     It 'resolves the fixed ProgramData MouseCleaner ScanResults root' {
@@ -346,13 +373,16 @@ Describe 'strict privileged inventory JSON and package shape' {
     It 'uses only the exact service and task fields with strict scalar and array types' {
         $package = New-TestInventoryPackage
         (@($package.services[0].PSObject.Properties.Name) -join ',') |
-            Should -BeExactly 'Name,DisplayName,State,StartMode,PathName,ProcessId'
+            Should -BeExactly 'Name,DisplayName,State,StartMode,PathName,ProcessId,ProcessIdentityStatus,ProcessName,ProcessPath,ProcessStartTimeUtc'
         (@($package.tasks[0].PSObject.Properties.Name) -join ',') |
             Should -BeExactly 'TaskName,TaskPath,State,Author,Description,Actions'
         foreach ($name in @('Name','DisplayName','State','StartMode','PathName')) {
             $package.services[0].$name | Should -BeOfType [string]
         }
         Test-InventoryInteger $package.services[0].ProcessId | Should -BeTrue
+        foreach ($name in @('ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')) {
+            $package.services[0].$name | Should -BeOfType [string]
+        }
         foreach ($name in @('TaskName','TaskPath','State','Author','Description')) {
             $package.tasks[0].$name | Should -BeOfType [string]
         }
@@ -374,6 +404,33 @@ Describe 'strict privileged inventory JSON and package shape' {
             ConvertFrom-InventorySnapshotBytes (Convert-PackageToUtf8Bytes $package))
 
         { Assert-InventoryPackageShape $jsonPackage $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
+    }
+
+    It 'accepts valid service process identity status <Status>' -TestCases @(
+        @{ Status='complete'; State='Running'; ProcessId=[int]::MaxValue }
+        @{ Status='not_running'; State='Stopped'; ProcessId=0 }
+        @{ Status='unavailable'; State='Running'; ProcessId=123 }
+        @{ Status='unavailable'; State='Stopped'; ProcessId=0 }
+    ) {
+        param($Status, $State, $ProcessId)
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        $service = $package.services[0]
+        $service.ProcessIdentityStatus = $Status
+        $service.State = $State
+        $service.ProcessId = $ProcessId
+        if ($Status -cne 'complete') {
+            $service.ProcessName = ''
+            $service.ProcessPath = ''
+            $service.ProcessStartTimeUtc = ''
+        }
+
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
+    }
+
+    It 'rejects legacy schema v1 packages' {
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        $package.inventory_schema_version = 1
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*schema*'
     }
 
     It 'rejects stale future nonce SID and incomplete health packages' -TestCases @(
@@ -469,9 +526,41 @@ Describe 'strict privileged inventory JSON and package shape' {
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*service*'
     }
 
-    It 'rejects missing required service fields' {
+    It 'rejects invalid service process identities: <Case>' -TestCases @(
+        @{ Case='unknown status'; Mutation={ param($s,$p) $s.ProcessIdentityStatus='unknown' } }
+        @{ Case='partial identity'; Mutation={ param($s,$p) $s.ProcessIdentityStatus='unavailable'; $s.ProcessName='service.exe'; $s.ProcessPath=''; $s.ProcessStartTimeUtc='' } }
+        @{ Case='complete with PID zero'; Mutation={ param($s,$p) $s.ProcessId=0 } }
+        @{ Case='complete while service is not Running'; Mutation={ param($s,$p) $s.State='Stopped' } }
+        @{ Case='not running with positive PID'; Mutation={ param($s,$p) $s.ProcessIdentityStatus='not_running'; $s.State='Stopped'; $s.ProcessId=1; $s.ProcessName=''; $s.ProcessPath=''; $s.ProcessStartTimeUtc='' } }
+        @{ Case='not running status while state is Running'; Mutation={ param($s,$p) $s.ProcessIdentityStatus='not_running'; $s.ProcessId=0; $s.ProcessName=''; $s.ProcessPath=''; $s.ProcessStartTimeUtc='' } }
+        @{ Case='unrooted process path'; Mutation={ param($s,$p) $s.ProcessPath='service.exe' } }
+        @{ Case='filename path mismatch'; Mutation={ param($s,$p) $s.ProcessName='other.exe' } }
+        @{ Case='service binary path mismatch'; Mutation={ param($s,$p) $s.PathName='C:\Other\service.exe' } }
+        @{ Case='process name is not a pure filename'; Mutation={ param($s,$p) $s.ProcessName='folder\service.exe' } }
+        @{ Case='process name has leading whitespace'; Mutation={ param($s,$p) $s.ProcessName=' service.exe' } }
+        @{ Case='process name has control characters'; Mutation={ param($s,$p) $s.ProcessName="service$([char]0x1f).exe" } }
+        @{ Case='process path has C1 controls'; Mutation={ param($s,$p) $s.ProcessPath=([string]$s.ProcessPath + [char]0x85) } }
+        @{ Case='process path exceeds its bound'; Mutation={ param($s,$p) $s.ProcessPath=('C:\' + ('a' * 32768)) } }
+        @{ Case='noncanonical process UTC'; Mutation={ param($s,$p) $s.ProcessStartTimeUtc='2026-08-13T00:00:00Z' } }
+        @{ Case='process start after generated UTC'; Mutation={ param($s,$p) $s.ProcessStartTimeUtc='9999-12-31T23:59:59.9999999Z' } }
+        @{ Case='PID exceeds Int32 max'; Mutation={ param($s,$p) $s.ProcessId=[int64][int]::MaxValue + 1 } }
+    ) {
+        param($Case, $Mutation)
         $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
-        $package.services[0].PSObject.Properties.Remove('PathName')
+        & $Mutation $package.services[0] $package
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*service*'
+    }
+
+    It 'rejects missing and extra service fields' -TestCases @(
+        @{ Mode='missing' }, @{ Mode='extra' }
+    ) {
+        param($Mode)
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        if ($Mode -ceq 'missing') {
+            $package.services[0].PSObject.Properties.Remove('ProcessStartTimeUtc')
+        } else {
+            $package.services[0] | Add-Member Unexpected $true
+        }
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*service*'
     }
 
@@ -1041,7 +1130,12 @@ Describe 'internal scan_inventory collector' {
         Mock Is-Admin { $true }
         Mock Get-CurrentUserSid { $script:ReaderSid }
         Mock Get-ServicesInfo {
-            [pscustomobject]@{ Name='Svc';DisplayName='Service';State='Running';StartMode='Auto';PathName='C:\svc.exe';ProcessId=12;TriggerHint=$false }
+            [pscustomobject]@{
+                Name='Svc'; DisplayName='Service'; State='Running'; StartMode='Auto'
+                PathName=('"' + $script:TestServiceExecutable + '" --service'); ProcessId=12; TriggerHint=$false
+                ProcessIdentityStatus='complete'; ProcessName='service.exe'; ProcessPath=$script:TestServiceExecutable
+                ProcessStartTimeUtc='2026-08-24T01:02:03.0000000Z'
+            }
         }
         Mock Get-TasksInfo {
             [pscustomobject]@{ TaskName='Task';TaskPath='\Vendor\';State='Ready';LoginTrigger=$true;Author='Vendor';Description='Task description';Actions=@('C:\task.exe') }
@@ -1085,7 +1179,7 @@ Describe 'internal scan_inventory collector' {
 
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
         @($package.PSObject.Properties.Name) | Should -Be @('inventory_schema_version','nonce','generated_utc','collector_sid','services','tasks','health','warnings')
-        @($package.services[0].PSObject.Properties.Name) | Should -Be @('Name','DisplayName','State','StartMode','PathName','ProcessId')
+        @($package.services[0].PSObject.Properties.Name) | Should -Be @('Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
         @($package.tasks[0].PSObject.Properties.Name) | Should -Be @('TaskName','TaskPath','State','Author','Description','Actions')
         $package.tasks[0].Actions -is [System.Array] | Should -BeTrue
         @($package.tasks[0].Actions) | Should -Be @('C:\task.exe')
