@@ -219,14 +219,14 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
     }
 
     It 'skips every recorded identity drift without mutation' -TestCases @(
-        @{ field='service_name'; value='OtherSvc'; reason='service name'; administratorDrift=$false }
-        @{ field='service_binary_path'; value='C:\Other\wsctrl11.exe'; reason='service binary path'; administratorDrift=$false }
-        @{ field='process_id'; value=[int]4322; reason='PID'; administratorDrift=$true }
-        @{ field='process_name'; value='other.exe'; reason='process name'; administratorDrift=$false }
-        @{ field='process_path'; value='C:\Other\wsctrl11.exe'; reason='process path'; administratorDrift=$true }
-        @{ field='process_start_time_utc'; value='2026-08-24T01:02:04.0000000Z'; reason='start time'; administratorDrift=$true }
+        @{ field='service_name'; value='OtherSvc'; reason='service name' }
+        @{ field='service_binary_path'; value='C:\Other\wsctrl11.exe'; reason='service binary path' }
+        @{ field='process_id'; value=[int]4322; reason='PID' }
+        @{ field='process_name'; value='other.exe'; reason='process name' }
+        @{ field='process_path'; value='C:\Other\wsctrl11.exe'; reason='process path' }
+        @{ field='process_start_time_utc'; value='2026-08-24T01:02:04.0000000Z'; reason='start time' }
     ) {
-        param($field, $value, $reason, $administratorDrift)
+        param($field, $value, $reason)
         $current = $script:currentIdentity.PSObject.Copy()
         $current.$field = $value
         Mock Get-CurrentServiceProcessIdentity { [pscustomobject]@{ Identity=$current; Reason='' } }
@@ -235,8 +235,8 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
 
         $result.status | Should -BeExactly 'skipped'
         $result.result_reason | Should -Match $reason
-        if ($administratorDrift) { $result.failure_stage | Should -BeExactly 'authorization' }
-        else { $result.failure_stage | Should -BeNullOrEmpty }
+        # Authorization denial is represented by the safe skipped reason; failure_stage is reserved for failed terminal results.
+        $result.failure_stage | Should -BeNullOrEmpty
         [string]::IsNullOrWhiteSpace([string]$result.result_reason) | Should -BeFalse
         Should -Invoke Stop-Process -Times 0 -Exactly
     }
