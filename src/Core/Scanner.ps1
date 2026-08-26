@@ -278,7 +278,7 @@ function ConvertTo-ServiceProcessStartTimeUtc {
 
 function Set-ServiceProcessIdentityFailureReason {
     param([ref]$FailureReason, [string]$Reason)
-    if ($null -ne $FailureReason) { $FailureReason.Value = $Reason }
+    if ($null -ne $FailureReason) { $FailureReason.Value = '服务进程身份无法安全确认，请重新扫描后再试。' }
 }
 
 function Get-StrictServiceProcessId {
@@ -302,7 +302,7 @@ function Get-StrictServiceProcessId {
 function Get-CurrentServiceExecutionSnapshot {
     param([Parameter(Mandatory=$true)][string]$ServiceName, [ref]$FailureReason)
 
-    $escapedName = $ServiceName.Replace("'", "''")
+    $escapedName = $ServiceName.Replace('\', '\\').Replace("'", "\'")
     try {
         $services = @(Get-CimInstance -ClassName Win32_Service -Filter ("Name = '{0}'" -f $escapedName) -ErrorAction Stop)
     } catch {
@@ -332,7 +332,7 @@ function Get-CurrentServiceExecutionSnapshot {
         return $null
     }
     $binaryPath = Get-ServiceBinaryPathFromPathName $service.PathName
-    if ([string]::IsNullOrWhiteSpace([string]$binaryPath) -or -not [System.IO.Path]::IsPathRooted([string]$binaryPath)) {
+    if ([string]::IsNullOrWhiteSpace([string]$binaryPath) -or -not (Test-InventoryFullyQualifiedWindowsPath $binaryPath)) {
         Set-ServiceProcessIdentityFailureReason $FailureReason '当前服务二进制路径缺失、含糊或不是绝对路径。'
         return $null
     }
@@ -355,11 +355,16 @@ function Get-CurrentServiceExecutionSnapshot {
 }
 
 function Get-ServiceProcessExecutionIdentity {
-    param([Parameter(Mandatory=$true)]$Service, [ref]$FailureReason)
+    param($Service, [ref]$FailureReason)
 
     if ($null -ne $FailureReason) { $FailureReason.Value = '' }
     if ($null -eq $Service -or $Service.Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Service.Name)) {
         Set-ServiceProcessIdentityFailureReason $FailureReason '扫描服务名称缺失，无法回读当前服务。'
+        return $null
+    }
+    if ($Service.ProcessIdentitySource -isnot [string] -or $Service.ProcessIdentitySource -cne 'trusted_inventory_v2' -or
+        $Service.ProcessIdentityStatus -isnot [string] -or $Service.ProcessIdentityStatus -cne 'complete') {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '扫描服务没有可信且完整的进程身份。'
         return $null
     }
     $first = Get-CurrentServiceExecutionSnapshot -ServiceName $Service.Name -FailureReason $FailureReason
@@ -368,6 +373,7 @@ function Get-ServiceProcessExecutionIdentity {
     $originalProcessId = Get-StrictServiceProcessId $Service.ProcessId
     if ($Service.Name -isnot [string] -or $Service.Name -cne $first.Name -or
         $Service.State -isnot [string] -or $Service.State -cne 'Running' -or
+        $first.State -isnot [string] -or $first.State -cne 'Running' -or
         $null -eq $originalProcessId -or $originalProcessId -ne $first.ProcessId -or
         $Service.PathName -isnot [string] -or $Service.PathName -cne $first.PathName) {
         Set-ServiceProcessIdentityFailureReason $FailureReason '扫描服务与首次当前服务快照的名称、状态、PID 或 PathName 不一致。'
@@ -384,34 +390,19 @@ function Get-ServiceProcessExecutionIdentity {
         return $null
     }
 
-    try {
-        $processes = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $first.ProcessId) -ErrorAction Stop)
-    } catch {
-        Set-ServiceProcessIdentityFailureReason $FailureReason ('无法读取服务进程身份: ' + $_.Exception.Message)
-        return $null
-    }
-    if ($processes.Count -ne 1 -or $null -eq $processes[0]) {
-        Set-ServiceProcessIdentityFailureReason $FailureReason '服务 PID 没有对应的唯一运行进程，无法安全结束。'
-        return $null
-    }
-    $process = $processes[0]
-
-    $actualProcessId = Get-StrictServiceProcessId $process.ProcessId
-    if ($null -eq $actualProcessId -or $actualProcessId -ne $first.ProcessId) {
-        Set-ServiceProcessIdentityFailureReason $FailureReason '服务 PID 与进程快照不一致，无法安全结束。'
-        return $null
-    }
-
-    $processName = [string]$process.Name
+    $processName = [string]$Service.ProcessName
     $expectedName = [System.IO.Path]::GetFileName($first.BinaryPath)
-    if ([string]::IsNullOrWhiteSpace($processName) -or
+    if ($Service.ProcessName -isnot [string] -or [string]::IsNullOrWhiteSpace($processName) -or
+        $processName -cne $processName.Trim() -or
+        [System.IO.Path]::GetFileName($processName) -cne $processName -or
         -not [string]::Equals($processName, $expectedName, [System.StringComparison]::OrdinalIgnoreCase)) {
         Set-ServiceProcessIdentityFailureReason $FailureReason '进程名称与服务二进制名称不一致，无法安全结束。'
         return $null
     }
 
-    $processPath = [string]$process.ExecutablePath
-    if ([string]::IsNullOrWhiteSpace($processPath) -or -not [System.IO.Path]::IsPathRooted($processPath)) {
+    $processPath = [string]$Service.ProcessPath
+    if ($Service.ProcessPath -isnot [string] -or [string]::IsNullOrWhiteSpace($processPath) -or
+        -not (Test-InventoryFullyQualifiedWindowsPath $processPath)) {
         Set-ServiceProcessIdentityFailureReason $FailureReason '进程路径缺失或不是绝对路径，无法安全结束。'
         return $null
     }
@@ -426,8 +417,9 @@ function Get-ServiceProcessExecutionIdentity {
         return $null
     }
 
-    $startTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
-    if ([string]::IsNullOrWhiteSpace([string]$startTimeUtc)) {
+    $startTimeUtc = [string]$Service.ProcessStartTimeUtc
+    $parsedStartTimeUtc = ConvertFrom-InventoryCanonicalUtc $Service.ProcessStartTimeUtc
+    if ($null -eq $parsedStartTimeUtc) {
         Set-ServiceProcessIdentityFailureReason $FailureReason '进程 UTC 启动时间缺失、时区不明确或格式无效，无法安全结束。'
         return $null
     }
@@ -732,6 +724,11 @@ function Get-ScanServiceTaskInventory {
                 StartMode   = $_.StartMode
                 PathName    = $_.PathName
                 ProcessId   = $_.ProcessId
+                ProcessIdentityStatus = $_.ProcessIdentityStatus
+                ProcessName = $_.ProcessName
+                ProcessPath = $_.ProcessPath
+                ProcessStartTimeUtc = $_.ProcessStartTimeUtc
+                ProcessIdentitySource = 'trusted_inventory_v2'
                 TriggerHint = Test-ServiceTriggerHint $_
             }
         })

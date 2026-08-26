@@ -63,6 +63,29 @@ Describe 'Profile 加载' {
             }
             return $profile
         }
+        $script:NewTrustedService = {
+            param(
+                [string]$BinaryPath,
+                [string]$Name = 'HRWSCCtrl',
+                [string]$State = 'Running',
+                $ProcessId = [int]4321,
+                [string]$PathName = '',
+                [string]$IdentitySource = 'trusted_inventory_v2',
+                [string]$IdentityStatus = 'complete',
+                [string]$ProcessName = '',
+                [string]$ProcessPath = '',
+                [string]$ProcessStartTimeUtc = '2026-08-24T01:02:03.4567890Z'
+            )
+            if ([string]::IsNullOrEmpty($PathName)) { $PathName = '"' + $BinaryPath + '" -service' }
+            if ([string]::IsNullOrEmpty($ProcessName)) { $ProcessName = [System.IO.Path]::GetFileName($BinaryPath) }
+            if ([string]::IsNullOrEmpty($ProcessPath)) { $ProcessPath = $BinaryPath }
+            [pscustomobject]@{
+                Name = $Name; DisplayName = 'Lenovo Security Center'; State = $State; StartMode = 'Manual'
+                PathName = $PathName; ProcessId = $ProcessId
+                ProcessIdentitySource = $IdentitySource; ProcessIdentityStatus = $IdentityStatus
+                ProcessName = $ProcessName; ProcessPath = $ProcessPath; ProcessStartTimeUtc = $ProcessStartTimeUtc
+            }
+        }
     }
 
     It '合法 v2 特征库加载成功' {
@@ -150,7 +173,7 @@ Describe 'Profile 加载' {
         try {
             $loaded = (Load-Profiles -Path $tmp).profiles[0]
             Get-ManualActionFor $loaded 'service' | Should -BeExactly 'stop_service_process'
-            $decision = Get-HitExecutionDecision $loaded 'service' ([pscustomobject]@{ matched_type = 'exact' })
+            $decision = Get-HitExecutionDecision $loaded 'service' ([pscustomobject]@{ matched_type = 'exact'; matched_field = 'service_name' })
             $decision.Action | Should -BeExactly 'stop_service_process'
             $decision.ExecutionClass | Should -BeExactly 'manual_impact'
             $decision.DefaultSelected | Should -BeFalse
@@ -207,20 +230,24 @@ Describe 'Profile 加载' {
         finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It 'stop_service_process 只由 service exact 实际 matcher 授权' -TestCases @(
-        @{ matcher = 'exact'; expectedAction = 'stop_service_process'; expectedClass = 'manual_impact' }
-        @{ matcher = 'path'; expectedAction = 'investigate'; expectedClass = 'observation' }
-        @{ matcher = 'contains'; expectedAction = 'investigate'; expectedClass = 'observation' }
-        @{ matcher = 'regex'; expectedAction = 'investigate'; expectedClass = 'observation' }
+    It 'stop_service_process 只由 service exact service_name 实际 matcher 授权' -TestCases @(
+        @{ matcher = 'exact'; field = 'service_name'; expectedAction = 'stop_service_process'; expectedClass = 'manual_impact' }
+        @{ matcher = 'exact'; field = 'service_display_name'; expectedAction = 'investigate'; expectedClass = 'observation' }
+        @{ matcher = 'exact'; field = $null; expectedAction = 'investigate'; expectedClass = 'observation' }
+        @{ matcher = 'path'; field = 'service_name'; expectedAction = 'investigate'; expectedClass = 'observation' }
+        @{ matcher = 'contains'; field = 'service_name'; expectedAction = 'investigate'; expectedClass = 'observation' }
+        @{ matcher = 'regex'; field = 'service_name'; expectedAction = 'investigate'; expectedClass = 'observation' }
     ) {
-        param($matcher, $expectedAction, $expectedClass)
+        param($matcher, $field, $expectedAction, $expectedClass)
         $profile = & $script:NewDecisionTestProfile -Safe $false -Action 'none' -ManualAction 'stop_service_process' -CleanupPolicy ([pscustomobject]@{
             execution_class = 'manual_impact'; necessity = 'optional'
             default_selected = $false; requires_confirmation = $true
             impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
         })
 
-        $decision = Get-HitExecutionDecision $profile 'service' ([pscustomobject]@{ matched_type = $matcher })
+        $evidence = [pscustomobject]@{ matched_type = $matcher }
+        if ($null -ne $field) { $evidence | Add-Member -NotePropertyName matched_field -NotePropertyValue $field }
+        $decision = Get-HitExecutionDecision $profile 'service' $evidence
 
         $decision.Action | Should -BeExactly $expectedAction
         $decision.ExecutionClass | Should -BeExactly $expectedClass
@@ -240,11 +267,10 @@ Describe 'Profile 加载' {
         $decision.ExecutionClass | Should -BeExactly 'observation'
     }
 
-    It '完整且一致的服务进程快照生成 stop_service_process 五字段执行身份' {
+    It 'trusted v2 完整身份和两次稳定服务快照生成 stop_service_process 五字段且不查询 Win32_Process' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $binary = Join-Path $TestDrive 'wsctrl11.exe'
-        $localCreationDate = [datetime]::SpecifyKind([datetime]'2026-08-24T09:02:03.4567890', [DateTimeKind]::Local)
-        $expectedStartTimeUtc = $localCreationDate.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        $expectedStartTimeUtc = '2026-08-24T01:02:03.4567890Z'
         [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
         $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
             execution_class = 'manual_impact'; necessity = 'optional'
@@ -254,19 +280,11 @@ Describe 'Profile 加载' {
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
         $script:ProfileFile = $tmp
         Mock Get-CimInstance {
-            if ($ClassName -ceq 'Win32_Service') {
-                return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=4321; PathName=('"' + $binary + '" -service') }
-            }
-            [pscustomobject]@{
-                ProcessId = 4321; Name = 'wsctrl11.exe'; ExecutablePath = $binary
-                CreationDate = $localCreationDate
-            }
-        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+            [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=('"' + $binary + '" -service') }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
         try {
-            $hits = @(Match-Profiles -Services @([pscustomobject]@{
-                Name = 'HRWSCCtrl'; DisplayName = 'Lenovo Security Center'; State = 'Running'; StartMode = 'Manual'
-                PathName = ('"' + $binary + '" -service'); ProcessId = 4321
-            }) -AutoStarts @() -Tasks @() -TopProcs @())
+            $service = & $script:NewTrustedService -BinaryPath $binary -ProcessStartTimeUtc $expectedStartTimeUtc
+            $hits = @(Match-Profiles -Services @($service) -AutoStarts @() -Tasks @() -TopProcs @())
 
             $hits.Count | Should -Be 1
             $hits[0].action | Should -BeExactly 'stop_service_process'
@@ -275,24 +293,46 @@ Describe 'Profile 加载' {
             $hits[0].process_name | Should -BeExactly 'wsctrl11.exe'
             $hits[0].process_path | Should -BeExactly $binary
             $hits[0].process_start_time_utc | Should -BeExactly $expectedStartTimeUtc
+            $hits[0].execution_class | Should -BeExactly 'manual_impact'
+            $hits[0].default_selected | Should -BeFalse
+            $hits[0].requires_confirmation | Should -BeTrue
+            Assert-MockCalled Get-CimInstance -Times 2 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+            Assert-MockCalled Get-CimInstance -Times 0 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Process' }
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It 'stop_service_process 身份不完整或不一致时降级并给出具体观察原因: <label>' -TestCases @(
-        @{ label = 'non-positive-pid'; processId = 0; binaryExists = $true; processMode = 'valid' }
-        @{ label = 'missing-binary'; processId = 4321; binaryExists = $false; processMode = 'valid' }
-        @{ label = 'missing-process'; processId = 4321; binaryExists = $true; processMode = 'missing' }
-        @{ label = 'multiple-processes'; processId = 4321; binaryExists = $true; processMode = 'multiple' }
-        @{ label = 'process-pid-mismatch'; processId = 4321; binaryExists = $true; processMode = 'pid-mismatch' }
-        @{ label = 'name-mismatch'; processId = 4321; binaryExists = $true; processMode = 'name-mismatch' }
-        @{ label = 'path-mismatch'; processId = 4321; binaryExists = $true; processMode = 'path-mismatch' }
-        @{ label = 'missing-start'; processId = 4321; binaryExists = $true; processMode = 'missing-start' }
+    It 'trusted identity 失败矩阵全部降级为可重扫且已脱敏的 observation: <label>' -TestCases @(
+        @{ label='missing-marker'; mode='record'; property='ProcessIdentitySource'; value=$null }
+        @{ label='wrong-marker'; mode='record'; property='ProcessIdentitySource'; value='local_inventory' }
+        @{ label='unavailable'; mode='record'; property='ProcessIdentityStatus'; value='unavailable' }
+        @{ label='not-running'; mode='record'; property='ProcessIdentityStatus'; value='not_running' }
+        @{ label='partial-status'; mode='record'; property='ProcessIdentityStatus'; value='partial' }
+        @{ label='invalid-pid'; mode='record'; property='ProcessId'; value='4321' }
+        @{ label='blank-name'; mode='record'; property='ProcessName'; value=' ' }
+        @{ label='impure-name'; mode='record'; property='ProcessName'; value='C:\secret-token\wsctrl11.exe' }
+        @{ label='unrooted-path'; mode='record'; property='ProcessPath'; value='wsctrl11.exe' }
+        @{ label='drive-relative-path'; mode='record'; property='ProcessPath'; value='C:wsctrl11.exe' }
+        @{ label='root-relative-path'; mode='record'; property='ProcessPath'; value='\secret-token\wsctrl11.exe' }
+        @{ label='nonexistent-path'; mode='record'; property='ProcessPath'; value='C:\secret-token\missing.exe' }
+        @{ label='filename-mismatch'; mode='record'; property='ProcessName'; value='other.exe' }
+        @{ label='noncanonical-utc'; mode='record'; property='ProcessStartTimeUtc'; value='2026-08-24T01:02:03Z' }
+        @{ label='first-name'; mode='first'; property='Name'; value='hrwscctrl' }
+        @{ label='first-state'; mode='first'; property='State'; value='Stopped' }
+        @{ label='first-pid'; mode='first'; property='ProcessId'; value=[int]9876 }
+        @{ label='first-pathname'; mode='first'; property='PathName'; value='"C:\secret-token\other.exe" -service' }
+        @{ label='first-binary'; mode='first-binary'; property='BinaryPath'; value='C:\secret-token\other.exe' }
+        @{ label='second-name'; mode='second'; property='Name'; value='hrwscctrl' }
+        @{ label='second-state'; mode='second'; property='State'; value='Stopped' }
+        @{ label='second-pid'; mode='second'; property='ProcessId'; value=[int]9876 }
+        @{ label='second-pathname'; mode='second'; property='PathName'; value='"C:\secret-token\other.exe" -service' }
+        @{ label='second-binary'; mode='second'; property='BinaryPath'; value='C:\secret-token\other.exe' }
+        @{ label='process-service-path-mismatch'; mode='record'; property='ProcessPath'; value='C:\secret-token\other.exe' }
     ) {
-        param($label, $processId, $binaryExists, $processMode)
+        param($label, $mode, $property, $value)
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
-        $binary = Join-Path $TestDrive ($label + '-wsctrl11.exe')
-        $otherBinary = Join-Path $TestDrive ($label + '-other.exe')
-        if ($binaryExists) { [System.IO.File]::WriteAllBytes($binary, [byte[]](1)) }
+        $binary = Join-Path $TestDrive 'wsctrl11.exe'
+        $otherBinary = Join-Path $TestDrive 'other.exe'
+        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
         [System.IO.File]::WriteAllBytes($otherBinary, [byte[]](2))
         $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
             execution_class = 'manual_impact'; necessity = 'optional'
@@ -301,180 +341,130 @@ Describe 'Profile 加载' {
         }) -ManualActions ([pscustomobject]@{ service = 'stop_service_process' })
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
         $script:ProfileFile = $tmp
-        Mock Get-CimInstance {
-            if ($ClassName -ceq 'Win32_Service') {
-                return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=4321; PathName=('"' + $binary + '" -service') }
+        $service = & $script:NewTrustedService -BinaryPath $binary
+        if ($mode -ceq 'record') {
+            if ($null -eq $value) { $service.PSObject.Properties.Remove($property) } else { $service.$property = $value }
+        }
+        $script:snapshotRead = 0
+        Mock Get-CurrentServiceExecutionSnapshot {
+            $script:snapshotRead++
+            $snapshot = [pscustomobject]@{
+                Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321
+                PathName=('"' + $binary + '" -service'); BinaryPath=$binary
             }
-            if ($processMode -ceq 'missing') { return @() }
-            $record = [pscustomobject]@{
-                ProcessId = if ($processMode -ceq 'pid-mismatch') { 9876 } else { 4321 }
-                Name = if ($processMode -ceq 'name-mismatch') { 'other.exe' } else { [System.IO.Path]::GetFileName($binary) }
-                ExecutablePath = if ($processMode -ceq 'path-mismatch') { $otherBinary } else { $binary }
-                CreationDate = if ($processMode -ceq 'missing-start') { $null } else { [datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03', [DateTimeKind]::Utc) }
-            }
-            if ($processMode -ceq 'multiple') { return @($record, $record.PSObject.Copy()) }
-            return $record
-        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+            if (($mode -ceq 'first' -or $mode -ceq 'first-binary') -and $script:snapshotRead -eq 1) { $snapshot.$property = $value }
+            if ($mode -ceq 'second' -and $script:snapshotRead -eq 2) { $snapshot.$property = $value }
+            return $snapshot
+        }
+        Mock Get-CimInstance { throw 'Win32_Process must not be queried during scan identity handoff' } `
+            -ParameterFilter { $ClassName -ceq 'Win32_Process' }
         try {
-            $hits = @(Match-Profiles -Services @([pscustomobject]@{
-                Name = 'HRWSCCtrl'; DisplayName = 'Lenovo Security Center'; State = 'Running'; StartMode = 'Manual'
-                PathName = ('"' + $binary + '" -service'); ProcessId = $processId
-            }) -AutoStarts @() -Tasks @() -TopProcs @())
+            $hits = @(Match-Profiles -Services @($service) -AutoStarts @() -Tasks @() -TopProcs @())
 
             $hits.Count | Should -Be 1
             $hits[0].action | Should -BeExactly 'investigate'
             $hits[0].execution_class | Should -BeExactly 'observation'
             $hits[0].default_selected | Should -BeFalse
+            $hits[0].requires_confirmation | Should -BeFalse
             [string]::IsNullOrWhiteSpace([string]$hits[0].obs_reason) | Should -BeFalse
-            $hits[0].obs_reason | Should -Match '身份|PID|路径|进程|启动时间'
+            $hits[0].obs_reason | Should -Match '重新扫描'
+            $hits[0].obs_reason | Should -Not -Match 'secret-token|C:\\|Exception|Unauthorized'
+            Assert-MockCalled Get-CimInstance -Times 0 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Process' }
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It '服务进程身份在进程读取前后发生 <drift> 漂移时降级为 observation' -TestCases @(
-        @{ drift = 'PID' }
-        @{ drift = 'PathName' }
-        @{ drift = 'State' }
-    ) {
-        param($drift)
+    It 'trusted nonce 投影 v2 身份字段和内部来源标记' {
+        Mock Test-InventoryNonce { $true }
+        Mock Read-TrustedInventoryPackage {
+            [pscustomobject]@{ Package = [pscustomobject]@{
+                schema_version = 2
+                warnings = @(); tasks = @(); services = @([pscustomobject]@{
+                    Name='HRWSCCtrl'; DisplayName='Lenovo Security Center'; State='Running'; StartMode='Manual'
+                    PathName='"C:\Program Files\Lenovo\wsctrl11.exe" -service'; ProcessId=[int]4321
+                    ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'
+                    ProcessPath='C:\Program Files\Lenovo\wsctrl11.exe'; ProcessStartTimeUtc='2026-08-24T01:02:03.4567890Z'
+                })
+            } }
+        }
+
+        $inventory = Get-ScanServiceTaskInventory -InventoryNonce ('a' * 64)
+
+        $service = $inventory.Services[0]
+        $service.ProcessIdentityStatus | Should -BeExactly 'complete'
+        $service.ProcessName | Should -BeExactly 'wsctrl11.exe'
+        $service.ProcessPath | Should -BeExactly 'C:\Program Files\Lenovo\wsctrl11.exe'
+        $service.ProcessStartTimeUtc | Should -BeExactly '2026-08-24T01:02:03.4567890Z'
+        $service.ProcessIdentitySource | Should -BeExactly 'trusted_inventory_v2'
+    }
+
+    It 'local limited 服务记录没有 trusted marker 且不能生成 stop_service_process' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
-        $binary = Join-Path $TestDrive ("drift-$drift-wsctrl11.exe")
-        $otherBinary = Join-Path $TestDrive ("drift-$drift-other.exe")
+        $binary = Join-Path $TestDrive 'wsctrl11.exe'
         [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
-        [System.IO.File]::WriteAllBytes($otherBinary, [byte[]](2))
         $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
-            execution_class = 'manual_impact'; necessity = 'optional'
-            default_selected = $false; requires_confirmation = $true
-            impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
-        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_process' })
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
+        }) -ManualActions ([pscustomobject]@{ service='stop_service_process' })
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
         $script:ProfileFile = $tmp
-        $script:serviceReadCount = 0
-        Mock Get-CimInstance {
-            if ($ClassName -ceq 'Win32_Service') {
-                $script:serviceReadCount++
-                $snapshot = [ordered]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=4321; PathName=('"' + $binary + '" -service') }
-                if ($script:serviceReadCount -eq 2) {
-                    if ($drift -ceq 'PID') { $snapshot.ProcessId = 9876 }
-                    if ($drift -ceq 'PathName') { $snapshot.PathName = ('"' + $otherBinary + '" -service') }
-                    if ($drift -ceq 'State') { $snapshot.State = 'Stopped' }
-                }
-                return [pscustomobject]$snapshot
-            }
-            return [pscustomobject]@{
-                ProcessId=4321; Name=[System.IO.Path]::GetFileName($binary); ExecutablePath=$binary
-                CreationDate=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03', [DateTimeKind]::Utc)
-            }
-        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+        Mock Get-CimInstance { [pscustomobject]@{
+            Name='HRWSCCtrl'; DisplayName='Lenovo Security Center'; State='Running'; StartMode='Manual'
+            PathName=('"' + $binary + '" -service'); ProcessId=[int]4321
+            ProcessIdentitySource='trusted_inventory_v2'
+            ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'; ProcessPath=$binary
+            ProcessStartTimeUtc='2026-08-24T01:02:03.4567890Z'
+        } } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
         try {
-            $hit = @(Match-Profiles -Services @([pscustomobject]@{
-                Name='HRWSCCtrl'; DisplayName='Lenovo Security Center'; State='Running'; StartMode='Manual'
-                PathName=('"' + $binary + '" -service'); ProcessId=4321
-            }) -AutoStarts @() -Tasks @() -TopProcs @())[0]
-
-            $script:serviceReadCount | Should -Be 2
+            $inventory = Get-ScanServiceTaskInventory -AllowLimited
+            $inventory.Services[0].PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+            $hit = @(Match-Profiles -Services $inventory.Services -AutoStarts @() -Tasks @() -TopProcs @())[0]
             $hit.action | Should -BeExactly 'investigate'
             $hit.execution_class | Should -BeExactly 'observation'
-            $hit.obs_reason | Should -Match '服务|PID|路径|状态|快照'
+            $hit.default_selected | Should -BeFalse
+            $hit.requires_confirmation | Should -BeFalse
+            $hit.obs_reason | Should -Match '重新扫描'
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It '扫描服务对象与首次当前服务读取的 <drift> 不一致时返回 null' -TestCases @(
-        @{ drift='Name' }
-        @{ drift='State' }
-        @{ drift='PID' }
-        @{ drift='PathName' }
-    ) {
-        param($drift)
-        $binary = Join-Path $TestDrive ("original-$drift-wsctrl11.exe")
-        $other = Join-Path $TestDrive ("original-$drift-other.exe")
-        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
-        [System.IO.File]::WriteAllBytes($other, [byte[]](2))
-        $current = [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=('"' + $binary + '" -service') }
-        $original = $current.PSObject.Copy()
-        if ($drift -ceq 'Name') { $original.Name = 'hrwscctrl' }
-        if ($drift -ceq 'State') { $original.State = 'Stopped' }
-        if ($drift -ceq 'PID') { $original.ProcessId = [int]9876 }
-        if ($drift -ceq 'PathName') { $original.PathName = ('"' + $other + '" -service') }
+    It '当前服务查询正确 WQL 转义反斜杠和单引号并拒绝畸形 filter' {
+        $serviceName = "Svc\O'Brien"
+        $expectedFilter = "Name = 'Svc\\O\'Brien'"
+        $script:capturedFilter = ''
         Mock Get-CimInstance {
-            if ($ClassName -ceq 'Win32_Service') { return $current.PSObject.Copy() }
-            throw 'process lookup must not occur when original and current service differ'
-        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+            $script:capturedFilter = $Filter
+            if ($Filter -cne $expectedFilter) { throw 'secret-token malformed filter' }
+            [pscustomobject]@{ Name=$serviceName; State='Running'; ProcessId=[int]4321; PathName='"C:\missing\svc.exe"' }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
 
         $reason = ''
-        $identity = Get-ServiceProcessExecutionIdentity -Service $original -FailureReason ([ref]$reason)
+        $null = Get-CurrentServiceExecutionSnapshot -ServiceName $serviceName -FailureReason ([ref]$reason)
 
-        $identity | Should -BeNullOrEmpty
-        [string]::IsNullOrWhiteSpace($reason) | Should -BeFalse
+        $script:capturedFilter | Should -BeExactly $expectedFilter
+        $reason | Should -Not -Match 'secret-token|malformed|C:\\'
     }
 
-    It 'UTC 启动时间采用明确语义并拒绝模糊或非法值: <label>' -TestCases @(
+    It 'null 或空白名称服务直接返回可重扫的脱敏失败' -TestCases @(
+        @{ service = $null }
+        @{ service = [pscustomobject]@{ Name = ' ' } }
+    ) {
+        param($service)
+        $reason = ''
+
+        { $script:identity = Get-ServiceProcessExecutionIdentity -Service $service -FailureReason ([ref]$reason) } | Should -Not -Throw
+
+        $script:identity | Should -BeNullOrEmpty
+        $reason | Should -Match '重新扫描'
+    }
+
+    It 'privileged collector UTC 转换保持明确语义: <label>' -TestCases @(
         @{ label='utc-datetime'; value=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03.4567890',[DateTimeKind]::Utc); expected='2026-08-24T01:02:03.4567890Z' }
         @{ label='offset-normalized'; value=[datetimeoffset]::Parse('2026-08-24T09:02:03.4567890+08:00'); expected='2026-08-24T01:02:03.4567890Z' }
         @{ label='unspecified'; value=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03',[DateTimeKind]::Unspecified); expected=$null }
-        @{ label='local-normalized'; value=[datetime]::SpecifyKind([datetime]'2026-08-24T09:02:03.4567890',[DateTimeKind]::Local); expected=([datetime]::SpecifyKind([datetime]'2026-08-24T09:02:03.4567890',[DateTimeKind]::Local).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)) }
         @{ label='malformed'; value='2026-08-24T01:02:03Z'; expected=$null }
         @{ label='pre-1970'; value=[datetime]::SpecifyKind([datetime]'1969-12-31T23:59:59',[DateTimeKind]::Utc); expected=$null }
-        @{ label='null'; value=$null; expected=$null }
-        @{ label='non-date'; value=12345; expected=$null }
     ) {
         param($label, $value, $expected)
         ConvertTo-ServiceProcessStartTimeUtc $value | Should -BeExactly $expected
-    }
-
-    It '服务 PathName/PID/进程身份矩阵严格失败关闭: <label>' -TestCases @(
-        @{ label='quoted-spaces'; pathMode='quoted'; pidMode='valid'; processMode='valid'; expectSuccess=$true }
-        @{ label='unquoted-ambiguous'; pathMode='unquoted'; pidMode='valid'; processMode='valid'; expectSuccess=$false }
-        @{ label='relative-path'; pathMode='relative'; pidMode='valid'; processMode='valid'; expectSuccess=$false }
-        @{ label='environment-path'; pathMode='environment'; pidMode='valid'; processMode='valid'; expectSuccess=$false }
-        @{ label='pid-string'; pathMode='quoted'; pidMode='string'; processMode='valid'; expectSuccess=$false }
-        @{ label='pid-negative'; pathMode='quoted'; pidMode='negative'; processMode='valid'; expectSuccess=$false }
-        @{ label='pid-range'; pathMode='quoted'; pidMode='range'; processMode='valid'; expectSuccess=$false }
-        @{ label='multiple-processes'; pathMode='quoted'; pidMode='valid'; processMode='multiple'; expectSuccess=$false }
-        @{ label='case-equivalent'; pathMode='quoted'; pidMode='valid'; processMode='case'; expectSuccess=$true }
-        @{ label='canonical-mismatch'; pathMode='quoted'; pidMode='valid'; processMode='mismatch'; expectSuccess=$false }
-    ) {
-        param($label, $pathMode, $pidMode, $processMode, $expectSuccess)
-        $dir = Join-Path $TestDrive 'Program Files\Lenovo Security'
-        [System.IO.Directory]::CreateDirectory($dir) | Out-Null
-        $binary = Join-Path $dir 'wsctrl11.exe'
-        $otherDir = Join-Path $TestDrive 'Other'
-        [System.IO.Directory]::CreateDirectory($otherDir) | Out-Null
-        $other = Join-Path $otherDir 'wsctrl11.exe'
-        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
-        [System.IO.File]::WriteAllBytes($other, [byte[]](2))
-        $pathName = switch ($pathMode) {
-            'quoted' { '"' + $binary + '" -service' }
-            'unquoted' { $binary + ' -service' }
-            'relative' { '.\wsctrl11.exe -service' }
-            'environment' { '%ProgramFiles%\Lenovo Security\wsctrl11.exe -service' }
-        }
-        $pidValue = switch ($pidMode) {
-            'valid' { [int]4321 }
-            'string' { '4321' }
-            'negative' { [int]-1 }
-            'range' { [int64]2147483648 }
-        }
-        $original = [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=$pidValue; PathName=$pathName }
-        Mock Get-CimInstance {
-            if ($ClassName -ceq 'Win32_Service') { return $original.PSObject.Copy() }
-            $record = [pscustomobject]@{
-                ProcessId=4321; Name='wsctrl11.exe'
-                ExecutablePath=if ($processMode -ceq 'case') { $binary.ToUpperInvariant() } elseif ($processMode -ceq 'mismatch') { Join-Path $dir '..\..\Other\wsctrl11.exe' } else { $binary }
-                CreationDate=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03',[DateTimeKind]::Utc)
-            }
-            if ($processMode -ceq 'multiple') { return @($record, $record.PSObject.Copy()) }
-            return $record
-        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
-
-        $reason = ''
-        $identity = Get-ServiceProcessExecutionIdentity -Service $original -FailureReason ([ref]$reason)
-
-        ($null -ne $identity) | Should -Be $expectSuccess
-        if ($expectSuccess) {
-            $identity.process_id | Should -Be 4321
-        } else {
-            [string]::IsNullOrWhiteSpace($reason) | Should -BeFalse
-        }
     }
 
     It '缺少 manual_actions 时 Get-ManualActionFor 返回 none' {
@@ -782,6 +772,32 @@ Describe 'Profile 加载' {
             $hits[0].matched_pattern | Should -BeExactly 'OEMService'
             $hits[0].matched_type | Should -BeExactly 'exact'
             $hits[0].matched_field | Should -BeExactly 'service_name'
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'stop_service_process 混合 exact 与 contains 规则仅命中 contains 时保持 observation' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
+        }) -ManualActions ([pscustomobject]@{ service='stop_service_process' })
+        $profile.detect.services = @(
+            [pscustomobject]@{ match='ExactOnlyService'; type='exact' }
+            [pscustomobject]@{ match='HRW'; type='contains' }
+        )
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        $script:ProfileFile = $tmp
+        try {
+            $hit = @(Match-Profiles -Services @([pscustomobject]@{
+                Name='HRWSCCtrl'; DisplayName='Lenovo Security Center'; State='Running'; StartMode='Manual'
+            }) -AutoStarts @() -Tasks @() -TopProcs @())[0]
+
+            $hit.matched_type | Should -BeExactly 'contains'
+            $hit.matched_field | Should -BeExactly 'service_name'
+            $hit.action | Should -BeExactly 'investigate'
+            $hit.execution_class | Should -BeExactly 'observation'
+            $hit.default_selected | Should -BeFalse
+            $hit.requires_confirmation | Should -BeFalse
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 }

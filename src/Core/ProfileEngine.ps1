@@ -471,6 +471,7 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
     $neutralImpact = if ([string]::IsNullOrWhiteSpace($reasonCn)) { '具体功能影响未说明，处理前请确认目标用途' } else { $reasonCn }
     $neutralCleanupReason = if ([string]::IsNullOrWhiteSpace($reasonCn)) { '该项目已实测可处理，但规则未提供具体清理原因' } else { $reasonCn }
     $matchedType = [string](Get-ObjectPropertyValue $evidence 'matched_type')
+    $matchedField = [string](Get-ObjectPropertyValue $evidence 'matched_field')
     $hasNarrowEvidence = @('exact','path') -ccontains $matchedType
     $tested = Get-ObjectPropertyValue (Get-ObjectPropertyValue $profile 'evidence') 'tested'
     $isTested = $tested -is [bool] -and $tested -eq $true
@@ -500,7 +501,7 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
         ($script:ManualImpactActions -ccontains $manualAction) -and
         $isTested -and
         $(if ($manualAction -ceq 'stop_service_process') {
-            $hitType -ceq 'service' -and $matchedType -ceq 'exact'
+            $hitType -ceq 'service' -and $matchedType -ceq 'exact' -and $matchedField -ceq 'service_name'
         } else {
             $hasNarrowEvidence
         }) -and
