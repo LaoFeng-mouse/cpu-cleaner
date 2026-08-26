@@ -18,13 +18,14 @@
 7. **敌对 pending 防护**：管理员 clean 拒绝重复 JSON 键、超过 5 MiB、容器深度超过 64、非法 UTF-8 或读取期间变化的文件；检查和读取使用同一受保护文件句柄，授权失败只标记 skipped，不执行 mutation
 8. **类别与高影响项隔离**：`safe=false` 不能成为 `automatic_safe`；只有完整合法的 `manual_impact` 策略、`exact/path` 实际命中、用户主动勾选并完成二次确认，才可进入手动执行路径。其余 `safe=false` / `tested=false` 只报告
 9. **双重摘要绑定**：执行子集的 pending 文件 SHA-256 与已确认 `manual_impact` 身份摘要同时绑定并校验；任一清单、身份或确认范围改变都拒绝执行
-10. **执行后验证**：每个动作执行完重新读取真实状态，验证失败标记 failed，不假装成功
-11. **自动备份 + 一键恢复**：服务、自启、计划任务等持久化 mutation 在执行前备份到 `backups/`；restore 只接受可信备份并还原、复核原状态。`stop_process` 是用户单独确认的一次性会话操作，只结束当前进程实例，不删除文件或修改自启，并明确不可恢复
-12. **特征库供应链**：`-Mode update` 支持 SHA256 校验（配置 `ProfileSha256Url` 后强制校验，不一致拒绝替换）；建议发布方配套发布 `.sha256` 文件
+10. **执行后验证与安全结果**：每个动作执行完重新读取真实状态；每项结果持久化并写回 `result_reason` / `failure_stage`，GUI 仅显示通过严格验证和安全净化的 `result_reason` / `failure_stage`。验证失败标记 `failed`，不假装成功
+11. **持久动作备份 + 一次性动作隔离**：持久动作 `disable_service` / `remove_autostart` / `disable_task` 在执行前备份并可通过可信恢复包恢复。`stop_process` 和 `stop_service_process` 是用户单独确认的一次性、非持久动作，不进入恢复包，因此不可通过恢复包恢复；它们不删除文件或修改自启
+12. **HRWSCCtrl 精确实例约束**：`stop_service_process` 仅结束本次精确绑定的 HRWSCCtrl 当前进程，不停止或禁用服务，不修改 `StartMode`。执行前复验服务/路径/PID/进程名/进程路径/启动时间；旧 PID 退出后进行约 5 秒稳定验证，出现任意正 replacement PID（`> 0`）即记录为 `failed/verification`
+13. **特征库供应链**：`-Mode update` 支持 SHA256 校验（配置 `ProfileSha256Url` 后强制校验，不一致拒绝替换）；建议发布方配套发布 `.sha256` 文件
 
 ## 测试与实机边界
 
-本次 matcher provenance 与可选清理的自动测试全部使用 Mock 或非破坏性夹具。测试通过不代表已经完成真实 UAC、用户勾选与二次确认、停服务、删除注册表自启项、禁用计划任务、执行后状态核对或恢复闭环；真实系统 mutation 仍需人工验收。
+本次 matcher provenance 与可选清理的自动测试全部使用 Mock 或非破坏性夹具。自动测试不等同真实机器验收：测试通过不代表已经完成真实 UAC、用户勾选与二次确认、停服务、删除注册表自启项、禁用计划任务、执行后状态核对或恢复闭环。HRWSCCtrl 还需执行独立的 30 秒真实机器验收，观察旧 PID 退出后是否被服务重新拉起；真实系统 mutation 仍需人工验收，本次文档更新没有执行这些操作。
 
 ## 已知限制（透明声明）
 

@@ -5,6 +5,10 @@ function Assert-Equal($name, $actual, $expected) {
     if ($actual -eq $expected) { $script:pass++; Write-Host "  PASS: $name" -ForegroundColor Green }
     else { $script:fail++; Write-Host "  FAIL: $name => $actual (期望 $expected)" -ForegroundColor Red }
 }
+function Assert-Match($name, $actual, $pattern) {
+    if ([string]$actual -match $pattern) { $script:pass++; Write-Host "  PASS: $name" -ForegroundColor Green }
+    else { $script:fail++; Write-Host "  FAIL: $name => 未匹配 $pattern" -ForegroundColor Red }
+}
 
 # 测试 Load-Profiles 对给定 JSON 的加载结果
 function Test-Load($name, $jsonContent, $expectOk) {
@@ -92,6 +96,27 @@ Test-Load 'stop_service_process 拒绝 automatic_safe' ('{"schema_version":3,"pr
 Test-Load 'stop_service_process 拒绝 tested=false' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"tested":true', '"tested":false') + ']}') $false
 Test-Load 'stop_service_process 拒绝 default_selected=true' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"default_selected":false', '"default_selected":true') + ']}') $false
 Test-Load 'stop_service_process 拒绝 requires_confirmation=false' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"requires_confirmation":true', '"requires_confirmation":false') + ']}') $false
+
+# 12. v1.8.1 发布文本必须准确描述一次性 HRWSCCtrl 修复及验收边界
+$cleanerText = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
+$readmeText = Get-Content (Join-Path $projectRoot 'README.md') -Raw -Encoding UTF8
+$securityText = Get-Content (Join-Path $projectRoot 'SECURITY.md') -Raw -Encoding UTF8
+$changelogText = Get-Content (Join-Path $projectRoot 'CHANGELOG.md') -Raw -Encoding UTF8
+$releaseDocs = $readmeText + "`n" + $securityText + "`n" + $changelogText
+
+Assert-Match '版本精确为 1.8.1' $cleanerText '(?m)^\$script:Version = ''1\.8\.1''$'
+Assert-Match '脚本标题版本精确为 1.8.1' $cleanerText '(?m)^#  CPU 后台整理工具 v1\.8\.1 \(cpu-cleaner\.ps1\)'
+Assert-Match '仅结束本次精确绑定的 HRWSCCtrl 进程' $releaseDocs 'HRWSCCtrl[\s\S]{0,500}(精确绑定|绑定)[\s\S]{0,200}(当前|本次).{0,40}(进程|实例)'
+Assert-Match '不修改 StartMode' $releaseDocs '(不修改|不会修改).{0,20}`?StartMode`?'
+Assert-Match '一次性动作非持久且不可由恢复包恢复' $releaseDocs '(非持久|一次性)[\s\S]{0,160}(不可.{0,20}恢复包.{0,20}恢复|不进入恢复包)'
+Assert-Match '执行前复验六项身份' $releaseDocs '执行前[\s\S]{0,240}服务[\s/、,，]+路径[\s/、,，]+PID[\s/、,，]+进程名[\s/、,，]+进程路径[\s/、,，]+启动时间'
+Assert-Match '旧 PID 退出后约 5 秒稳定验证' $releaseDocs '旧\s*PID.{0,80}(约\s*5\s*秒|5\s*秒.{0,20}稳定)'
+Assert-Match '任意正 replacement PID 均为 verification 失败' $releaseDocs '(任意|任何).{0,20}(正|>\s*0).{0,20}(replacement PID|替代 PID|新 PID)[\s\S]{0,120}(failed|失败)[/、,，\s]+`?verification`?'
+Assert-Match '每项结果持久化 result_reason 和 failure_stage' $releaseDocs '每项.{0,40}(持久化|写回)[\s\S]{0,120}`?result_reason`?[\s/、,，]+`?failure_stage`?'
+Assert-Match 'GUI 仅显示安全结果字段' $releaseDocs 'GUI.{0,80}(安全|净化|验证)[\s\S]{0,120}`?result_reason`?[\s/、,，]+`?failure_stage`?'
+Assert-Match '持久动作仍备份可恢复' $releaseDocs '`?disable_service`?[\s/、,，]+`?remove_autostart`?[\s/、,，]+`?disable_task`?[\s\S]{0,160}(备份.{0,30}恢复|可恢复)'
+Assert-Match '自动测试不等同真实机器验收' $releaseDocs '自动测试.{0,80}(不等同|不能替代).{0,40}真实机器'
+Assert-Match '真实机器验收窗口为 30 秒' $releaseDocs '30\s*秒.{0,40}真实机器验收|真实机器.{0,40}30\s*秒'
 
 Write-Host "`n结果: $pass 通过, $fail 失败" -ForegroundColor Cyan
 if ($fail -gt 0) { throw 'SCHEMA TESTS FAILED' } else { Write-Host 'ALL SCHEMA TESTS PASSED' -ForegroundColor Green }

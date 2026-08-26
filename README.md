@@ -18,7 +18,7 @@
 - 华为 / Dell / HP / ASUS / 小米等品牌已写入特征库，但大多是 tested=false → 动作降级为 investigate（只报告、不自动处理）
 - 因此更准确的定位是：**联想部分机型已具备实战能力的 Windows 后台诊断工具 + 其他品牌的实验性识别框架**，尚不能宣称"任何品牌电脑都可以安全清理"
 - 多品牌实测覆盖是持续积累方向（扫描→人工确认→补 evidence 实测字段，见 CHANGELOG Unreleased 计划）
-- 自动测试全部使用 Mock 或非破坏性夹具；这不等于已在真实用户机器上执行过停服务、删除注册表自启项或禁用计划任务。实际 destructive clean 仍需管理员权限和用户确认
+- 自动测试全部使用 Mock 或非破坏性夹具；自动测试不等同真实机器验收，也不能替代真实 UAC、清理和恢复闭环。`HRWSCCtrl` 修复还需要单独完成 30 秒真实机器验收，观察旧 PID 退出后是否出现 replacement PID；实际 destructive clean 仍需管理员权限和用户确认
 
 ```
 ├── gui-cleaner.ps1          鼠鼠风格图形界面（WPF，双击 bat 或命令行启动）
@@ -70,7 +70,11 @@
 | 已处理（`resolved`） | 目标当前已经是 `disabled` 等目标状态 | 不可选 | 不重复清理 |
 | 仅观察（`observation`） | 只有 `contains` / `regex` 等宽匹配，或身份/扫描信息不完整 | 不可选 | 只能识别和提示 |
 
-其中，联想通知与诊断计划任务属于推荐/自动安全项；`HRWSCCtrl`（联想 Windows Security Center）属于可选有影响项：必要性是 `optional`，默认不选，只有用户主动勾选后才会弹出二次确认。它可能影响联想电脑管家的安全状态、主动防护和通知；如果不使用联想电脑管家，禁用它可以减少常驻后台。`HRWSCCtrl` 的宽匹配命中仍只进入“仅观察”，不能执行。
+其中，联想通知与诊断计划任务属于推荐/自动安全项；`HRWSCCtrl`（联想 Windows Security Center）属于可选有影响项：必要性是 `optional`，默认不选，只有用户主动勾选后才会弹出二次确认。它可能影响联想电脑管家的安全状态、主动防护和通知。确认后，工具只结束本次精确绑定的当前 `wsctrl11.exe` 进程实例，不停止或禁用服务，不修改 `StartMode`；`HRWSCCtrl` 的宽匹配命中仍只进入“仅观察”，不能执行。
+
+`stop_service_process` 是一次性、非持久动作，不进入恢复包，因此不可通过恢复包恢复。执行前会复验服务/路径/PID/进程名/进程路径/启动时间，只对六项均与扫描快照一致的当前实例操作。旧 PID 退出后继续进行约 5 秒稳定验证；期间服务出现任意正 replacement PID（`> 0`）都记录为 `failed/verification`，不会把自动重新拉起误报成成功。
+
+执行清单中的每项结果都会持久化并写回 `result_reason` / `failure_stage`；GUI 只显示经过严格验证和安全净化的 `result_reason` / `failure_stage`。持久动作 `disable_service` / `remove_autostart` / `disable_task` 仍在修改前备份并可通过可信恢复包恢复，与一次性结束进程严格分开。
 
 扫描可以识别宽匹配，但执行必须保持窄匹配：实际命中 `contains` / `regex` 的项目只作为观察项展示，复核页中不能勾选。`exact` / `path` 也必须绑定实际命中的 pattern、类型、字段和目标身份；进入管理员执行后，仍会用同一个 matcher、同一个字段和当前系统对象重新验证。
 
@@ -272,7 +276,7 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 - **restore 按可信备份恢复稳定状态**：服务恢复 StartType/DelayedAutoStart，并尝试恢复备份记录的 Running/Stopped 状态；`sc start` 返回“已在运行”(1056)时仍会继续读取最终状态，只有最终状态吻合才算成功。删除的自启项和禁用的任务也按备份还原。
 - **卸载动作不自动执行**：uninstall 只提示，需要人工到"设置-应用"卸载（安全考虑）
 - **NOT_STOPPABLE 服务**（如联想 LISFService）：禁用成功但进程杀不掉，重启后消失，工具会如实提示
-- **联想 HRWSCCtrl**：属于可选有影响项，不自动处理；不使用联想电脑管家时可由用户主动确认后尝试禁用。若系统拒绝访问，按失败结果记录，不应反复强行处理
+- **联想 HRWSCCtrl**：属于可选有影响项，不自动处理；用户主动确认后只尝试结束精确绑定的当前进程实例，不修改服务启动模式。若系统拒绝访问或服务在稳定验证期内重新绑定正 PID，按失败结果记录，不应反复强行处理
 - **瞬时采样**：Top CPU 进程是 2 秒采样，长期监控请用任务管理器
 - PowerShell 5.1 环境下脚本为 UTF-8 BOM 编码；如自行编辑脚本，**必须保持 BOM**（否则中文报错）。特征库 JSON 用 UTF-8 即可。
 
