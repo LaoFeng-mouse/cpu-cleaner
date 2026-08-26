@@ -218,6 +218,66 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
     }
 
+    It 'rejects exact display-name provenance before CIM binding or mutation' {
+        $script:pendingStop.matched_field = 'service_display_name'
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'skipped'
+        $result.result_reason | Should -Match 'invalid|rescan'
+        $result.failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Get-CurrentServiceProcessIdentity -Times 0 -Exactly
+        Should -Invoke Get-CimInstance -Times 0 -Exactly
+        Should -Invoke Get-Process -Times 0 -Exactly
+        Should -Invoke Stop-Process -Times 0 -Exactly
+        $script:boundKillToken | Should -BeNullOrEmpty
+    }
+
+    It 'rejects malformed or cross-field pending process filenames before binding or mutation' -TestCases @(
+        @{ field='process_name'; value='C:\forged\wsctrl11.com'; label='path-bearing name' }
+        @{ field='process_name'; value='wsctrl11.com'; label='same stem with wrong extension' }
+        @{ field='process_name'; value='other.exe'; label='name and process path mismatch' }
+        @{ field='process_name'; value='wsctrl11'; label='extensionless pending name' }
+        @{ field='process_name'; value=' wsctrl11.exe'; label='leading whitespace' }
+        @{ field='process_path'; value='C:\forged\other.exe'; label='process path filename mismatch' }
+        @{ field='service_binary_path'; value='C:\forged\other.exe'; label='service binary filename mismatch' }
+    ) {
+        param($field, $value, $label)
+        $script:pendingStop.$field = $value
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'skipped' -Because $label
+        $result.result_reason | Should -Match 'invalid|rescan'
+        $result.failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Get-CurrentServiceProcessIdentity -Times 0 -Exactly
+        Should -Invoke Get-Process -Times 0 -Exactly
+        Should -Invoke Stop-Process -Times 0 -Exactly
+        $script:boundKillToken | Should -BeNullOrEmpty
+    }
+
+    It 'rejects current process name and verified path inconsistencies without mutation' -TestCases @(
+        @{ name='C:\forged\wsctrl11.exe'; path=$null; label='path-bearing current name' }
+        @{ name='wsctrl11.com'; path=$null; label='same stem with wrong current extension' }
+        @{ name='other.exe'; path=$null; label='current name and path mismatch' }
+        @{ name='wsctrl11.exe'; path='C:\forged\other.exe'; label='current verified path filename mismatch' }
+    ) {
+        param($name, $path, $label)
+        $current = $script:currentIdentity.PSObject.Copy()
+        $current.process_name = $name
+        if ($null -ne $path) { $current.process_path = $path }
+        Mock Get-CurrentServiceProcessIdentity { [pscustomobject]@{ Identity=$current; Reason='' } }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'skipped' -Because $label
+        $result.result_reason | Should -Match 'process name|process path|rescan'
+        $result.failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Get-Process -Times 0 -Exactly
+        Should -Invoke Stop-Process -Times 0 -Exactly
+        $script:boundKillToken | Should -BeNullOrEmpty
+    }
+
     It 'skips every recorded identity drift without mutation' -TestCases @(
         @{ field='service_name'; value='OtherSvc'; reason='service name' }
         @{ field='service_binary_path'; value='C:\Other\wsctrl11.exe'; reason='service binary path' }
@@ -315,6 +375,42 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         Should -Invoke Stop-Process -Times 0 -Exactly
     }
 
+    It 'accepts an extensionless Get-Process name only when its verified path supplies the matching full filename' {
+        $script:boundProcess = New-HRWSCTestProcess -Token 'extensionless-canonicalized'
+        $script:boundProcess.ProcessName | Should -BeExactly 'wsctrl11'
+        $script:boundProcess.Path | Should -BeExactly $script:binary
+        Mock Get-Process { $script:boundProcess } -ParameterFilter { $Id -eq 4321 }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'success' -Because $result.result_reason
+        $script:boundKillToken | Should -BeExactly 'extensionless-canonicalized'
+        $script:boundWaitToken | Should -BeExactly 'extensionless-canonicalized'
+        Should -Invoke Get-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4321 }
+        Should -Invoke Stop-Process -Times 0 -Exactly
+    }
+
+    It 'rejects a bound Get-Process name that cannot canonicalize to the verified executable filename' -TestCases @(
+        @{ name='wsctrl11.com'; label='same stem with wrong extension' }
+        @{ name='C:\forged\wsctrl11.exe'; label='path-bearing process name' }
+        @{ name='other'; label='extensionless name and path mismatch' }
+    ) {
+        param($name, $label)
+        $boundProcess = New-HRWSCTestProcess -Token 'must-not-stop'
+        $boundProcess.ProcessName = $name
+        Mock Get-Process { $boundProcess } -ParameterFilter { $Id -eq 4321 }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'skipped' -Because $label
+        $result.result_reason | Should -Match 'handle|rescan'
+        $result.failure_stage | Should -BeNullOrEmpty
+        $script:boundKillToken | Should -BeNullOrEmpty
+        $script:boundWaitToken | Should -BeNullOrEmpty
+        Should -Invoke Get-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4321 }
+        Should -Invoke Stop-Process -Times 0 -Exactly
+    }
+
     It 'skips if the service binding changes after the process handle is opened' {
         Mock Get-CurrentServiceExecutionSnapshot {
             [pscustomobject]@{
@@ -354,6 +450,36 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         $result.result_reason | Should -Match 'restarted|重新拉起|重启'
         $result.result_reason | Should -Match '9876'
         $result.failure_stage | Should -BeExactly 'verification'
+    }
+
+    It 'uses collector-compatible WQL literal escaping for restart verification' -TestCases @(
+        @{ serviceName="HRW\SCtrl"; expectedFilter="Name = 'HRW\\SCtrl'" }
+        @{ serviceName="HRW'SCtrl"; expectedFilter="Name = 'HRW\'SCtrl'" }
+        @{ serviceName="HRW\SC'Trl"; expectedFilter="Name = 'HRW\\SC\'Trl'" }
+    ) {
+        param($serviceName, $expectedFilter)
+        $script:pendingStop.service_name = $serviceName
+        $script:pendingStop.matched_pattern = $serviceName
+        $script:currentIdentity.service_name = $serviceName
+        Mock Get-CurrentServiceExecutionSnapshot {
+            [pscustomobject]@{
+                Name=$serviceName; State='Running'; ProcessId=[int]4321
+                PathName=$script:servicePathName; BinaryPath=$script:binary
+            }
+        }
+        $script:restartFilter = $null
+        Mock Get-CimInstance {
+            $script:restartFilter = $Filter
+            [pscustomobject]@{ Name=$serviceName; State='Stopped'; ProcessId=[int]0; PathName=$script:servicePathName }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'success' -Because $result.result_reason
+        $script:restartFilter | Should -BeExactly $expectedFilter
+        Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter {
+            $ClassName -ceq 'Win32_Service' -and $Filter -ceq $expectedFilter
+        }
     }
 
     It 'fails verification for any positive replacement PID even when service state is not Running' -TestCases @(

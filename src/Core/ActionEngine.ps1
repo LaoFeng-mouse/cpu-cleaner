@@ -516,6 +516,7 @@ function Test-ServiceProcessActionShape($Action) {
         (Get-StrictNonBlankStringProperty $Action 'action') -cne 'stop_service_process' -or
         (Get-StrictNonBlankStringProperty $Action 'hit_type') -cne 'service' -or
         (Get-StrictNonBlankStringProperty $Action 'matched_type') -cne 'exact' -or
+        (Get-StrictNonBlankStringProperty $Action 'matched_field') -cne 'service_name' -or
         -not (Test-HitMatcherEvidenceShape $Action -AllowedMatchTypes @('exact')) -or
         (Get-StrictNonBlankStringProperty $Action 'service_name') -eq $null -or
         (Get-StrictNonBlankStringProperty $Action 'service_binary_path') -eq $null -or
@@ -530,6 +531,7 @@ function Test-ServiceProcessActionShape($Action) {
         if (-not [System.IO.Path]::IsPathRooted([string]$Action.service_binary_path) -or
             -not [System.IO.Path]::IsPathRooted([string]$Action.process_path)) { return $false }
     } catch { return $false }
+    if ($null -eq (Get-CanonicalServiceProcessFileName -Identity $Action)) { return $false }
     $policy = Get-ValidPendingDisplayPolicy $Action
     return $Action.safe -is [bool] -and $Action.safe -eq $false -and
         $null -ne $policy -and $policy.execution_class -ceq 'manual_impact' -and
@@ -2308,6 +2310,14 @@ function Get-CurrentServiceProcessIdentity {
     try { $processPath = [System.IO.Path]::GetFullPath($processPath) } catch {
         return [pscustomobject]@{ Identity=$null; Reason='current process path is invalid; rescan required' }
     }
+    $canonicalProcessName = Get-CanonicalServiceProcessFileName -Identity ([pscustomobject]@{
+        process_name=$processName; process_path=$processPath; service_binary_path=$first.BinaryPath
+    })
+    if ($null -eq $canonicalProcessName -or
+        -not [string]::Equals($processPath, $first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Identity=$null; Reason='current process name or path is inconsistent; rescan required' }
+    }
+    $processName = $canonicalProcessName
 
     $snapshotReason = ''
     $second = Get-CurrentServiceExecutionSnapshot -ServiceName $ServiceName -FailureReason ([ref]$snapshotReason)
@@ -2332,6 +2342,44 @@ function Get-NormalizedServiceProcessPath($Value) {
     try { return [System.IO.Path]::GetFullPath($Value) } catch { return $null }
 }
 
+function Get-CanonicalProcessFileName {
+    param($Name, $ExecutablePath, [switch]$AllowExtensionlessName)
+    if ($Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name) -or $Name -cne $Name.Trim() -or
+        $Name.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { return $null }
+    $normalizedPath = Get-NormalizedServiceProcessPath $ExecutablePath
+    if ($null -eq $normalizedPath) { return $null }
+    try {
+        $pathFileName = [System.IO.Path]::GetFileName($normalizedPath)
+        if ([string]::IsNullOrWhiteSpace($pathFileName) -or $pathFileName -cne $pathFileName.Trim() -or
+            [string]::IsNullOrWhiteSpace([System.IO.Path]::GetExtension($pathFileName)) -or
+            $pathFileName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+            -not [string]::Equals([System.IO.Path]::GetFileName($Name), $Name, [System.StringComparison]::Ordinal)) {
+            return $null
+        }
+        if ([string]::Equals($Name, $pathFileName, [System.StringComparison]::OrdinalIgnoreCase)) { return $pathFileName }
+        if ($AllowExtensionlessName -and
+            [string]::IsNullOrEmpty([System.IO.Path]::GetExtension($Name)) -and
+            [string]::Equals($Name, [System.IO.Path]::GetFileNameWithoutExtension($pathFileName), [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $pathFileName
+        }
+    } catch { return $null }
+    return $null
+}
+
+function Get-CanonicalServiceProcessFileName {
+    param($Identity)
+    if ($null -eq $Identity) { return $null }
+    $processName = Get-StrictNonBlankStringProperty $Identity 'process_name'
+    $processPath = Get-StrictNonBlankStringProperty $Identity 'process_path'
+    $serviceBinaryPath = Get-StrictNonBlankStringProperty $Identity 'service_binary_path'
+    $canonicalName = Get-CanonicalProcessFileName -Name $processName -ExecutablePath $processPath
+    $normalizedServicePath = Get-NormalizedServiceProcessPath $serviceBinaryPath
+    if ($null -eq $canonicalName -or $null -eq $normalizedServicePath) { return $null }
+    try { $serviceFileName = [System.IO.Path]::GetFileName($normalizedServicePath) } catch { return $null }
+    if (-not [string]::Equals($canonicalName, $serviceFileName, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+    return $canonicalName
+}
+
 function Get-NormalizedStrictUtcProcessStartTime($Value) {
     if (-not (Test-StrictUtcProcessStartTime $Value)) { return $null }
     $parsed = [datetime]::ParseExact($Value, 'o', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
@@ -2347,10 +2395,10 @@ function Test-ServiceProcessIdentityEqual {
         -not [string]::Equals($expectedServiceName,$actualServiceName,[System.StringComparison]::OrdinalIgnoreCase)) {
         return [pscustomobject]@{ Equal=$false; Reason='service name changed; rescan required' }
     }
-    $expectedProcessName = Get-StrictNonBlankStringProperty $Pending 'process_name'
-    $actualProcessName = Get-StrictNonBlankStringProperty $Current 'process_name'
+    $expectedProcessName = Get-CanonicalServiceProcessFileName -Identity $Pending
+    $actualProcessName = Get-CanonicalServiceProcessFileName -Identity $Current
     if ($null -eq $expectedProcessName -or $null -eq $actualProcessName -or
-        -not [string]::Equals((Normalize-ProcessName $expectedProcessName),(Normalize-ProcessName $actualProcessName),[System.StringComparison]::OrdinalIgnoreCase)) {
+        -not [string]::Equals($expectedProcessName,$actualProcessName,[System.StringComparison]::OrdinalIgnoreCase)) {
         return [pscustomobject]@{ Equal=$false; Reason='process name changed; rescan required' }
     }
     if (-not (Test-PositiveScalarProcessId $Pending.process_id) -or -not (Test-PositiveScalarProcessId $Current.process_id) -or
@@ -2434,7 +2482,7 @@ function Invoke-ServiceProcessStopAction {
         if ($VerificationTimeoutMilliseconds -lt 1 -or $PollIntervalMilliseconds -lt 1) {
             return New-ServiceProcessStopResult 'failed' 'service stabilization window is invalid' 'verification'
         }
-        $escapedName = ([string]$Pending.service_name).Replace("'", "''")
+        $escapedName = ([string]$Pending.service_name).Replace('\', '\\').Replace("'", "\'")
         $verificationDeadline = (Get-ServiceProcessVerificationTimeMilliseconds) + $VerificationTimeoutMilliseconds
         while ($true) {
             try { $services = @(Get-CimInstance -ClassName Win32_Service -Filter ("Name = '{0}'" -f $escapedName) -ErrorAction Stop) } catch {
@@ -2494,9 +2542,14 @@ function Get-BoundProcessTarget($ProcessId) {
     try { $path = [string]$process.Path } catch {}
     try { $startTimeUtc = $process.StartTime.ToUniversalTime().ToString('o') } catch {}
     try { $name = [string]$process.ProcessName } catch {}
+    $canonicalName = Get-CanonicalProcessFileName -Name $name -ExecutablePath $path -AllowExtensionlessName
+    if ($null -eq $canonicalName) {
+        try { $process.Dispose() } catch {}
+        return $null
+    }
     return [pscustomobject]@{
         Process = $process
-        Identity = [pscustomobject]@{ PID=[int]$process.Id; Name=$name; Path=$path; StartTimeUtc=$startTimeUtc }
+        Identity = [pscustomobject]@{ PID=[int]$process.Id; Name=$canonicalName; Path=$path; StartTimeUtc=$startTimeUtc }
     }
 }
 
