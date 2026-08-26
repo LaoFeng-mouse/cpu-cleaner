@@ -21,12 +21,29 @@ function Get-ChangelogVersionBlock($text, $version) {
 }
 function Test-GuiSafeResultContract($text) {
     $required = 'GUI[\s\S]{0,120}(只|仅)显示[\s\S]{0,160}严格验证[\s\S]{0,80}安全净化[\s\S]{0,100}`?result_reason`?[\s/、,，]+`?failure_stage`?'
-    $unsafe = 'GUI[\s\S]{0,160}(同时|还会|并会)[\s\S]{0,80}(原始异常|原始路径|token|堆栈)'
-    return ([string]$text -match $required) -and ([string]$text -notmatch $unsafe)
+    $unsafeExtraDisplay = 'GUI[\s\S]*?(同时|还会|并会|也会)\s*显示'
+    $unsafeTrustState = 'GUI[\s\S]*?(未经(严格)?验证|未经(安全)?净化)'
+    return ([string]$text -match $required) -and
+        ([string]$text -notmatch $unsafeExtraDisplay) -and
+        ([string]$text -notmatch $unsafeTrustState)
 }
 function Test-ChangelogNoUnsupportedCompletionClaim($text) {
-    $unsupported = '(真实机器验收|真实验收)[^\r\n]{0,30}(?<!未)(通过|完成|成功)|(?<!未)(通过|完成|成功)[^\r\n]{0,30}(真实机器验收|真实验收)|(?<!未)已(发布|推送)|真实清理[^\r\n]{0,30}(?<!未)(成功|完成)|(?<!未)(成功|完成)[^\r\n]{0,30}真实清理'
-    return [string]$text -notmatch $unsupported
+    $negativePhrases = @(
+        '不宣称已经(?:验收、发布或推送|发布|推送|验收)',
+        '(?:未|尚未|没有|未能)(?:发布|推送)',
+        '(?:没有|未能|尚未)完成(?:真实机器验收|真实验收)',
+        '(?:真实机器验收|真实验收)(?:尚未完成|仍待人工(?:执行)?)',
+        '没有执行真实清理'
+    )
+    $unsupported = '(?:已|已经)(?:发布|推送)|(?:真实机器验收|真实验收)[^\r\n]{0,30}(?:通过|完成|成功)|(?:已|已经)?完成[^\r\n]{0,30}(?:真实机器验收|真实验收)|真实清理[^\r\n]{0,30}(?:成功|完成)|(?:成功|完成)[^\r\n]{0,30}真实清理'
+    foreach ($clause in @([string]$text -split '[，,；;。！？!?\r\n]+')) {
+        $remainder = [string]$clause
+        foreach ($negativePhrase in $negativePhrases) {
+            $remainder = [regex]::Replace($remainder, $negativePhrase, '')
+        }
+        if ($remainder -match $unsupported) { return $false }
+    }
+    return $true
 }
 
 # 测试 Load-Profiles 对给定 JSON 的加载结果
@@ -160,6 +177,51 @@ $reverseUnsupportedReleaseFixture = '已完成真实机器验收。'
 Assert-Equal 'CHANGELOG 契约拒绝前置完成语序反例' (Test-ChangelogNoUnsupportedCompletionClaim $reverseUnsupportedReleaseFixture) $false
 $negativeReleaseFixture = '真实机器验收仍待人工执行，未发布、未推送，不宣称已经验收。'
 Assert-Equal 'CHANGELOG 契约允许明确否定的发布验收措辞' (Test-ChangelogNoUnsupportedCompletionClaim $negativeReleaseFixture) $true
+
+$changelogContractCases = @(
+    @{ name='拒绝已发布'; text='已发布。'; expected=$false },
+    @{ name='拒绝已经发布'; text='已经发布。'; expected=$false },
+    @{ name='拒绝已推送'; text='已推送。'; expected=$false },
+    @{ name='拒绝已经推送'; text='已经推送。'; expected=$false },
+    @{ name='拒绝真实验收完成'; text='真实验收完成。'; expected=$false },
+    @{ name='拒绝真实验收通过'; text='真实验收通过。'; expected=$false },
+    @{ name='拒绝真实验收成功'; text='真实验收成功。'; expected=$false },
+    @{ name='拒绝已经完成真实机器验收'; text='已经完成真实机器验收。'; expected=$false },
+    @{ name='拒绝真实清理完成'; text='真实清理完成。'; expected=$false },
+    @{ name='拒绝真实清理成功'; text='真实清理成功。'; expected=$false },
+    @{ name='允许未发布'; text='未发布。'; expected=$true },
+    @{ name='允许尚未发布'; text='尚未发布。'; expected=$true },
+    @{ name='允许没有发布'; text='没有发布。'; expected=$true },
+    @{ name='允许未能发布'; text='未能发布。'; expected=$true },
+    @{ name='允许不宣称已经发布'; text='不宣称已经发布。'; expected=$true },
+    @{ name='允许未推送'; text='未推送。'; expected=$true },
+    @{ name='允许尚未推送'; text='尚未推送。'; expected=$true },
+    @{ name='允许没有推送'; text='没有推送。'; expected=$true },
+    @{ name='允许未能推送'; text='未能推送。'; expected=$true },
+    @{ name='允许不宣称已经推送'; text='不宣称已经推送。'; expected=$true },
+    @{ name='允许没有完成真实机器验收'; text='没有完成真实机器验收。'; expected=$true },
+    @{ name='允许未能完成真实机器验收'; text='未能完成真实机器验收。'; expected=$true },
+    @{ name='允许尚未完成真实机器验收'; text='尚未完成真实机器验收。'; expected=$true },
+    @{ name='允许真实机器验收仍待人工'; text='真实机器验收仍待人工执行。'; expected=$true },
+    @{ name='允许不宣称已经验收'; text='不宣称已经验收。'; expected=$true },
+    @{ name='允许没有执行真实清理'; text='没有执行真实清理。'; expected=$true }
+)
+foreach ($case in $changelogContractCases) {
+    Assert-Equal ("CHANGELOG 表驱动: " + $case.name) (Test-ChangelogNoUnsupportedCompletionClaim $case.text) $case.expected
+}
+
+$guiContractCases = @(
+    @{ name='允许严格验证净化后的安全字段'; text='GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage。'; expected=$true },
+    @{ name='拒绝同时显示未经验证字段'; text='GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，同时显示未经验证的结果字段。'; expected=$false },
+    @{ name='拒绝还会显示调试详情'; text='GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，还会显示调试详情。'; expected=$false },
+    @{ name='拒绝未经净化结果'; text='GUI 显示未经净化的结果。'; expected=$false },
+    @{ name='拒绝原始异常路径 token 堆栈'; text='GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，同时显示原始异常、路径、token、堆栈。'; expected=$false },
+    @{ name='拒绝也会显示额外字段'; text='GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，也会显示额外字段。'; expected=$false },
+    @{ name='拒绝同文档跨行额外字段'; text="GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage。`n还会显示调试详情。"; expected=$false }
+)
+foreach ($case in $guiContractCases) {
+    Assert-Equal ("GUI 表驱动: " + $case.name) (Test-GuiSafeResultContract $case.text) $case.expected
+}
 
 Write-Host "`n结果: $pass 通过, $fail 失败" -ForegroundColor Cyan
 if ($fail -gt 0) { throw 'SCHEMA TESTS FAILED' } else { Write-Host 'ALL SCHEMA TESTS PASSED' -ForegroundColor Green }
