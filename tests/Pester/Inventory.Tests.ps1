@@ -101,12 +101,32 @@ Describe 'trusted privileged inventory nonce and paths' {
         Test-InventoryBoundedCleanString ("service$([char]0x7f).exe") 260 | Should -BeFalse
     }
 
-    It 'parses only canonical zero-offset UTC timestamps' {
+    It 'parses canonical zero-offset UTC timestamps' {
         $parsed = ConvertFrom-InventoryCanonicalUtc '2026-08-13T00:00:00.1234567Z'
         $parsed.Offset | Should -Be ([timespan]::Zero)
         $parsed.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture) |
             Should -BeExactly '2026-08-13T00:00:00.1234567Z'
-        { ConvertFrom-InventoryCanonicalUtc '2026-08-13T00:00:00.1234567+00:00' } | Should -Throw '*UTC timestamp*'
+    }
+
+    It 'returns null for invalid canonical UTC <Label>' -TestCases @(
+        @{ Label='syntax'; Value='2026-08-13T00:00:00Z' }
+        @{ Label='type'; Value=7 }
+        @{ Label='offset'; Value='2026-08-13T00:00:00.1234567+00:00' }
+        @{ Label='null'; Value=$null }
+    ) {
+        param($Label, $Value)
+        ConvertFrom-InventoryCanonicalUtc $Value | Should -BeNullOrEmpty
+    }
+
+    It 'accepts only fully qualified Windows paths' {
+        Test-InventoryFullyQualifiedWindowsPath $script:TestServiceExecutable | Should -BeTrue
+        Test-InventoryFullyQualifiedWindowsPath 'C:\service.exe' | Should -BeTrue
+        Test-InventoryFullyQualifiedWindowsPath 'C:/service.exe' | Should -BeTrue
+        Test-InventoryFullyQualifiedWindowsPath '\\server\share\service.exe' | Should -BeTrue
+        Test-InventoryFullyQualifiedWindowsPath 'C:service.exe' | Should -BeFalse
+        Test-InventoryFullyQualifiedWindowsPath '\service.exe' | Should -BeFalse
+        Test-InventoryFullyQualifiedWindowsPath '\\server' | Should -BeFalse
+        Test-InventoryFullyQualifiedWindowsPath '\\server\' | Should -BeFalse
     }
 
     It 'resolves the fixed ProgramData MouseCleaner ScanResults root' {
@@ -546,6 +566,10 @@ Describe 'strict privileged inventory JSON and package shape' {
         @{ Case='not running with positive PID'; Mutation={ param($s,$p) $s.ProcessIdentityStatus='not_running'; $s.State='Stopped'; $s.ProcessId=1; $s.ProcessName=''; $s.ProcessPath=''; $s.ProcessStartTimeUtc='' } }
         @{ Case='not running status while state is Running'; Mutation={ param($s,$p) $s.ProcessIdentityStatus='not_running'; $s.ProcessId=0; $s.ProcessName=''; $s.ProcessPath=''; $s.ProcessStartTimeUtc='' } }
         @{ Case='unrooted process path'; Mutation={ param($s,$p) $s.ProcessPath='service.exe' } }
+        @{ Case='drive-relative process path'; Mutation={ param($s,$p) $s.ProcessPath='C:service.exe' } }
+        @{ Case='root-relative process path'; Mutation={ param($s,$p) $s.ProcessPath='\service.exe' } }
+        @{ Case='drive-relative service binary'; Mutation={ param($s,$p) $s.PathName='C:service.exe' } }
+        @{ Case='root-relative service binary'; Mutation={ param($s,$p) $s.PathName='\service.exe' } }
         @{ Case='filename path mismatch'; Mutation={ param($s,$p) $s.ProcessName='other.exe' } }
         @{ Case='service binary path mismatch'; Mutation={ param($s,$p) $s.PathName='C:\Other\service.exe' } }
         @{ Case='process name is not a pure filename'; Mutation={ param($s,$p) $s.ProcessName='folder\service.exe' } }
@@ -1142,12 +1166,7 @@ Describe 'internal scan_inventory collector' {
         Mock Is-Admin { $true }
         Mock Get-CurrentUserSid { $script:ReaderSid }
         Mock Get-ServicesInfo {
-            [pscustomobject]@{
-                Name='Svc'; DisplayName='Service'; State='Running'; StartMode='Auto'
-                PathName=('"' + $script:TestServiceExecutable + '" --service'); ProcessId=12; TriggerHint=$false
-                ProcessIdentityStatus='complete'; ProcessName='service.exe'; ProcessPath=$script:TestServiceExecutable
-                ProcessStartTimeUtc='2026-08-24T01:02:03.0000000Z'
-            }
+            [pscustomobject]@{ Name='Svc';DisplayName='Service';State='Running';StartMode='Auto';PathName='C:\svc.exe';ProcessId=12;TriggerHint=$false }
         }
         Mock Get-TasksInfo {
             [pscustomobject]@{ TaskName='Task';TaskPath='\Vendor\';State='Ready';LoginTrigger=$true;Author='Vendor';Description='Task description';Actions=@('C:\task.exe') }
@@ -1192,6 +1211,10 @@ Describe 'internal scan_inventory collector' {
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
         @($package.PSObject.Properties.Name) | Should -Be @('inventory_schema_version','nonce','generated_utc','collector_sid','services','tasks','health','warnings')
         @($package.services[0].PSObject.Properties.Name) | Should -Be @('Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
+        $package.services[0].ProcessIdentityStatus | Should -BeExactly 'unavailable'
+        $package.services[0].ProcessName | Should -BeExactly ''
+        $package.services[0].ProcessPath | Should -BeExactly ''
+        $package.services[0].ProcessStartTimeUtc | Should -BeExactly ''
         @($package.tasks[0].PSObject.Properties.Name) | Should -Be @('TaskName','TaskPath','State','Author','Description','Actions')
         $package.tasks[0].Actions -is [System.Array] | Should -BeTrue
         @($package.tasks[0].Actions) | Should -Be @('C:\task.exe')
@@ -1215,6 +1238,49 @@ Describe 'internal scan_inventory collector' {
     It 'rejects missing required service collection fields before publication' {
         $record = [pscustomobject]@{ Name='Svc';DisplayName='Service';State='Running';StartMode='Auto';ProcessId=12 }
         { ConvertTo-InventoryServiceRecord $record } | Should -Throw '*PathName*'
+    }
+
+    It 'converts six-field service state <State> PID <ProcessId> to <ExpectedStatus>' -TestCases @(
+        @{ State='Running'; ProcessId=12; ExpectedStatus='unavailable' }
+        @{ State='Stopped'; ProcessId=0; ExpectedStatus='not_running' }
+        @{ State='Running'; ProcessId=0; ExpectedStatus='unavailable' }
+        @{ State='Stopped'; ProcessId=12; ExpectedStatus='unavailable' }
+    ) {
+        param($State, $ProcessId, $ExpectedStatus)
+        $record = [pscustomobject][ordered]@{
+            Name='Svc'; DisplayName='Service'; State=$State; StartMode='Auto'
+            PathName='C:\svc.exe'; ProcessId=$ProcessId
+        }
+
+        $converted = ConvertTo-InventoryServiceRecord $record
+
+        @($converted.PSObject.Properties.Name) | Should -Be @('Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
+        $converted.ProcessIdentityStatus | Should -BeExactly $ExpectedStatus
+        $converted.ProcessName | Should -BeExactly ''
+        $converted.ProcessPath | Should -BeExactly ''
+        $converted.ProcessStartTimeUtc | Should -BeExactly ''
+    }
+
+    It 'rejects a partial collected identity property set' {
+        $record = [pscustomobject]@{
+            Name='Svc'; DisplayName='Service'; State='Running'; StartMode='Auto'
+            PathName='C:\svc.exe'; ProcessId=12; ProcessIdentityStatus='unavailable'
+        }
+        { ConvertTo-InventoryServiceRecord $record } | Should -Throw '*partial*identity*'
+    }
+
+    It 'preserves a complete collected identity set for strict package validation' {
+        $package = New-TestInventoryPackage
+        $expected = $package.services[0]
+
+        $converted = ConvertTo-InventoryServiceRecord $expected
+        $package.services = @($converted)
+
+        $converted.ProcessIdentityStatus | Should -BeExactly $expected.ProcessIdentityStatus
+        $converted.ProcessName | Should -BeExactly $expected.ProcessName
+        $converted.ProcessPath | Should -BeExactly $expected.ProcessPath
+        $converted.ProcessStartTimeUtc | Should -BeExactly $expected.ProcessStartTimeUtc
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
     }
 
     It 'rejects missing required task metadata before publication' {
