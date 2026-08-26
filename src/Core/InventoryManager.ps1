@@ -800,33 +800,97 @@ function Remove-StaleTrustedInventoryPackages {
     }
 }
 
+function New-InventoryProcessIdentityState($Status, $Name, $Path, $StartUtc) {
+    return [pscustomobject][ordered]@{
+        Status = $Status
+        Name = $Name
+        Path = $Path
+        StartUtc = $StartUtc
+    }
+}
+
+function Get-PrivilegedServiceProcessIdentity($Service) {
+    if ($null -ne $Service -and $Service.State -is [string] -and $Service.State -cne 'Running' -and
+        (Test-InventoryInteger $Service.ProcessId) -and [int64]$Service.ProcessId -eq 0) {
+        return New-InventoryProcessIdentityState not_running '' '' ''
+    }
+
+    try {
+        if ($null -eq $Service -or $Service.Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Service.Name) -or
+            $Service.State -isnot [string] -or $Service.State -cne 'Running') {
+            throw 'unavailable'
+        }
+        $collectedProcessId = Get-StrictServiceProcessId $Service.ProcessId
+        if ($null -eq $collectedProcessId -or $Service.PathName -isnot [string]) { throw 'unavailable' }
+
+        $ignoredFailureReason = ''
+        $first = Get-CurrentServiceExecutionSnapshot -ServiceName $Service.Name -FailureReason ([ref]$ignoredFailureReason)
+        if ($null -eq $first -or $first.Name -cne $Service.Name -or $first.State -cne $Service.State -or
+            $first.ProcessId -ne $collectedProcessId -or $first.PathName -cne $Service.PathName) {
+            throw 'unavailable'
+        }
+        $collectedBinaryPath = ConvertFrom-InventoryServicePathName $Service.PathName
+        if ($collectedBinaryPath -isnot [string] -or -not (Test-InventoryFullyQualifiedWindowsPath $collectedBinaryPath)) {
+            throw 'unavailable'
+        }
+        $collectedBinaryPath = [System.IO.Path]::GetFullPath($collectedBinaryPath)
+        if (-not [string]::Equals($collectedBinaryPath, [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'unavailable'
+        }
+
+        $processes = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $first.ProcessId) -ErrorAction Stop)
+        if ($processes.Count -ne 1 -or $null -eq $processes[0]) { throw 'unavailable' }
+        $process = $processes[0]
+        $processId = Get-StrictServiceProcessId $process.ProcessId
+        if ($null -eq $processId -or $processId -ne $first.ProcessId) { throw 'unavailable' }
+
+        if ($process.Name -isnot [string] -or [string]::IsNullOrWhiteSpace($process.Name)) { throw 'unavailable' }
+        $processName = [string]$process.Name
+        $expectedName = [System.IO.Path]::GetFileName([string]$first.BinaryPath)
+        if (-not [string]::Equals($processName, $expectedName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'unavailable'
+        }
+
+        if ($process.ExecutablePath -isnot [string] -or
+            -not (Test-InventoryFullyQualifiedWindowsPath $process.ExecutablePath)) {
+            throw 'unavailable'
+        }
+        $processPath = [System.IO.Path]::GetFullPath([string]$process.ExecutablePath)
+        if (-not [System.IO.File]::Exists($processPath) -or
+            -not [string]::Equals($processPath, [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'unavailable'
+        }
+
+        $processStartTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
+        if ([string]::IsNullOrWhiteSpace([string]$processStartTimeUtc)) { throw 'unavailable' }
+
+        $ignoredFailureReason = ''
+        $second = Get-CurrentServiceExecutionSnapshot -ServiceName $first.Name -FailureReason ([ref]$ignoredFailureReason)
+        if ($null -eq $second -or $second.Name -cne $first.Name -or $second.State -cne 'Running' -or
+            $second.ProcessId -ne $first.ProcessId -or $second.PathName -cne $first.PathName -or
+            -not [string]::Equals([string]$second.BinaryPath, [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'unavailable'
+        }
+
+        return New-InventoryProcessIdentityState complete $processName $processPath $processStartTimeUtc
+    } catch {
+        $warning = [string]::Concat(
+            [char]0x670D, [char]0x52A1, [char]0x8FDB, [char]0x7A0B, [char]0x8EAB,
+            [char]0x4EFD, [char]0x4E0D, [char]0x53EF, [char]0x7528, [char]0x3002
+        )
+        Add-ScanWarning $warning
+        return New-InventoryProcessIdentityState unavailable '' '' ''
+    }
+}
+
 function ConvertTo-InventoryServiceRecord($Record) {
     if ($null -eq $Record) { throw 'Inventory service record cannot be null.' }
     $required = @('Name','DisplayName','State','StartMode','PathName','ProcessId')
-    $identityFields = @('ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
     $names = @($Record.PSObject.Properties.Name)
     foreach ($name in $required) {
         if ($names -cnotcontains $name) { throw "Inventory service collection is missing required field $name." }
     }
-    $presentIdentityFields = @($identityFields | Where-Object { $names -ccontains $_ })
-    if ($presentIdentityFields.Count -ne 0 -and $presentIdentityFields.Count -ne $identityFields.Count) {
-        throw 'Inventory service collection has a partial process identity field set.'
-    }
-    if ($presentIdentityFields.Count -eq 0) {
-        $processIdentityStatus = 'unavailable'
-        if ($Record.State -is [string] -and $Record.State -cne 'Running' -and
-            (Test-InventoryInteger $Record.ProcessId) -and [int64]$Record.ProcessId -eq 0) {
-            $processIdentityStatus = 'not_running'
-        }
-        $processName = ''
-        $processPath = ''
-        $processStartTimeUtc = ''
-    } else {
-        $processIdentityStatus = $Record.ProcessIdentityStatus
-        $processName = $Record.ProcessName
-        $processPath = $Record.ProcessPath
-        $processStartTimeUtc = $Record.ProcessStartTimeUtc
-    }
+    $identity = Get-PrivilegedServiceProcessIdentity $Record
     return [pscustomobject][ordered]@{
         Name = $Record.Name
         DisplayName = $Record.DisplayName
@@ -834,10 +898,10 @@ function ConvertTo-InventoryServiceRecord($Record) {
         StartMode = $Record.StartMode
         PathName = $Record.PathName
         ProcessId = $Record.ProcessId
-        ProcessIdentityStatus = $processIdentityStatus
-        ProcessName = $processName
-        ProcessPath = $processPath
-        ProcessStartTimeUtc = $processStartTimeUtc
+        ProcessIdentityStatus = $identity.Status
+        ProcessName = $identity.Name
+        ProcessPath = $identity.Path
+        ProcessStartTimeUtc = $identity.StartUtc
     }
 }
 
