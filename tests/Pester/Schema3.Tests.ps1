@@ -667,6 +667,7 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
     }
 
     It 'HRWSCCtrl exact 身份优先于 broad 回退并锁定 manual_impact 策略' {
+        . (Join-Path $script:Root 'src\Core\InventoryManager.ps1')
         $profile = @((Load-Profiles -Path $script:ProfileFile).profiles | Where-Object { $_.id -eq 'lenovo-hrwscctrl' }) | Select-Object -First 1
         $services = @($profile.detect.services)
         $binaryDir = Join-Path $TestDrive 'Program Files\Lenovo Security Center'
@@ -675,11 +676,12 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
         [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
         $pathName = '"' + $binary + '" -service'
         Mock Get-CimInstance {
-            if ($ClassName -ceq 'Win32_Service') { return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=$pathName } }
-            return [pscustomobject]@{ ProcessId=[int]4321; Name='wsctrl11.exe'; ExecutablePath=$binary; CreationDate=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03',[DateTimeKind]::Utc) }
-        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+            return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=$pathName }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
         $hit = @(Match-Profiles -Services @([pscustomobject]@{
             Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=$pathName; ProcessId=[int]4321
+            ProcessIdentitySource='trusted_inventory_v2'; ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'
+            ProcessPath=$binary; ProcessStartTimeUtc='2026-08-24T01:02:03.0000000Z'
         }) -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
 
         $profile | Should -Not -BeNullOrEmpty
@@ -705,11 +707,14 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
         $hit.action | Should -BeExactly 'stop_service_process'
         $hit.execution_class | Should -BeExactly 'manual_impact'
         $hit.matched_type | Should -BeExactly 'exact'
+        $hit.matched_field | Should -BeExactly 'service_name'
         $hit.service_binary_path | Should -BeExactly $binary
         $hit.process_id | Should -Be 4321
         $hit.process_name | Should -BeExactly 'wsctrl11.exe'
         $hit.process_path | Should -BeExactly $binary
         $hit.process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.0000000Z'
+        Assert-MockCalled Get-CimInstance -Times 2 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+        Assert-MockCalled Get-CimInstance -Times 0 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Process' }
     }
 
     It '七个已验证 Lenovo 清理规则使用 exact 内部服务名且 evidence.tested=true' {
