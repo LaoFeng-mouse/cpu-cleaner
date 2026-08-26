@@ -131,7 +131,7 @@ function Test-NoUnsupportedCompletionClaim($text) {
 
         foreach ($subject in $claimSubjects) {
             $negativeBefore = "(?:目标版本.{0,12})?$negativeSignals(?:已经|现已|已|正式|对外|完成|成功|通过|执行){0,2}$subject(?:完成|成功|通过|执行)?"
-            $negativeAfter = "$subject(?:已经|现已|已|正式|对外|完成|成功|通过|执行){0,2}$negativeSignals(?:完成|成功|通过|执行)?"
+            $negativeAfter = "$subject$negativeSignals(?:完成|成功|通过|执行)?"
             $remaining = [regex]::Replace($remaining, $negativeBefore, '')
             $remaining = [regex]::Replace($remaining, $negativeAfter, '')
         }
@@ -266,7 +266,8 @@ Assert-Match 'SECURITY 明确六字段执行前复验' $securityText '执行前�
 Assert-Match 'SECURITY 身份漂移失败关闭' $securityText '(任一|任何).{0,30}(变化|不一致)[^\r\n]{0,80}(拒绝|失败关闭|重新扫描)'
 Assert-Match 'SECURITY replacement PID 失败关闭' $securityText '任意正 replacement PID[\s\S]{0,100}`?failed/verification`?'
 Assert-Match 'SECURITY inventory v2 拒绝旧版未来版且不迁移' $securityText 'inventory_schema_version:?\s*2[\s\S]{0,220}(v1|旧版)[\s\S]{0,100}(未来|future|v3)[\s\S]{0,180}(重新扫描|fresh scan)[\s\S]{0,100}(不自动迁移|不静默迁移)'
-Assert-Match 'SECURITY complete 仅描述稳定受保护采集身份' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*`complete`[^\r\n]{0,180}(稳定运行 PID|运行中的稳定 PID)[^\r\n]{0,180}`process_name`[^\r\n]{0,100}`process_path`[^\r\n]{0,100}`process_started_utc`'
+Assert-Match 'SECURITY complete 使用真实受保护清单字段名' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*`complete`[^\r\n]{0,180}(稳定运行 PID|运行中的稳定 PID)[^\r\n]{0,180}`ProcessName`[^\r\n]{0,100}`ProcessPath`[^\r\n]{0,100}`ProcessStartTimeUtc`'
+Assert-NotMatch 'SECURITY complete 禁止不存在的 collector 字段名' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*`process_started_utc`'
 Assert-NotMatch 'SECURITY complete 不依赖 matcher 授权' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*(?:`?service_name`?|`?exact`?)'
 Assert-Match 'SECURITY not_running unavailable 仅观察不可执行' $securityText 'not_running[\s\S]{0,180}unavailable[\s\S]{0,220}(只观察|观察项)[\s\S]{0,120}(不可执行|不能执行)[\s\S]{0,120}重新扫描'
 Assert-Match 'SECURITY 只读采集双服务快照和单记录隔离' $securityText '(只读|read-only)[\s\S]{0,260}(两次|两个|双)服务快照[\s\S]{0,260}(唯一进程身份|唯一身份)[\s\S]{0,300}(单条|每条|逐条)[\s\S]{0,140}(净化|sanitized)[\s\S]{0,120}unavailable[\s\S]{0,180}(其他记录|兄弟记录|同级记录)'
@@ -335,6 +336,8 @@ Assert-NotMatch 'README 合法续行夹具排除 v1.8.0' $readmeSafeContinuation
 Assert-Equal 'README 当前条目允许续行待人工声明' (Test-NoUnsupportedCompletionClaim $readmeSafeContinuationResult) $true
 
 $changelogContractCases = @(
+    @{ name='拒绝发布完成被未推送掩盖'; text='发布完成、未推送。'; expected=$false },
+    @{ name='拒绝发布已经完成被未推送掩盖'; text='发布已经完成、未推送。'; expected=$false },
     @{ name='拒绝未发布掩盖已推送矛盾'; text='v1.8.1 未发布、已推送、未完成真实清理验证。'; expected=$false },
     @{ name='拒绝待验收掩盖真实清理成功'; text='真实机器验收仍待人工，但真实清理成功。'; expected=$false },
     @{ name='拒绝已发布'; text='已发布。'; expected=$false },
