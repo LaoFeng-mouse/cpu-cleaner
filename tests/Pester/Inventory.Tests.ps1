@@ -1292,11 +1292,11 @@ Describe 'internal scan_inventory collector' {
     It 'constructs only the ordered four-field process identity state' {
         $state = New-InventoryProcessIdentityState complete 'svc.exe' $script:CollectorServiceExecutable '2026-08-13T08:09:10.1234567Z'
 
-        @($state.PSObject.Properties.Name) | Should -Be @('Status','Name','Path','StartUtc')
-        $state.Status | Should -BeExactly 'complete'
-        $state.Name | Should -BeExactly 'svc.exe'
-        $state.Path | Should -BeExactly $script:CollectorServiceExecutable
-        $state.StartUtc | Should -BeExactly '2026-08-13T08:09:10.1234567Z'
+        @($state.PSObject.Properties.Name) | Should -Be @('ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
+        $state.ProcessIdentityStatus | Should -BeExactly 'complete'
+        $state.ProcessName | Should -BeExactly 'svc.exe'
+        $state.ProcessPath | Should -BeExactly $script:CollectorServiceExecutable
+        $state.ProcessStartTimeUtc | Should -BeExactly '2026-08-13T08:09:10.1234567Z'
     }
 
     It 'fails closed with one sanitized warning for unavailable identity when <Case>' -TestCases @(
@@ -1367,10 +1367,10 @@ Describe 'internal scan_inventory collector' {
 
         $identity = Get-PrivilegedServiceProcessIdentity $record
 
-        $identity.Status | Should -BeExactly 'unavailable'
-        $identity.Name | Should -BeExactly ''
-        $identity.Path | Should -BeExactly ''
-        $identity.StartUtc | Should -BeExactly ''
+        $identity.ProcessIdentityStatus | Should -BeExactly 'unavailable'
+        $identity.ProcessName | Should -BeExactly ''
+        $identity.ProcessPath | Should -BeExactly ''
+        $identity.ProcessStartTimeUtc | Should -BeExactly ''
         @($script:ScanWarnings) | Should -Be @($script:UnavailableIdentityWarning)
         $script:ServiceSnapshotQueryCount | Should -Be 0
         $script:ProcessQueryCount | Should -Be 0
@@ -1409,6 +1409,30 @@ Describe 'internal scan_inventory collector' {
     It 'rejects missing required service collection fields before publication' {
         $record = [pscustomobject]@{ Name='Svc';DisplayName='Service';State='Running';StartMode='Auto';ProcessId=12 }
         { ConvertTo-InventoryServiceRecord $record } | Should -Throw '*PathName*'
+    }
+
+    It 'rejects malformed base service field <Field> before privileged capture' -TestCases @(
+        @{ Field='Name'; Value='' }
+        @{ Field='DisplayName'; Value=@('Service') }
+        @{ Field='State'; Value=' ' }
+        @{ Field='StartMode'; Value=7 }
+        @{ Field='PathName'; Value=@('C:\svc.exe') }
+        @{ Field='ProcessId'; Value='4242' }
+        @{ Field='ProcessId'; Value=-1 }
+        @{ Field='ProcessId'; Value=([uint64][uint32]::MaxValue + 1) }
+    ) {
+        param($Field, $Value)
+        Mock Get-PrivilegedServiceProcessIdentity { throw 'privileged capture must not run' }
+        $record = [pscustomobject][ordered]@{
+            Name='Svc'; DisplayName='Service'; State='Running'; StartMode='Auto'
+            PathName=$script:CollectorServicePathName; ProcessId=$script:CollectorPid
+        }
+        $record.$Field = $Value
+
+        { ConvertTo-InventoryServiceRecord $record } | Should -Throw "*$Field*"
+
+        Assert-MockCalled Get-PrivilegedServiceProcessIdentity -Times 0 -Exactly
+        Assert-MockCalled Get-CimInstance -Times 0 -Exactly
     }
 
     It 'independently recaptures identity exactly once and ignores supplied identity properties' {

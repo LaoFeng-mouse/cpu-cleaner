@@ -295,9 +295,7 @@ function ConvertFrom-InventoryServicePathName([string]$PathName) {
     return $null
 }
 
-function Assert-InventoryServiceRecord($Record, [datetimeoffset]$GeneratedUtc) {
-    $required = @('Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
-    if (-not (Test-InventoryExactProperties $Record $required)) { throw 'Inventory service record fields are invalid.' }
+function Assert-InventoryServiceBaseRecord($Record) {
     foreach ($name in @('Name','DisplayName','State','StartMode')) {
         if (-not (Test-InventoryString $Record.$name)) { throw "Inventory service $name is invalid." }
     }
@@ -305,6 +303,12 @@ function Assert-InventoryServiceRecord($Record, [datetimeoffset]$GeneratedUtc) {
     if (-not (Test-InventoryInteger $Record.ProcessId) -or [int64]$Record.ProcessId -lt 0 -or [uint64]$Record.ProcessId -gt [uint64][uint32]::MaxValue) {
         throw 'Inventory service ProcessId is invalid.'
     }
+}
+
+function Assert-InventoryServiceRecord($Record, [datetimeoffset]$GeneratedUtc) {
+    $required = @('Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
+    if (-not (Test-InventoryExactProperties $Record $required)) { throw 'Inventory service record fields are invalid.' }
+    Assert-InventoryServiceBaseRecord $Record
     if ($Record.ProcessIdentityStatus -isnot [string] -or
         $Record.ProcessIdentityStatus -cnotin @('complete','not_running','unavailable')) {
         throw 'Inventory service ProcessIdentityStatus is invalid.'
@@ -802,10 +806,10 @@ function Remove-StaleTrustedInventoryPackages {
 
 function New-InventoryProcessIdentityState($Status, $Name, $Path, $StartUtc) {
     return [pscustomobject][ordered]@{
-        Status = $Status
-        Name = $Name
-        Path = $Path
-        StartUtc = $StartUtc
+        ProcessIdentityStatus = $Status
+        ProcessName = $Name
+        ProcessPath = $Path
+        ProcessStartTimeUtc = $StartUtc
     }
 }
 
@@ -890,6 +894,7 @@ function ConvertTo-InventoryServiceRecord($Record) {
     foreach ($name in $required) {
         if ($names -cnotcontains $name) { throw "Inventory service collection is missing required field $name." }
     }
+    Assert-InventoryServiceBaseRecord $Record
     $identity = Get-PrivilegedServiceProcessIdentity $Record
     return [pscustomobject][ordered]@{
         Name = $Record.Name
@@ -898,10 +903,10 @@ function ConvertTo-InventoryServiceRecord($Record) {
         StartMode = $Record.StartMode
         PathName = $Record.PathName
         ProcessId = $Record.ProcessId
-        ProcessIdentityStatus = $identity.Status
-        ProcessName = $identity.Name
-        ProcessPath = $identity.Path
-        ProcessStartTimeUtc = $identity.StartUtc
+        ProcessIdentityStatus = $identity.ProcessIdentityStatus
+        ProcessName = $identity.ProcessName
+        ProcessPath = $identity.ProcessPath
+        ProcessStartTimeUtc = $identity.ProcessStartTimeUtc
     }
 }
 
