@@ -1149,17 +1149,8 @@ Describe '勾选视图 (v1.5.5)' {
 
         function Set-GuiReviewedExecutionFixture {
             param([string]$ActionServiceName = 'ActionService')
-            Set-GuiState review -Force
             $pending = New-GuiReviewPendingFixture -ActionServiceName $ActionServiceName
-            $script:ReviewedPendingSnapshot = $pending
-            $keys = [System.Collections.Generic.List[string]]::new()
-            foreach ($key in @(Get-GuiValidatedActionIdentityKeys -Pending $pending)) { $keys.Add($key) }
-            $script:ReviewedActionIdentityKeys = $keys.AsReadOnly()
-            $list = $script:Win.FindName('PendingList')
-            $list.ItemsSource = $null
-            $list.Items.Clear()
-            foreach ($item in @(Get-PendingViewItems -Pending $pending)) { [void]$list.Items.Add($item) }
-            return [pscustomobject]@{ Pending=$pending; List=$list }
+            return Set-GuiReviewedPendingFixture -Pending $pending
         }
 
         function Set-GuiReviewedPendingFixture {
@@ -2900,6 +2891,42 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
+    It 'rejects exact internal ProcessIdentitySource marker value <MarkerValue> before subset launch' -TestCases @(
+        @{ MarkerValue='trusted_inventory_v2' }
+        @{ MarkerValue='altered_inventory_source' }
+    ) {
+        param($MarkerValue)
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('hrwscctrl-marker-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $pending = New-GuiHRWSCCtrlPendingFixture
+            $pending.actions[0] | Add-Member -NotePropertyName ProcessIdentitySource -NotePropertyValue $MarkerValue
+            $fixture = Set-GuiReviewedPendingFixture -Pending $pending
+            $fixture.List.Items[0].IsChecked = $true
+            $script:CapturedMarkerSubsetJson = $null
+            Mock Confirm-GuiImpactActions { return $true }
+            Mock Save-GuiExecutionErrorDiagnostic { return 'D-0123456789ABCDEF' }
+            Mock Start-Process {
+                $script:CapturedMarkerSubsetJson = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8
+                throw 'internal marker reached administrator launch'
+            }
+
+            Start-GuiExecution -List $fixture.List | Should -BeFalse
+
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+            Assert-MockCalled Save-GuiExecutionErrorDiagnostic -Times 1 -Exactly
+            $script:CapturedMarkerSubsetJson | Should -BeNullOrEmpty
+            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
+            $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未授权'
+            $script:Win.FindName('ErrorMutationText').Text | Should -Match '未开始处理'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Not -Match 'ProcessIdentitySource|trusted_inventory_v2|altered_inventory_source'
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
     It '确认高影响 action 后仅将 manual digest 与 subset SHA-256 传给管理员 clean' {
         $oldTemp = $env:TEMP
         $tempRoot = Join-Path $TestDrive ('impact-yes-' + [guid]::NewGuid().ToString('N'))
@@ -3050,17 +3077,27 @@ Describe '勾选视图 (v1.5.5)' {
     }
 
     It '篡改 observation 的 IsChecked 和 CanExecute 不能进入异步执行' {
+        $repositoryDiagnostics = Join-Path $script:GuiRoot 'diagnostics'
+        $diagnosticsBefore = if (Test-Path -LiteralPath $repositoryDiagnostics) {
+            @(Get-ChildItem -LiteralPath $repositoryDiagnostics -File | ForEach-Object { $_.FullName } | Sort-Object)
+        } else { @() }
         $fixture = Set-GuiReviewedExecutionFixture
         foreach ($item in @($fixture.List.Items)) { $item.IsChecked = $false }
         $observation = @($fixture.List.Items | Where-Object { -not $_.CanExecute })[0]
         $observation.IsChecked = $true
         $observation.CanExecute = $true
         Mock Start-Process { throw 'Start-Process must not run' }
+        Mock Save-GuiExecutionErrorDiagnostic { return 'D-0123456789ABCDEF' }
 
         Start-GuiExecution -List $fixture.List | Should -BeFalse
 
         Assert-MockCalled Start-Process -Times 0 -Exactly
+        Assert-MockCalled Save-GuiExecutionErrorDiagnostic -Times 1 -Exactly
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '未开始处理'
+        $diagnosticsAfter = if (Test-Path -LiteralPath $repositoryDiagnostics) {
+            @(Get-ChildItem -LiteralPath $repositoryDiagnostics -File | ForEach-Object { $_.FullName } | Sort-Object)
+        } else { @() }
+        ($diagnosticsAfter -join "`n") | Should -BeExactly ($diagnosticsBefore -join "`n")
     }
 
     It '大小写不同的 reviewed identity 以 Ordinal 精确解析原始 action' {

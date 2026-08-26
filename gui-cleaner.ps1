@@ -459,6 +459,9 @@ function Get-PendingIdentityKey($Item) {
 function Copy-PendingActionForSubset($RawAction) {
     $properties = [ordered]@{}
     foreach ($property in $RawAction.PSObject.Properties) {
+        if ([string]::Equals($property.Name, 'ProcessIdentitySource', [System.StringComparison]::Ordinal)) {
+            throw 'pending action contains an internal inventory marker; rescan required.'
+        }
         $properties[$property.Name] = $property.Value
     }
     $properties['status'] = 'pending'
