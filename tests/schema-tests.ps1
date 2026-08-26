@@ -20,30 +20,56 @@ function Get-ChangelogVersionBlock($text, $version) {
     return $match.Value
 }
 function Test-GuiSafeResultContract($text) {
-    $required = 'GUI[\s\S]{0,120}(只|仅)显示[\s\S]{0,160}严格验证[\s\S]{0,80}安全净化[\s\S]{0,100}`?result_reason`?[\s/、,，]+`?failure_stage`?'
-    $unsafeExtraDisplay = 'GUI[\s\S]*?(同时|还会|并会|也会)\s*显示'
-    $unsafeTrustState = 'GUI[\s\S]*?(未经(严格)?验证|未经(安全)?净化)'
-    return ([string]$text -match $required) -and
-        ([string]$text -notmatch $unsafeExtraDisplay) -and
-        ([string]$text -notmatch $unsafeTrustState)
+    $requiredFound = $false
+    $previousWasContract = $false
+    $leakTerms = '(?:额外字段|调试详情|原始异常|路径|token|堆栈|未经(?:严格)?验证(?:的)?(?:结果)?字段?|未经(?:安全)?净化(?:的)?结果?)'
+    foreach ($sentence in @([string]$text -split '[。！？!?\r\n]+')) {
+        $normalized = [regex]::Replace([string]$sentence, '[\s，,；;。：:、/`]+', '')
+        if (-not $normalized) { continue }
+
+        $isContract = $normalized -match 'GUI' -and
+            $normalized -match 'result_reason' -and
+            $normalized -match 'failure_stage'
+        if ($isContract -and
+            $normalized -match 'GUI(?:只|仅)显示.*严格验证.*安全净化.*result_reason.*failure_stage') {
+            $requiredFound = $true
+        }
+
+        if ($normalized -match 'GUI不(?:会)?(?:显示|展示).*(?:未经(?:严格)?验证|未经(?:安全)?净化)') {
+            $previousWasContract = $false
+            continue
+        }
+        $extraDisplay = $normalized -match '(?:同时|另外|还会|并会|也会)(?:显示|展示)'
+        $directLeakDisplay = $normalized -match "(?:显示|展示).*$leakTerms"
+        $isGuiResultSentence = $isContract -or $previousWasContract -or $normalized -match 'GUI'
+        if ($isGuiResultSentence -and $normalized -match $leakTerms -and
+            ($extraDisplay -or $directLeakDisplay)) {
+            return $false
+        }
+        $previousWasContract = $isContract
+    }
+    return $requiredFound
 }
 function Test-ChangelogNoUnsupportedCompletionClaim($text) {
-    $negativePhrases = @(
-        '不宣称已经(?:验收、发布或推送|发布|推送|验收)',
+    $normalized = [regex]::Replace([string]$text, '[\s，,；;。：:！？!?、]+', '')
+    $allowedNegativeClaims = @(
+        '不宣称已经验收发布或推送',
+        '不宣称(?:已经)?(?:发布|推送|验收)',
+        '不宣称(?:真实机器验收|真实验收)(?:完成|通过|成功)',
+        '不宣称(?:已经)?完成(?:真实机器验收|真实验收)',
         '(?:未|尚未|没有|未能)(?:发布|推送)',
-        '(?:没有|未能|尚未)完成(?:真实机器验收|真实验收)',
-        '(?:真实机器验收|真实验收)(?:尚未完成|仍待人工(?:执行)?)',
-        '没有执行真实清理'
+        '(?:未|尚未|没有|未能)完成(?:真实机器验收|真实验收)',
+        '(?:真实机器验收|真实验收)(?:未完成|尚未完成|没有完成|未能完成|仍待人工(?:执行)?)',
+        '没有执行真实清理',
+        '(?:未|尚未|没有|未能)完成真实清理',
+        '真实清理(?:未完成|尚未完成|没有完成|未能完成)',
+        '不宣称真实清理(?:完成|成功)'
     )
-    $unsupported = '(?:已|已经)(?:发布|推送)|(?:真实机器验收|真实验收)[^\r\n]{0,30}(?:通过|完成|成功)|(?:已|已经)?完成[^\r\n]{0,30}(?:真实机器验收|真实验收)|真实清理[^\r\n]{0,30}(?:成功|完成)|(?:成功|完成)[^\r\n]{0,30}真实清理'
-    foreach ($clause in @([string]$text -split '[，,；;。！？!?\r\n]+')) {
-        $remainder = [string]$clause
-        foreach ($negativePhrase in $negativePhrases) {
-            $remainder = [regex]::Replace($remainder, $negativePhrase, '')
-        }
-        if ($remainder -match $unsupported) { return $false }
+    foreach ($allowedNegativeClaim in $allowedNegativeClaims) {
+        $normalized = [regex]::Replace($normalized, $allowedNegativeClaim, '')
     }
-    return $true
+    $unsupported = '(?:已|已经)(?:发布|推送)|(?:真实机器验收|真实验收)(?:通过|完成|成功)|(?:已|已经)?完成(?:真实机器验收|真实验收)|真实清理(?:成功|完成)|(?:成功|完成)真实清理'
+    return $normalized -notmatch $unsupported
 }
 
 # 测试 Load-Profiles 对给定 JSON 的加载结果
@@ -187,6 +213,10 @@ $changelogContractCases = @(
     @{ name='拒绝真实验收通过'; text='真实验收通过。'; expected=$false },
     @{ name='拒绝真实验收成功'; text='真实验收成功。'; expected=$false },
     @{ name='拒绝已经完成真实机器验收'; text='已经完成真实机器验收。'; expected=$false },
+    @{ name='拒绝跨行真实机器验收完成'; text="真实机器验收`n完成。"; expected=$false },
+    @{ name='拒绝冒号真实机器验收完成'; text='真实机器验收：完成。'; expected=$false },
+    @{ name='拒绝冒号已经发布'; text='已经：发布。'; expected=$false },
+    @{ name='拒绝冒号已经推送'; text='已经：推送。'; expected=$false },
     @{ name='拒绝真实清理完成'; text='真实清理完成。'; expected=$false },
     @{ name='拒绝真实清理成功'; text='真实清理成功。'; expected=$false },
     @{ name='允许未发布'; text='未发布。'; expected=$true },
@@ -199,11 +229,14 @@ $changelogContractCases = @(
     @{ name='允许没有推送'; text='没有推送。'; expected=$true },
     @{ name='允许未能推送'; text='未能推送。'; expected=$true },
     @{ name='允许不宣称已经推送'; text='不宣称已经推送。'; expected=$true },
+    @{ name='允许未完成真实机器验收'; text='未完成真实机器验收。'; expected=$true },
     @{ name='允许没有完成真实机器验收'; text='没有完成真实机器验收。'; expected=$true },
     @{ name='允许未能完成真实机器验收'; text='未能完成真实机器验收。'; expected=$true },
     @{ name='允许尚未完成真实机器验收'; text='尚未完成真实机器验收。'; expected=$true },
     @{ name='允许真实机器验收仍待人工'; text='真实机器验收仍待人工执行。'; expected=$true },
+    @{ name='允许不宣称真实验收完成'; text='不宣称真实验收完成。'; expected=$true },
     @{ name='允许不宣称已经验收'; text='不宣称已经验收。'; expected=$true },
+    @{ name='允许完整联合否定声明'; text='不宣称已经验收、发布或推送。'; expected=$true },
     @{ name='允许没有执行真实清理'; text='没有执行真实清理。'; expected=$true }
 )
 foreach ($case in $changelogContractCases) {
@@ -217,7 +250,10 @@ $guiContractCases = @(
     @{ name='拒绝未经净化结果'; text='GUI 显示未经净化的结果。'; expected=$false },
     @{ name='拒绝原始异常路径 token 堆栈'; text='GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，同时显示原始异常、路径、token、堆栈。'; expected=$false },
     @{ name='拒绝也会显示额外字段'; text='GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，也会显示额外字段。'; expected=$false },
-    @{ name='拒绝同文档跨行额外字段'; text="GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage。`n还会显示调试详情。"; expected=$false }
+    @{ name='拒绝同文档跨行额外字段'; text="GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage。`n还会显示调试详情。"; expected=$false },
+    @{ name='拒绝带逗号的同时显示额外字段'; text='GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，同时，显示额外字段。'; expected=$false },
+    @{ name='拒绝另外展示调试详情'; text='GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage，另外展示调试详情。'; expected=$false },
+    @{ name='允许否定泄漏和独立扫描进度'; text='GUI 仅显示经过严格验证和安全净化的 result_reason / failure_stage。GUI 不显示未经验证字段。GUI 还会显示扫描进度。'; expected=$true }
 )
 foreach ($case in $guiContractCases) {
     Assert-Equal ("GUI 表驱动: " + $case.name) (Test-GuiSafeResultContract $case.text) $case.expected
