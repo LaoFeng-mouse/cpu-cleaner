@@ -811,11 +811,14 @@ Invoke-Clean
         $binary = Join-Path $binaryDir 'wsctrl11.exe'
         [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
         $pathName = '"' + $binary + '" -service'
-        $services = @([pscustomobject]@{ Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=$pathName; ProcessId=[int]4321 })
+        $services = @([pscustomobject]@{
+            Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=$pathName; ProcessId=[int]4321
+            ProcessIdentitySource='trusted_inventory_v2'; ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'
+            ProcessPath=$binary; ProcessStartTimeUtc='2026-08-24T01:02:03.0000000Z'
+        })
         Mock Get-CimInstance {
-            if ($ClassName -ceq 'Win32_Service') { return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=$pathName } }
-            return [pscustomobject]@{ ProcessId=[int]4321; Name='wsctrl11.exe'; ExecutablePath=$binary; CreationDate=[datetime]::SpecifyKind([datetime]'2026-08-24T01:02:03',[DateTimeKind]::Utc) }
-        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+            return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=$pathName }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
         $hit = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
 
         $profile.safe | Should -BeFalse
@@ -831,6 +834,8 @@ Invoke-Clean
         $hit.process_name | Should -BeExactly 'wsctrl11.exe'
         $hit.process_path | Should -BeExactly $binary
         $hit.process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.0000000Z'
+        Assert-MockCalled Get-CimInstance -Times 2 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+        Assert-MockCalled Get-CimInstance -Times 0 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Process' }
 
         Save-PendingActions -Hits @($hit) -Suspicious @()
         $pendingJson = Get-Content $script:PendingFile -Raw -Encoding UTF8
