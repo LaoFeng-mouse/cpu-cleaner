@@ -2910,22 +2910,24 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It 'rejects exact internal ProcessIdentitySource marker value <MarkerValue> before subset launch' -TestCases @(
-        @{ MarkerValue='trusted_inventory_v2' }
-        @{ MarkerValue='altered_inventory_source' }
+    It 'rejects internal marker property spelling <Label> before subset creation or administrator launch' -TestCases @(
+        @{ Label='canonical'; PropertyName='ProcessIdentitySource' }
+        @{ Label='lower case'; PropertyName='processidentitysource' }
+        @{ Label='upper case'; PropertyName='PROCESSIDENTITYSOURCE' }
+        @{ Label='mixed case'; PropertyName='pRoCeSsIdEnTiTySoUrCe' }
     ) {
-        param($MarkerValue)
+        param($Label, $PropertyName)
         $oldTemp = $env:TEMP
         $tempRoot = Join-Path $TestDrive ('hrwscctrl-marker-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $env:TEMP = $tempRoot
         try {
-            $pending = New-GuiHRWSCCtrlPendingFixture
-            $pending.actions[0] | Add-Member -NotePropertyName ProcessIdentitySource -NotePropertyValue $MarkerValue
-            $fixture = Set-GuiReviewedPendingFixture -Pending $pending
+            $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture)
+            $fixture.Pending.actions[0] | Add-Member -NotePropertyName $PropertyName -NotePropertyValue 'trusted_inventory_v2'
             $fixture.List.Items[0].IsChecked = $true
             $script:CapturedMarkerSubsetJson = $null
             Mock Confirm-GuiImpactActions { return $true }
+            Mock New-PendingSubsetPayload { throw 'subset creation must not be reached' }
             Mock Save-GuiExecutionErrorDiagnostic { return 'D-0123456789ABCDEF' }
             Mock Start-Process {
                 $script:CapturedMarkerSubsetJson = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8
@@ -2934,15 +2936,121 @@ Describe '勾选视图 (v1.5.5)' {
 
             Start-GuiExecution -List $fixture.List | Should -BeFalse
 
+            Assert-MockCalled New-PendingSubsetPayload -Times 0 -Exactly
             Assert-MockCalled Start-Process -Times 0 -Exactly
             Assert-MockCalled Save-GuiExecutionErrorDiagnostic -Times 1 -Exactly
             $script:CapturedMarkerSubsetJson | Should -BeNullOrEmpty
             @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
             $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未授权'
             $script:Win.FindName('ErrorMutationText').Text | Should -Match '未开始处理'
-            $script:Win.FindName('ErrorDetailText').Text | Should -Not -Match 'ProcessIdentitySource|trusted_inventory_v2|altered_inventory_source'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Not -Match 'ProcessIdentitySource|trusted_inventory_v2'
         } finally {
             $env:TEMP = $oldTemp
+        }
+    }
+
+    It 'rejects JSON marker property spelling <Label> at the normal-user review boundary' -TestCases @(
+        @{ Label='canonical'; JsonName='ProcessIdentitySource' }
+        @{ Label='lower case'; JsonName='processidentitysource' }
+        @{ Label='upper case'; JsonName='PROCESSIDENTITYSOURCE' }
+        @{ Label='mixed case'; JsonName='pRoCeSsIdEnTiTySoUrCe' }
+        @{ Label='canonical Unicode escaped'; JsonName='\u0050rocessIdentitySource' }
+        @{ Label='lower Unicode escaped'; JsonName='processidentitysourc\u0065' }
+        @{ Label='upper Unicode escaped'; JsonName='PROCESSIDENTITYSOURC\u0045' }
+        @{ Label='mixed Unicode escaped'; JsonName='pRoCeSsIdEnTiTySoUrC\u0065' }
+    ) {
+        param($Label, $JsonName)
+        $pending = New-GuiHRWSCCtrlPendingFixture
+        $pending.actions[0] | Add-Member -NotePropertyName ProcessIdentitySource -NotePropertyValue 'trusted_inventory_v2'
+        $json = ConvertTo-GuiPendingJson -InputObject $pending
+        $json = $json.Replace('"ProcessIdentitySource"', ('"' + $JsonName + '"'))
+        $path = Join-Path $TestDrive ('review-marker-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))
+
+        { Read-GuiPendingFile -Path $path } | Should -Throw '*internal inventory marker*'
+    }
+
+    It 'never copies internal marker spelling <PropertyName> into a selected action' -TestCases @(
+        @{ PropertyName='ProcessIdentitySource' }
+        @{ PropertyName='processidentitysource' }
+        @{ PropertyName='PROCESSIDENTITYSOURCE' }
+        @{ PropertyName='pRoCeSsIdEnTiTySoUrCe' }
+    ) {
+        param($PropertyName)
+        $action = (New-GuiHRWSCCtrlPendingFixture).actions[0]
+        $action | Add-Member -NotePropertyName $PropertyName -NotePropertyValue 'trusted_inventory_v2'
+
+        { Copy-PendingActionForSubset $action } | Should -Throw '*internal inventory marker*'
+    }
+
+    It 'truthfully warns that stop_service_process is current-instance-only and not restorable' {
+        $oldLang = $script:Lang
+        $script:Lang = 'zh'
+        $script:CapturedImpactText = $null
+        try {
+            $result = Confirm-GuiImpactActions -Actions @((New-GuiHRWSCCtrlPendingFixture).actions[0]) -ShowDialog {
+                param($Text, $Title)
+                $script:CapturedImpactText = $Text
+                return 'No'
+            }
+
+            $result | Should -BeFalse
+            $script:CapturedImpactText | Should -Match '只结束当前实例'
+            $script:CapturedImpactText | Should -Match '不创建备份或恢复包'
+            $script:CapturedImpactText | Should -Match '无法通过.*恢复.*撤销'
+            $script:CapturedImpactText | Should -Match '服务可能.*重新启动'
+            $script:CapturedImpactText | Should -Not -Match '每个动作.*可通过恢复撤销'
+        } finally {
+            $script:Lang = $oldLang
+        }
+    }
+
+    It 'retains backup and Restore wording for persistent recoverable actions' {
+        $oldLang = $script:Lang
+        $script:Lang = 'zh'
+        $persistent = (New-GuiReviewPendingFixture).actions[0]
+        $persistent.execution_class = 'manual_impact'
+        $persistent.requires_confirmation = $true
+        $script:CapturedImpactText = $null
+        try {
+            $result = Confirm-GuiImpactActions -Actions @($persistent) -ShowDialog {
+                param($Text, $Title)
+                $script:CapturedImpactText = $Text
+                return 'No'
+            }
+
+            $result | Should -BeFalse
+            $script:CapturedImpactText | Should -Match '先创建备份'
+            $script:CapturedImpactText | Should -Match '可通过.*恢复.*撤销'
+            $script:CapturedImpactText | Should -Not -Match '不创建备份或恢复包|服务可能.*重新启动'
+        } finally {
+            $script:Lang = $oldLang
+        }
+    }
+
+    It 'renders both recoverable and current-instance-only boundaries for mixed selections' {
+        $oldLang = $script:Lang
+        $script:Lang = 'zh'
+        $persistent = (New-GuiReviewPendingFixture).actions[0]
+        $persistent.execution_class = 'manual_impact'
+        $persistent.requires_confirmation = $true
+        $ephemeral = (New-GuiHRWSCCtrlPendingFixture).actions[0]
+        $script:CapturedImpactText = $null
+        try {
+            $result = Confirm-GuiImpactActions -Actions @($persistent, $ephemeral) -ShowDialog {
+                param($Text, $Title)
+                $script:CapturedImpactText = $Text
+                return 'No'
+            }
+
+            $result | Should -BeFalse
+            $script:CapturedImpactText | Should -Match '先创建备份'
+            $script:CapturedImpactText | Should -Match '可通过.*恢复.*撤销'
+            $script:CapturedImpactText | Should -Match '不创建备份或恢复包'
+            $script:CapturedImpactText | Should -Match '服务可能.*重新启动'
+            $script:CapturedImpactText | Should -Not -Match '每个动作.*可通过恢复撤销'
+        } finally {
+            $script:Lang = $oldLang
         }
     }
 
@@ -2998,7 +3106,7 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It 'mixed selection confirms only manual identities while launching the complete selected subset' {
+    It 'mixed selection confirms every selected boundary while digesting only manual identities' {
         $oldTemp = $env:TEMP
         $tempRoot = Join-Path $TestDrive ('impact-mixed-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
@@ -3012,8 +3120,8 @@ Describe '勾选视图 (v1.5.5)' {
 
             Start-GuiExecution -List $fixture.List | Should -BeTrue
 
-            @($script:ConfirmedImpactActions).Count | Should -Be 1
-            $script:ConfirmedImpactActions[0].service_name | Should -BeExactly 'ManualOne'
+            @($script:ConfirmedImpactActions).Count | Should -Be 2
+            @($script:ConfirmedImpactActions | ForEach-Object service_name) | Should -Be @('ActionService','ManualOne')
             $payload = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8 | ConvertFrom-Json
             @($payload.actions).Count | Should -Be 2
             @($payload.actions | ForEach-Object service_name) | Should -Be @('ActionService','ManualOne')

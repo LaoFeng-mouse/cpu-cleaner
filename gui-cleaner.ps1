@@ -459,7 +459,7 @@ function Get-PendingIdentityKey($Item) {
 function Copy-PendingActionForSubset($RawAction) {
     $properties = [ordered]@{}
     foreach ($property in $RawAction.PSObject.Properties) {
-        if ([string]::Equals($property.Name, 'ProcessIdentitySource', [System.StringComparison]::Ordinal)) {
+        if ([string]::Equals($property.Name, 'ProcessIdentitySource', [System.StringComparison]::OrdinalIgnoreCase)) {
             throw 'pending action contains an internal inventory marker; rescan required.'
         }
         $properties[$property.Name] = $property.Value
@@ -555,6 +555,13 @@ function Assert-GuiPendingEnvelopeShape {
         }
         if ($null -eq $property -or $property.Value -isnot [System.Array] -or $property.Value.Rank -ne 1) {
             throw "pending review shape invalid: $name 必须是一维数组。请重新运行 scan 生成新清单。"
+        }
+    }
+    foreach ($action in @($Pending.actions)) {
+        foreach ($property in $action.PSObject.Properties) {
+            if ([string]::Equals($property.Name, 'ProcessIdentitySource', [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw 'pending action contains an internal inventory marker; rescan required.'
+            }
         }
     }
     return $version
@@ -1958,19 +1965,29 @@ function Resolve-GuiReviewedActions {
 }
 
 function Confirm-GuiImpactActions {
-    param([Parameter(Mandatory=$true)]$Actions)
+    param(
+        [Parameter(Mandatory=$true)]$Actions,
+        [scriptblock]$ShowDialog
+    )
     try {
-        $manualActions = @($Actions)
-        if ($manualActions.Count -eq 0) { return $false }
+        $selectedActions = @($Actions)
+        if ($selectedActions.Count -eq 0) { return $false }
         $english = ($script:Lang -ceq 'en')
+        $hasCurrentInstanceOnly = $false
+        $hasPersistentRecoverable = $false
         $lines = if ($english) {
             @('The selected items can affect OEM features.', '')
         } else {
             @('以下已选项目可能影响 OEM 附加功能：', '')
         }
-        foreach ($action in $manualActions) {
-            foreach ($propertyName in @('name_cn','necessity','cleanup_reason_cn','impact_cn')) {
+        foreach ($action in $selectedActions) {
+            foreach ($propertyName in @('name_cn','necessity','cleanup_reason_cn','impact_cn','action')) {
                 $null = Get-GuiReviewScalarString -Item $action -PropertyName $propertyName -Context 'manual confirmation'
+            }
+            if ($action.action -ceq 'stop_service_process') {
+                $hasCurrentInstanceOnly = $true
+            } elseif ($action.action -cin @('disable_service','remove_autostart','disable_task')) {
+                $hasPersistentRecoverable = $true
             }
             if ($english) {
                 $lines += 'Target: ' + $action.name_cn
@@ -1986,15 +2003,30 @@ function Confirm-GuiImpactActions {
             $lines += ''
         }
         if ($english) {
-            $lines += 'Each action will be backed up first and can be undone through Restore.'
+            if ($hasPersistentRecoverable) {
+                $lines += 'Persistent setting changes create a backup first and can be undone through Restore.'
+            }
+            if ($hasCurrentInstanceOnly) {
+                $lines += 'Stop-service-process actions end only the current instance. No backup or Restore package is created, they cannot be undone through Restore, and the service may restart.'
+            }
             $lines += 'Continue with these selected items?'
             $title = 'Confirm high-impact cleanup'
         } else {
-            $lines += '每个动作会先备份，可通过恢复撤销。'
+            if ($hasPersistentRecoverable) {
+                $lines += '持久设置变更会先创建备份，可通过“恢复”撤销。'
+            }
+            if ($hasCurrentInstanceOnly) {
+                $lines += '结束服务进程只结束当前实例，不创建备份或恢复包，无法通过“恢复”撤销，服务可能会重新启动。'
+            }
             $lines += '是否继续处理这些已选项目？'
             $title = '确认高影响清理'
         }
-        $result = [System.Windows.MessageBox]::Show(($lines -join [Environment]::NewLine), $title, 'YesNo', 'Warning')
+        $text = $lines -join [Environment]::NewLine
+        $result = if ($null -ne $ShowDialog) {
+            & $ShowDialog $text $title
+        } else {
+            [System.Windows.MessageBox]::Show($text, $title, 'YesNo', 'Warning')
+        }
         return ($result -eq [System.Windows.MessageBoxResult]::Yes)
     } catch {
         return $false
@@ -2349,7 +2381,7 @@ function Start-GuiExecution {
             if ($confirmedImpactSha256 -isnot [string] -or $confirmedImpactSha256 -cnotmatch '^[0-9a-f]{64}$') {
                 throw '高影响清理摘要无效。请重新运行 scan 并审核。'
             }
-            $confirmationCopies = @($manualActions | ForEach-Object { Copy-PendingActionForSubset $_ })
+            $confirmationCopies = @($checked | ForEach-Object { Copy-PendingActionForSubset $_._raw })
             $result = Confirm-GuiImpactActions -Actions $confirmationCopies
             if (-not ($result -is [bool] -and $result -eq $true)) {
                 $null = Clear-GuiExecutionResources -RemoveTemp
