@@ -813,6 +813,40 @@ function New-InventoryProcessIdentityState($Status, $Name, $Path, $StartUtc) {
     }
 }
 
+function Get-PrivilegedServiceExecutionSnapshot([string]$ServiceName) {
+    if ([string]::IsNullOrWhiteSpace($ServiceName)) { return $null }
+    try {
+        $escapedName = $ServiceName.Replace('\', '\\').Replace("'", "\'")
+        $services = @(Get-CimInstance -ClassName Win32_Service -Filter ("Name = '{0}'" -f $escapedName) -ErrorAction Stop)
+        if ($services.Count -ne 1 -or $null -eq $services[0]) { return $null }
+        $service = $services[0]
+        if ($service.Name -isnot [string] -or $service.Name -cne $ServiceName -or
+            $service.State -isnot [string] -or $service.State -cne 'Running') {
+            return $null
+        }
+        $processId = Get-StrictServiceProcessId $service.ProcessId
+        if ($null -eq $processId -or $service.PathName -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($service.PathName)) {
+            return $null
+        }
+        $binaryPath = ConvertFrom-InventoryServicePathName $service.PathName
+        if ($binaryPath -isnot [string] -or -not (Test-InventoryFullyQualifiedWindowsPath $binaryPath)) {
+            return $null
+        }
+        $binaryPath = [System.IO.Path]::GetFullPath($binaryPath)
+        if (-not [System.IO.File]::Exists($binaryPath)) { return $null }
+        return [pscustomobject][ordered]@{
+            Name = $service.Name
+            State = $service.State
+            ProcessId = $processId
+            PathName = $service.PathName
+            BinaryPath = $binaryPath
+        }
+    } catch {
+        return $null
+    }
+}
+
 function Get-PrivilegedServiceProcessIdentity($Service) {
     if ($null -ne $Service -and $Service.State -is [string] -and $Service.State -cne 'Running' -and
         (Test-InventoryInteger $Service.ProcessId) -and [int64]$Service.ProcessId -eq 0) {
@@ -827,8 +861,7 @@ function Get-PrivilegedServiceProcessIdentity($Service) {
         $collectedProcessId = Get-StrictServiceProcessId $Service.ProcessId
         if ($null -eq $collectedProcessId -or $Service.PathName -isnot [string]) { throw 'unavailable' }
 
-        $ignoredFailureReason = ''
-        $first = Get-CurrentServiceExecutionSnapshot -ServiceName $Service.Name -FailureReason ([ref]$ignoredFailureReason)
+        $first = Get-PrivilegedServiceExecutionSnapshot -ServiceName $Service.Name
         if ($null -eq $first -or $first.Name -cne $Service.Name -or $first.State -cne $Service.State -or
             $first.ProcessId -ne $collectedProcessId -or $first.PathName -cne $Service.PathName) {
             throw 'unavailable'
@@ -867,9 +900,10 @@ function Get-PrivilegedServiceProcessIdentity($Service) {
 
         $processStartTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
         if ([string]::IsNullOrWhiteSpace([string]$processStartTimeUtc)) { throw 'unavailable' }
+        $parsedProcessStart = ConvertFrom-InventoryCanonicalUtc $processStartTimeUtc
+        if ($null -eq $parsedProcessStart -or $parsedProcessStart -gt [datetimeoffset]::UtcNow) { throw 'unavailable' }
 
-        $ignoredFailureReason = ''
-        $second = Get-CurrentServiceExecutionSnapshot -ServiceName $first.Name -FailureReason ([ref]$ignoredFailureReason)
+        $second = Get-PrivilegedServiceExecutionSnapshot -ServiceName $first.Name
         if ($null -eq $second -or $second.Name -cne $first.Name -or $second.State -cne 'Running' -or
             $second.ProcessId -ne $first.ProcessId -or $second.PathName -cne $first.PathName -or
             -not [string]::Equals([string]$second.BinaryPath, [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {

@@ -1224,6 +1224,7 @@ Describe 'internal scan_inventory collector' {
                 'multiple-processes' { return @([pscustomobject]$process, [pscustomobject]$process) }
                 'invalid-creation' { $process.CreationDate = 'not-a-date' }
                 'unspecified-creation' { $process.CreationDate = [datetime]::SpecifyKind([datetime]'2026-08-13T08:09:10', [DateTimeKind]::Unspecified) }
+                'future-creation' { $process.CreationDate = [datetime]::UtcNow.AddDays(1) }
                 'process-pid' { $process.ProcessId = $script:CollectorPid + 1 }
                 'process-name' { $process.Name = 'other.exe' }
                 'path-missing' { $process.ExecutablePath = '' }
@@ -1299,12 +1300,50 @@ Describe 'internal scan_inventory collector' {
         $state.ProcessStartTimeUtc | Should -BeExactly '2026-08-13T08:09:10.1234567Z'
     }
 
+    It 'uses collector-specific WQL escaping for a service name containing apostrophe and backslash' {
+        $serviceName = "Vendor\O'Brien"
+        $expectedServiceFilter = "Name = 'Vendor\\O\'Brien'"
+        $script:SpecialQueryLog = [System.Collections.Generic.List[string]]::new()
+        Mock Get-CimInstance {
+            param($ClassName, $Filter, $ErrorAction)
+            $script:SpecialQueryLog.Add("$ClassName|$Filter")
+            if ($ClassName -ceq 'Win32_Service') {
+                if ($Filter -cne $expectedServiceFilter) { throw 'malformed service filter rejected' }
+                return [pscustomobject]@{
+                    Name=$serviceName; State='Running'; ProcessId=$script:CollectorPid
+                    PathName=$script:CollectorServicePathName
+                }
+            }
+            if ($ClassName -ceq 'Win32_Process' -and $Filter -ceq "ProcessId = $($script:CollectorPid)") {
+                return [pscustomobject]@{
+                    ProcessId=$script:CollectorPid; Name='svc.exe'
+                    ExecutablePath=$script:CollectorServiceExecutable; CreationDate=$script:CollectorStartUtc
+                }
+            }
+            throw 'unexpected class or filter'
+        }
+        $record = [pscustomobject]@{
+            Name=$serviceName; DisplayName='Special Service'; State='Running'; StartMode='Auto'
+            PathName=$script:CollectorServicePathName; ProcessId=$script:CollectorPid
+        }
+
+        $identity = Get-PrivilegedServiceProcessIdentity $record
+
+        $identity.ProcessIdentityStatus | Should -BeExactly 'complete'
+        @($script:SpecialQueryLog) | Should -Be @(
+            "Win32_Service|$expectedServiceFilter"
+            "Win32_Process|ProcessId = $($script:CollectorPid)"
+            "Win32_Service|$expectedServiceFilter"
+        )
+    }
+
     It 'fails closed with one sanitized warning for unavailable identity when <Case>' -TestCases @(
         @{ Case='process query is access denied'; Mode='access-denied' }
         @{ Case='process query returns zero processes'; Mode='zero-processes' }
         @{ Case='process query returns multiple processes'; Mode='multiple-processes' }
         @{ Case='CreationDate is invalid'; Mode='invalid-creation' }
         @{ Case='CreationDate has unspecified kind'; Mode='unspecified-creation' }
+        @{ Case='CreationDate is in the future'; Mode='future-creation' }
         @{ Case='process PID mismatches'; Mode='process-pid' }
         @{ Case='process name mismatches'; Mode='process-name' }
         @{ Case='process path is missing'; Mode='path-missing' }
@@ -1334,6 +1373,56 @@ Describe 'internal scan_inventory collector' {
         $package.services[0].ProcessStartTimeUtc | Should -BeExactly ''
         @($package.warnings) | Should -Be @($script:UnavailableIdentityWarning)
         ($package.warnings -join '') | Should -Not -Match 'internal|secret|token=|collector-secret|Access denied|svc\.exe'
+    }
+
+    It 'publishes one complete and one unavailable service with intentional fixed warning and real routing' {
+        $goodPid = 4242
+        $badPid = 5252
+        $goodPathName = '"' + $script:CollectorServiceExecutable + '" --service'
+        $badPathName = '"' + $script:CollectorOtherExecutable + '" --service'
+        $script:TwoServiceQueryLog = [System.Collections.Generic.List[string]]::new()
+        Mock Get-ServicesInfo {
+            @(
+                [pscustomobject]@{ Name='GoodSvc';DisplayName='Good Service';State='Running';StartMode='Auto';PathName=$goodPathName;ProcessId=$goodPid }
+                [pscustomobject]@{ Name='BadSvc';DisplayName='Bad Service';State='Running';StartMode='Auto';PathName=$badPathName;ProcessId=$badPid }
+            )
+        }
+        Mock Get-CimInstance {
+            param($ClassName, $Filter, $ErrorAction)
+            $script:TwoServiceQueryLog.Add("$ClassName|$Filter")
+            if ($ClassName -ceq 'Win32_Service' -and $Filter -ceq "Name = 'GoodSvc'") {
+                return [pscustomobject]@{ Name='GoodSvc';State='Running';ProcessId=$goodPid;PathName=$goodPathName }
+            }
+            if ($ClassName -ceq 'Win32_Service' -and $Filter -ceq "Name = 'BadSvc'") {
+                return [pscustomobject]@{ Name='BadSvc';State='Running';ProcessId=$badPid;PathName=$badPathName }
+            }
+            if ($ClassName -ceq 'Win32_Process' -and $Filter -ceq "ProcessId = $goodPid") {
+                return [pscustomobject]@{
+                    ProcessId=$goodPid; Name='svc.exe'; ExecutablePath=$script:CollectorServiceExecutable
+                    CreationDate=$script:CollectorStartUtc
+                }
+            }
+            if ($ClassName -ceq 'Win32_Process' -and $Filter -ceq "ProcessId = $badPid") { return @() }
+            throw 'unexpected class or filter'
+        }
+
+        $package = Invoke-ScanInventory -Nonce $script:Nonce
+
+        $package.health.services | Should -BeExactly 'complete'
+        $package.services[0].ProcessIdentityStatus | Should -BeExactly 'complete'
+        $package.services[0].ProcessName | Should -BeExactly 'svc.exe'
+        $package.services[1].ProcessIdentityStatus | Should -BeExactly 'unavailable'
+        $package.services[1].ProcessName | Should -BeExactly ''
+        $package.services[1].ProcessPath | Should -BeExactly ''
+        $package.services[1].ProcessStartTimeUtc | Should -BeExactly ''
+        @($package.warnings) | Should -Be @($script:UnavailableIdentityWarning)
+        @($script:TwoServiceQueryLog) | Should -Be @(
+            "Win32_Service|Name = 'GoodSvc'"
+            "Win32_Process|ProcessId = $goodPid"
+            "Win32_Service|Name = 'GoodSvc'"
+            "Win32_Service|Name = 'BadSvc'"
+            "Win32_Process|ProcessId = $badPid"
+        )
     }
 
     It 'marks Running PID zero unavailable without failing service enumeration health' {
