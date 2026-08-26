@@ -2234,21 +2234,29 @@ function Complete-ExecutionPoll {
     }
 
     $rows = @()
-    $readError = $null
+    $strictReadFailed = $false
     try {
-        $resultItems = @(Get-PendingItems -Path $script:ExecutionTempPath)
-        $rows = @(ConvertTo-GuiExecutionRows $resultItems)
+        $result = Read-GuiStrictExecutionResult -Path $script:ExecutionTempPath -ExpectedActions $script:ExecutionActions
+        $rows = @($result.Rows)
     } catch {
-        $readError = $_.Exception.ToString()
+        $strictReadFailed = $true
+        $null = Save-GuiExecutionDiagnostic -Path $script:ExecutionTempPath
     }
 
     try {
         $summary = (Get-Text 'ExecFailed') -f $exitCode
-        $prefix = if ($readError) { $readError } else { '' }
-        $detail = Format-GuiExecutionDetail -Rows $rows -Prefix $prefix
+        $detail = if ($strictReadFailed) {
+            Get-Text 'ExecResultReadFailed'
+        } else {
+            Format-GuiExecutionDetail -Rows $rows
+        }
         Set-GuiError -Summary $summary -Mutation (Get-Text 'ExecPartialPossible') -Detail $detail
     } finally {
-        $null = Clear-GuiExecutionResources -RemoveTemp -ProcessExitConfirmed
+        if ($strictReadFailed) {
+            $null = Clear-GuiExecutionResources -ProcessExitConfirmed
+        } else {
+            $null = Clear-GuiExecutionResources -RemoveTemp -ProcessExitConfirmed
+        }
     }
     return $true
 }

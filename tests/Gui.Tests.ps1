@@ -3201,7 +3201,7 @@ Describe '勾选视图 (v1.5.5)' {
         $tempRoot = Join-Path $TestDrive ('partial-error-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $oldRoot = $script:Root; $script:Root = $tempRoot
-        $action = (New-GuiReviewPendingFixture).actions[0]; $action.status='success'
+        $action = (New-GuiReviewPendingFixture).actions[0]; $action.status='success'; $null = Set-GuiTestTerminalMetadata $action
         $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() }
         $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
@@ -3220,8 +3220,57 @@ Describe '勾选视图 (v1.5.5)' {
 
             $script:GuiState | Should -Be 'error'
             $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
-            $script:Win.FindName('ErrorDetailText').Text | Should -Match 'success'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Match '测试终态结果'
             [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $mainBytes
+            Test-Path -LiteralPath $subsetPath | Should -BeFalse
+        } finally { $script:Root = $oldRoot }
+    }
+
+    It '非 0/2 exit 的畸形结果失败关闭、保存受控诊断且 UI 不泄漏原始内容' -ForEach @(
+        @{ Label='overlong'; Marker='LEAK_OVERLONG'; Configure={ param($a); $a.result_reason=('LEAK_OVERLONG_' + ('x' * 520)); $a.failure_stage='mutation' } }
+        @{ Label='control'; Marker='LEAK_CONTROL'; Configure={ param($a); $a.result_reason="LEAK_CONTROL`nHIDDEN"; $a.failure_stage='mutation' } }
+        @{ Label='path'; Marker='LEAK_PATH'; Configure={ param($a); $a.result_reason='LEAK_PATH C:\\private\\secret.txt'; $a.failure_stage='mutation' } }
+        @{ Label='token'; Marker='LEAK_TOKEN'; Configure={ param($a); $a.result_reason='LEAK_TOKEN Bearer abcdefghijklmnop'; $a.failure_stage='mutation' } }
+        @{ Label='stack'; Marker='LEAK_STACK'; Configure={ param($a); $a.result_reason='LEAK_STACK System.Management.Automation.RuntimeException at Invoke-Clean'; $a.failure_stage='mutation' } }
+        @{ Label='unknown stage'; Marker='LEAK_STAGE'; Configure={ param($a); $a.result_reason='LEAK_STAGE 未经验证说明'; $a.failure_stage='cleanup' } }
+    ) {
+        $tempRoot = Join-Path $TestDrive ("nonstandard-invalid-$Label-" + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $oldRoot = $script:Root; $script:Root = $tempRoot
+        try {
+            $expected = (New-GuiReviewPendingFixture -ActionServiceName 'NonstandardExitService').actions[0]
+            $actual = $expected.PSObject.Copy(); $actual.status='failed'
+            $actual | Add-Member -NotePropertyName result_reason -NotePropertyValue '占位'
+            $actual | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'mutation'
+            & $Configure $actual
+            $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
+            [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+                pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+            })), [System.Text.UTF8Encoding]::new($false))
+            $mainPath = Join-Path $tempRoot 'pending_actions.json'
+            $mainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{
+                pending_schema_version=3; marker='must-not-merge'; actions=@($expected); resolved=@(); observations=@(); suspicious=@()
+            })))
+            [System.IO.File]::WriteAllBytes($mainPath, $mainBytes)
+            Set-GuiReviewedGenerationFromFile $mainPath
+            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=7 }
+            $script:ExecutionTimer = New-ExecutionFakeTimer
+            $script:ExecutionTempPath = $subsetPath
+            $script:ExecutionActions = @($expected)
+            $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+            Set-GuiState executing -Force
+
+            Complete-ExecutionPoll | Should -BeTrue
+
+            $script:GuiState | Should -BeExactly 'error'
+            $script:Win.FindName('ErrorSummaryText').Text | Should -Match '7'
+            $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
+            $visible = $script:Win.FindName('ErrorSummaryText').Text + $script:Win.FindName('ErrorMutationText').Text + $script:Win.FindName('ErrorDetailText').Text
+            $visible | Should -Not -Match ([regex]::Escape($Marker))
+            $visible | Should -Not -Match 'C:\\private|Bearer|abcdefghijklmnop|System\.Management\.Automation|Invoke-Clean'
+            $visible | Should -Not -Match ([regex]::Escape($subsetPath))
+            [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $mainBytes
+            @(Get-ChildItem -LiteralPath (Join-Path $tempRoot 'diagnostics') -File).Count | Should -Be 1
             Test-Path -LiteralPath $subsetPath | Should -BeFalse
         } finally { $script:Root = $oldRoot }
     }

@@ -173,7 +173,8 @@ function ConvertTo-GuiExecutionRows {
             default { '' }
         }
         $reason = if ($status -cin @('success','failed','skipped','manual_required')) {
-            [string]$item.result_reason
+            $resultReason = [string]$item.result_reason
+            if ([string]::IsNullOrWhiteSpace($resultReason)) { [string]$item.reason_cn } else { $resultReason }
         } else {
             [string]$item.reason_cn
         }
