@@ -111,31 +111,35 @@ function Test-GuiSafeResultContract($text) {
     return $requiredFound
 }
 function Test-NoUnsupportedCompletionClaim($text) {
-    $releaseSubjects = '(?:正式发布|发布|推送)'
-    $acceptanceSubjects = '(?:真实机器验收|真实验收|真实UAC验收|UAC验收|真实UAC|30秒(?:真实机器|实机)?验收|真实清理)'
-    $allSubjects = "(?:$acceptanceSubjects|$releaseSubjects)"
-    $releaseSignals = '(?:已经|现已|已|正式|对外|完成|成功|通过)'
-    $acceptanceSignals = '(?:已经|现已|已|正式|完成|成功|通过)'
-    $negativeSignals = '(?:未|尚未|没有|未能|不宣称|不代表|不等同|不能替代|仍待|等待|待人工)'
+    $positiveSignals = '(?:已经|现已|已|正式|对外|完成|成功|通过)'
+    $negativeSignals = '(?:尚未|没有|未能|不宣称|不代表|不等同|不能替代|仍待人工|仍待|等待|待人工|未)'
+    $claimSubjects = @(
+        '(?:正式发布|发布)',
+        '推送',
+        '(?:真实机器验收|真实验收|真实UAC验收|UAC验收|真实UAC|30秒(?:真实机器|实机)?验收)',
+        '真实清理'
+    )
 
     foreach ($clause in @([string]$text -split '[\r\n。！？；;.!?]+')) {
         $normalized = [regex]::Replace([string]$clause, '[\s，,：:、/`()（）\[\]\*#_-]+', '')
         if (-not $normalized) { continue }
 
-        $allowedNegativeClaims = @(
-            "目标版本.{0,12}?$negativeSignals.{0,8}?$releaseSubjects",
-            "$negativeSignals.{0,16}?$allSubjects(?:$releaseSignals|$acceptanceSignals)*",
-            "$allSubjects.{0,16}?$negativeSignals(?:$releaseSignals|$acceptanceSignals)*"
-        )
-        foreach ($allowedNegativeClaim in $allowedNegativeClaims) {
-            $normalized = [regex]::Replace($normalized, $allowedNegativeClaim, '')
+        # “不宣称”可以语法上同时约束明确列出的多个 subject；除此以外，
+        # 每个否定词只删除它直接修饰的同一 subject，不能跨过另一个 claim。
+        $coordinatedNegative = '不宣称(?:已经|现已|已)?(?:真实机器验收|真实验收|验收|发布|推送)(?:(?:或)?(?:真实机器验收|真实验收|验收|发布|推送))+'
+        $remaining = [regex]::Replace($normalized, $coordinatedNegative, '')
+
+        foreach ($subject in $claimSubjects) {
+            $negativeBefore = "(?:目标版本.{0,12})?$negativeSignals(?:已经|现已|已|正式|对外|完成|成功|通过|执行){0,2}$subject(?:完成|成功|通过|执行)?"
+            $negativeAfter = "$subject(?:已经|现已|已|正式|对外|完成|成功|通过|执行){0,2}$negativeSignals(?:完成|成功|通过|执行)?"
+            $remaining = [regex]::Replace($remaining, $negativeBefore, '')
+            $remaining = [regex]::Replace($remaining, $negativeAfter, '')
         }
 
-        $unsupportedRelease = "$releaseSignals.{0,16}$releaseSubjects|$releaseSubjects.{0,16}$releaseSignals"
-        $unsupportedAcceptance = "$acceptanceSignals.{0,16}$acceptanceSubjects|$acceptanceSubjects.{0,16}$acceptanceSignals"
-        if ($normalized -match $unsupportedRelease -or
-            $normalized -match $unsupportedAcceptance) {
-            return $false
+        foreach ($subject in $claimSubjects) {
+            if ($remaining -match "$positiveSignals.{0,16}$subject|$subject.{0,16}$positiveSignals") {
+                return $false
+            }
         }
     }
     return $true
@@ -248,7 +252,8 @@ Assert-Match 'README 明确约 5 秒与正 replacement PID 失败' $readmeText '
 Assert-Equal 'README GUI 仅显示严格验证和净化后的安全字段' (Test-GuiSafeResultContract $readmeText) $true
 Assert-Match 'README 明确 30 秒真实机器验收待完成' $readmeText '(还需要|仍待)[^\r\n]{0,40}30 秒真实机器验收|30 秒真实机器验收[^\r\n]{0,40}仍待'
 Assert-Match 'README 说明受保护 inventory v2 完整身份才可选' $readmeText 'inventory_schema_version:?\s*2[\s\S]{0,300}complete[\s\S]{0,180}HRWSCCtrl[\s\S]{0,180}(可选|勾选)'
-Assert-Match 'README 说明非完整身份只观察并重新扫描' $readmeText '(not_running|unavailable)[\s\S]{0,160}(只观察|不可执行)[\s\S]{0,120}重新扫描'
+Assert-Match 'README 说明 not_running 只观察并重新扫描' $readmeText 'not_running[\s\S]{0,160}(只观察|不可执行)[\s\S]{0,120}重新扫描'
+Assert-Match 'README 说明 unavailable 只观察并重新扫描' $readmeText 'unavailable[\s\S]{0,160}(只观察|不可执行)[\s\S]{0,120}重新扫描'
 Assert-NotMatch 'README 禁止 HRWSCCtrl 绑定 disable_service' $readmeText '(?i)HRWSCCtrl[^\r\n]{0,240}(manual_actions\.service=disable_service|通过[^\r\n]{0,80}disable_service|尝试禁用|禁用它)|disable_service[^\r\n]{0,160}HRWSCCtrl'
 Assert-Match 'README 版本记录包含 v1.8.1 未发布与待验收' $readmeText '(?m)^- .*v1\.8\.1（(?:待发布|未发布)[^\r\n]*HRWSCCtrl[^\r\n]*30 秒[^\r\n]*(?:待人工|待验收|仍待)'
 $readmeCurrent181 = Get-ReadmeCurrentReleaseContract $readmeText
@@ -261,7 +266,8 @@ Assert-Match 'SECURITY 明确六字段执行前复验' $securityText '执行前�
 Assert-Match 'SECURITY 身份漂移失败关闭' $securityText '(任一|任何).{0,30}(变化|不一致)[^\r\n]{0,80}(拒绝|失败关闭|重新扫描)'
 Assert-Match 'SECURITY replacement PID 失败关闭' $securityText '任意正 replacement PID[\s\S]{0,100}`?failed/verification`?'
 Assert-Match 'SECURITY inventory v2 拒绝旧版未来版且不迁移' $securityText 'inventory_schema_version:?\s*2[\s\S]{0,220}(v1|旧版)[\s\S]{0,100}(未来|future|v3)[\s\S]{0,180}(重新扫描|fresh scan)[\s\S]{0,100}(不自动迁移|不静默迁移)'
-Assert-Match 'SECURITY complete 身份四字段与精确服务名来源' $securityText 'complete[\s\S]{0,260}(service_name|服务名)[\s\S]{0,100}exact[\s\S]{0,320}PID[\s\S]{0,120}进程名[\s\S]{0,120}(完全限定路径|完整路径)[\s\S]{0,120}(严格 UTC|UTC 启动时间)'
+Assert-Match 'SECURITY complete 仅描述稳定受保护采集身份' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*`complete`[^\r\n]{0,180}(稳定运行 PID|运行中的稳定 PID)[^\r\n]{0,180}`process_name`[^\r\n]{0,100}`process_path`[^\r\n]{0,100}`process_started_utc`'
+Assert-NotMatch 'SECURITY complete 不依赖 matcher 授权' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*(?:`?service_name`?|`?exact`?)'
 Assert-Match 'SECURITY not_running unavailable 仅观察不可执行' $securityText 'not_running[\s\S]{0,180}unavailable[\s\S]{0,220}(只观察|观察项)[\s\S]{0,120}(不可执行|不能执行)[\s\S]{0,120}重新扫描'
 Assert-Match 'SECURITY 只读采集双服务快照和单记录隔离' $securityText '(只读|read-only)[\s\S]{0,260}(两次|两个|双)服务快照[\s\S]{0,260}(唯一进程身份|唯一身份)[\s\S]{0,300}(单条|每条|逐条)[\s\S]{0,140}(净化|sanitized)[\s\S]{0,120}unavailable[\s\S]{0,180}(其他记录|兄弟记录|同级记录)'
 Assert-Match 'SECURITY marker 仅在可信包验证后附加且不序列化' $securityText 'ProcessIdentitySource[\s\S]{0,220}(可信包|受保护包|inventory 包)[\s\S]{0,120}(验证通过|验证成功|完成验证)[\s\S]{0,260}(不序列化|不得序列化)[\s\S]{0,120}(pending|执行子集|subset)'
@@ -329,6 +335,8 @@ Assert-NotMatch 'README 合法续行夹具排除 v1.8.0' $readmeSafeContinuation
 Assert-Equal 'README 当前条目允许续行待人工声明' (Test-NoUnsupportedCompletionClaim $readmeSafeContinuationResult) $true
 
 $changelogContractCases = @(
+    @{ name='拒绝未发布掩盖已推送矛盾'; text='v1.8.1 未发布、已推送、未完成真实清理验证。'; expected=$false },
+    @{ name='拒绝待验收掩盖真实清理成功'; text='真实机器验收仍待人工，但真实清理成功。'; expected=$false },
     @{ name='拒绝已发布'; text='已发布。'; expected=$false },
     @{ name='拒绝已经发布'; text='已经发布。'; expected=$false },
     @{ name='拒绝已推送'; text='已推送。'; expected=$false },

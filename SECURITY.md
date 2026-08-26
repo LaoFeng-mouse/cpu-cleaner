@@ -22,7 +22,7 @@
 11. **持久动作备份 + 一次性动作隔离**：持久动作 `disable_service` / `remove_autostart` / `disable_task` 在执行前备份并可通过可信恢复包恢复。`stop_process` 和 `stop_service_process` 是用户单独确认的一次性、非持久动作，不进入恢复包，因此不可通过恢复包恢复；它们不删除文件或修改自启
 12. **HRWSCCtrl 精确实例约束**：`stop_service_process` 仅结束本次精确绑定的 HRWSCCtrl 当前进程，不停止或禁用服务，不修改 `StartMode`。执行前复验服务/路径/PID/进程名/进程路径/启动时间；六字段任一变化或不一致即失败关闭，拒绝执行并要求重新扫描。旧 PID 退出后进行约 5 秒稳定验证，出现任意正 replacement PID（`> 0`）即记录为 `failed/verification`
 13. **受保护清单版本**：只接受整数 `inventory_schema_version: 2`。v1、缺失版本和未来 v3+ 均拒绝并要求重新扫描；不自动迁移，也不静默迁移
-14. **服务进程身份状态机**：`complete` 必须来自 `service_name` 的 `exact` 命中并通过稳定验证，且原子携带 PID、进程名、完全限定路径、严格 UTC 启动时间，之后才可能成为可选动作。`not_running` 和 `unavailable` 始终是观察项、不可执行，并要求重新扫描
+14. **服务进程身份状态机**：`complete` 只表示受保护采集确认了稳定运行 PID，并原子记录 `process_name`、`process_path`、`process_started_utc`；它本身不判断 matcher 授权。`not_running` 和 `unavailable` 始终是观察项、不可执行，并要求重新扫描
 15. **只读采集与故障隔离**：管理员采集器保持只读，使用两次服务快照包围唯一进程身份采集。单条记录失败只产生经过净化的 `unavailable`；其他记录继续独立处理，不会被错误标记为失败
 16. **内部可信来源标记**：内部 `ProcessIdentitySource` 仅在受保护 inventory 包验证通过后附加，不序列化到 pending 或执行子集。任何带有 `ProcessIdentitySource` 的已复核动作都失败关闭并拒绝执行
 17. **普通扫描的数据边界**：普通扫描不再需要读取受保护的 `Win32_Process.ExecutablePath`；它消费受信证据及其中由两次服务快照验证的身份
