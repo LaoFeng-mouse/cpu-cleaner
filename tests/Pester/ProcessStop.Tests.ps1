@@ -204,6 +204,7 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
             return [int64]$script:defaultVerificationClock
         }
         function Start-ServiceProcessVerificationDelay([int]$Milliseconds) { }
+        $script:realCurrentServiceProcessIdentity = ${function:Get-CurrentServiceProcessIdentity}
         Mock Get-CurrentServiceProcessIdentity { [pscustomobject]@{ Identity=$script:currentIdentity; Reason='' } }
         Mock Stop-Process {}
         Mock Get-Process { New-HRWSCTestProcess }
@@ -373,6 +374,73 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         $script:boundWaitToken | Should -BeExactly 'handle-bound-original'
         Should -Invoke Get-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4321 }
         Should -Invoke Stop-Process -Times 0 -Exactly
+    }
+
+    It 'uses native identity for null WMI and Get-Process paths before the bound stop' {
+        Mock Get-CurrentServiceProcessIdentity { & $script:realCurrentServiceProcessIdentity -ServiceName 'HRWSCCtrl' }
+        Mock Get-CimInstance {
+            [pscustomobject]@{
+                ProcessId=[int]4321; Name='wsctrl11.exe'; ExecutablePath=$null
+                CreationDate=[datetimeoffset]::Parse('2026-08-24T01:02:03.0000000+00:00',[Globalization.CultureInfo]::InvariantCulture)
+            }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Process' }
+        Mock Get-NativeProcessIdentity {
+            [pscustomobject][ordered]@{
+                PID=[int]4321; Name='wsctrl11.exe'; Path=$script:binary
+                StartTimeUtc='2026-08-24T01:02:03.0000000Z'
+            }
+        }
+        $script:protectedProcess = New-HRWSCTestProcess -Token 'protected-handle-bound'
+        $script:protectedProcess.Path = ''
+        Mock Get-Process { $script:protectedProcess } -ParameterFilter { $Id -eq 4321 }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'success' -Because $result.result_reason
+        $script:boundKillToken | Should -BeExactly 'protected-handle-bound'
+        $script:boundWaitToken | Should -BeExactly 'protected-handle-bound'
+        Should -Invoke Get-NativeProcessIdentity -Times 2 -Exactly -ParameterFilter { $ProcessId -eq 4321 }
+        Should -Invoke Get-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4321 }
+        Should -Invoke Stop-Process -Times 0 -Exactly
+    }
+
+    It 'skips native capture failure or drift without binding or termination' -TestCases @(
+        @{ Mode='failure' }
+        @{ Mode='name' }
+        @{ Mode='path' }
+        @{ Mode='start' }
+    ) {
+        param($Mode)
+        Mock Get-CurrentServiceProcessIdentity { & $script:realCurrentServiceProcessIdentity -ServiceName 'HRWSCCtrl' }
+        Mock Get-CimInstance {
+            [pscustomobject]@{
+                ProcessId=[int]4321; Name='wsctrl11.exe'; ExecutablePath=$null
+                CreationDate=[datetimeoffset]::Parse('2026-08-24T01:02:03.0000000+00:00',[Globalization.CultureInfo]::InvariantCulture)
+            }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Process' }
+        Mock Get-NativeProcessIdentity {
+            if ($Mode -ceq 'failure') { return $null }
+            $identity = [ordered]@{
+                PID=[int]4321; Name='wsctrl11.exe'; Path=$script:binary
+                StartTimeUtc='2026-08-24T01:02:03.0000000Z'
+            }
+            if ($Mode -ceq 'name') { $identity.Name = 'other.exe' }
+            if ($Mode -ceq 'path') {
+                $identity.Path = Join-Path $TestDrive 'other.exe'
+                [IO.File]::WriteAllBytes($identity.Path,[byte[]](1))
+            }
+            if ($Mode -ceq 'start') { $identity.StartTimeUtc = '2026-08-24T01:02:04.0000000Z' }
+            return [pscustomobject]$identity
+        }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'skipped'
+        $result.failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Get-NativeProcessIdentity -Times 1 -Exactly -ParameterFilter { $ProcessId -eq 4321 }
+        Should -Invoke Get-Process -Times 0 -Exactly
+        Should -Invoke Stop-Process -Times 0 -Exactly
+        $script:boundKillToken | Should -BeNullOrEmpty
     }
 
     It 'accepts an extensionless Get-Process name only when its verified path supplies the matching full filename' {
@@ -605,6 +673,21 @@ Describe 'HRWSCCtrl stable identity capture primitive' {
         Invoke-Expression $defs
         $script:captureBinary = Join-Path $TestDrive 'wsctrl11.exe'
         [IO.File]::WriteAllBytes($script:captureBinary,[byte[]](1))
+        if (-not (Get-Command Get-NativeProcessIdentity -ErrorAction SilentlyContinue)) {
+            function Get-NativeProcessIdentity { param($ProcessId) return $null }
+        }
+        $script:captureMode = ''
+        Mock Get-NativeProcessIdentity {
+            if ($script:captureMode -ceq 'failure') { return $null }
+            $identity = [ordered]@{
+                PID=[int]4321; Name='wsctrl11.exe'; Path=$script:captureBinary
+                StartTimeUtc='2026-08-24T01:02:03.0000000Z'
+            }
+            if ($script:captureMode -ceq 'name-mismatch') { $identity.Name = 'other.exe' }
+            if ($script:captureMode -ceq 'path-mismatch') { $identity.Path = Join-Path $TestDrive 'other.exe'; [IO.File]::WriteAllBytes($identity.Path,[byte[]](1)) }
+            if ($script:captureMode -ceq 'start-mismatch') { $identity.StartTimeUtc = '2026-08-24T01:02:04.0000000Z' }
+            [pscustomobject]$identity
+        }
         Mock Get-CimInstance {
             [pscustomobject]@{
                 Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321
@@ -627,5 +710,45 @@ Describe 'HRWSCCtrl stable identity capture primitive' {
         $capture.Identity.process_path | Should -BeExactly $script:captureBinary
         Should -Invoke Get-CimInstance -Times 2 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Service' }
         Should -Invoke Get-CimInstance -Times 1 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Process' }
+        Should -Invoke Get-NativeProcessIdentity -Times 0 -Exactly
+    }
+
+    It 'captures an exact native identity when WMI path is null' {
+        $script:captureMode = 'valid'
+        Mock Get-CimInstance {
+            [pscustomobject]@{
+                ProcessId=[int]4321; Name='wsctrl11.exe'; ExecutablePath=$null
+                CreationDate=[datetimeoffset]::Parse('2026-08-24T01:02:03.0000000+00:00',[Globalization.CultureInfo]::InvariantCulture)
+            }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Process' }
+
+        $capture = Get-CurrentServiceProcessIdentity -ServiceName 'HRWSCCtrl'
+
+        $capture.Identity.process_path | Should -BeExactly $script:captureBinary
+        $capture.Identity.process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.0000000Z'
+        Should -Invoke Get-NativeProcessIdentity -Times 1 -Exactly -ParameterFilter { $ProcessId -eq 4321 }
+        Should -Invoke Get-CimInstance -Times 2 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+    }
+
+    It 'fails closed when service config is the only path authority or native identity mismatches' -TestCases @(
+        @{ Mode='failure' }
+        @{ Mode='name-mismatch' }
+        @{ Mode='path-mismatch' }
+        @{ Mode='start-mismatch' }
+    ) {
+        param($Mode)
+        $script:captureMode = $Mode
+        Mock Get-CimInstance {
+            [pscustomobject]@{
+                ProcessId=[int]4321; Name='wsctrl11.exe'; ExecutablePath=$null
+                CreationDate=[datetimeoffset]::Parse('2026-08-24T01:02:03.0000000+00:00',[Globalization.CultureInfo]::InvariantCulture)
+            }
+        } -ParameterFilter { $ClassName -ceq 'Win32_Process' }
+
+        $capture = Get-CurrentServiceProcessIdentity -ServiceName 'HRWSCCtrl'
+
+        $capture.Identity | Should -BeNullOrEmpty
+        $capture.Reason | Should -Match 'rescan'
+        Should -Invoke Get-NativeProcessIdentity -Times 1 -Exactly -ParameterFilter { $ProcessId -eq 4321 }
     }
 }

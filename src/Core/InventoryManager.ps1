@@ -888,20 +888,39 @@ function Get-PrivilegedServiceProcessIdentity($Service) {
             throw 'unavailable'
         }
 
-        if ($process.ExecutablePath -isnot [string] -or
-            -not (Test-InventoryFullyQualifiedWindowsPath $process.ExecutablePath)) {
-            throw 'unavailable'
-        }
-        $processPath = [System.IO.Path]::GetFullPath([string]$process.ExecutablePath)
-        if (-not [System.IO.File]::Exists($processPath) -or
-            -not [string]::Equals($processPath, [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-            throw 'unavailable'
+        $wmiProcessStartTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
+        if ([string]::IsNullOrWhiteSpace([string]$wmiProcessStartTimeUtc)) { throw 'unavailable' }
+        $parsedWmiProcessStart = ConvertFrom-InventoryCanonicalUtc $wmiProcessStartTimeUtc
+        if ($null -eq $parsedWmiProcessStart -or $parsedWmiProcessStart -gt [datetimeoffset]::UtcNow) { throw 'unavailable' }
+
+        $wmiPathIsValid = $false
+        $wmiProcessPath = $null
+        if ($process.ExecutablePath -is [string] -and (Test-InventoryFullyQualifiedWindowsPath $process.ExecutablePath)) {
+            try { $wmiProcessPath = [System.IO.Path]::GetFullPath([string]$process.ExecutablePath) } catch { $wmiProcessPath = $null }
+            $wmiPathIsValid = $null -ne $wmiProcessPath -and [System.IO.File]::Exists($wmiProcessPath) -and
+                [string]::Equals($wmiProcessPath, [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)
         }
 
-        $processStartTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
-        if ([string]::IsNullOrWhiteSpace([string]$processStartTimeUtc)) { throw 'unavailable' }
-        $parsedProcessStart = ConvertFrom-InventoryCanonicalUtc $processStartTimeUtc
-        if ($null -eq $parsedProcessStart -or $parsedProcessStart -gt [datetimeoffset]::UtcNow) { throw 'unavailable' }
+        if ($wmiPathIsValid) {
+            $processPath = $wmiProcessPath
+            $processStartTimeUtc = $wmiProcessStartTimeUtc
+        } else {
+            $nativeIdentity = Get-NativeProcessIdentity -ProcessId $first.ProcessId
+            if ($null -eq $nativeIdentity -or
+                (Get-StrictServiceProcessId $nativeIdentity.PID) -ne $first.ProcessId -or
+                $nativeIdentity.Name -isnot [string] -or
+                -not [string]::Equals([string]$nativeIdentity.Name, $processName, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $nativeIdentity.Path -isnot [string] -or -not (Test-InventoryFullyQualifiedWindowsPath $nativeIdentity.Path) -or
+                -not [System.IO.File]::Exists([string]$nativeIdentity.Path) -or
+                -not [string]::Equals([System.IO.Path]::GetFullPath([string]$nativeIdentity.Path), [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $nativeIdentity.StartTimeUtc -isnot [string] -or
+                [string]$nativeIdentity.StartTimeUtc -cne $wmiProcessStartTimeUtc) {
+                throw 'unavailable'
+            }
+            $processName = [string]$nativeIdentity.Name
+            $processPath = [System.IO.Path]::GetFullPath([string]$nativeIdentity.Path)
+            $processStartTimeUtc = [string]$nativeIdentity.StartTimeUtc
+        }
 
         $second = Get-PrivilegedServiceExecutionSnapshot -ServiceName $first.Name
         if ($null -eq $second -or $second.Name -cne $first.Name -or $second.State -cne 'Running' -or

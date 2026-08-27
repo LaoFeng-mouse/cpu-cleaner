@@ -1177,7 +1177,11 @@ Describe 'internal scan_inventory collector' {
         $script:ServiceSnapshotQueryCount = 0
         $script:ProcessQueryCount = 0
         $script:CollectorFailureMode = ''
+        if (-not (Get-Command Get-NativeProcessIdentity -ErrorAction SilentlyContinue)) {
+            function Get-NativeProcessIdentity { param($ProcessId) return $null }
+        }
         Mock Is-Admin { $true }
+        Mock Get-NativeProcessIdentity { $null }
         Mock Get-CurrentUserSid { $script:ReaderSid }
         Mock Get-ServicesInfo {
             [pscustomobject]@{
@@ -1231,8 +1235,28 @@ Describe 'internal scan_inventory collector' {
                 'path-unrooted' { $process.ExecutablePath = 'svc.exe' }
                 'path-mismatch' { $process.ExecutablePath = $script:CollectorOtherExecutable }
                 'path-nonexistent' { $process.ExecutablePath = Join-Path $TestDrive 'missing.exe' }
+                'native-valid' { $process.ExecutablePath = $null }
+                'native-failure' { $process.ExecutablePath = $null }
+                'native-name-mismatch' { $process.ExecutablePath = $null }
+                'native-path-mismatch' { $process.ExecutablePath = $null }
+                'native-start-mismatch' { $process.ExecutablePath = $null }
             }
             return [pscustomobject]$process
+        }
+        Mock Get-NativeProcessIdentity {
+            if ($script:CollectorFailureMode -cnotin @('native-valid','native-name-mismatch','native-path-mismatch','native-start-mismatch')) {
+                return $null
+            }
+            $identity = [ordered]@{
+                PID=[int]$script:CollectorPid
+                Name=[System.IO.Path]::GetFileName($script:CollectorServiceExecutable)
+                Path=$script:CollectorServiceExecutable
+                StartTimeUtc='2026-08-13T08:09:10.1234567Z'
+            }
+            if ($script:CollectorFailureMode -ceq 'native-name-mismatch') { $identity.Name = 'other.exe' }
+            if ($script:CollectorFailureMode -ceq 'native-path-mismatch') { $identity.Path = $script:CollectorOtherExecutable }
+            if ($script:CollectorFailureMode -ceq 'native-start-mismatch') { $identity.StartTimeUtc = '2026-08-13T08:09:11.1234567Z' }
+            return [pscustomobject]$identity
         }
         Mock Get-TasksInfo {
             [pscustomobject]@{ TaskName='Task';TaskPath='\Vendor\';State='Ready';LoginTrigger=$true;Author='Vendor';Description='Task description';Actions=@('C:\task.exe') }
@@ -1287,6 +1311,22 @@ Describe 'internal scan_inventory collector' {
         $package.generated_utc | Should -Match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$'
         $script:ServiceSnapshotQueryCount | Should -Be 2
         $script:ProcessQueryCount | Should -Be 1
+        @($package.warnings).Count | Should -Be 0
+        Should -Invoke Get-NativeProcessIdentity -Times 0 -Exactly
+    }
+
+    It 'completes a protected service identity from the exact native PID when WMI path is null' {
+        $script:CollectorFailureMode = 'native-valid'
+
+        $package = Invoke-ScanInventory -Nonce $script:Nonce
+
+        $package.services[0].ProcessIdentityStatus | Should -BeExactly 'complete'
+        $package.services[0].ProcessName | Should -BeExactly 'svc.exe'
+        $package.services[0].ProcessPath | Should -BeExactly $script:CollectorServiceExecutable
+        $package.services[0].ProcessStartTimeUtc | Should -BeExactly '2026-08-13T08:09:10.1234567Z'
+        $script:ServiceSnapshotQueryCount | Should -Be 2
+        $script:ProcessQueryCount | Should -Be 1
+        Should -Invoke Get-NativeProcessIdentity -Times 1 -Exactly -ParameterFilter { $ProcessId -eq $script:CollectorPid }
         @($package.warnings).Count | Should -Be 0
     }
 
@@ -1350,6 +1390,10 @@ Describe 'internal scan_inventory collector' {
         @{ Case='process path is unrooted'; Mode='path-unrooted' }
         @{ Case='process path mismatches'; Mode='path-mismatch' }
         @{ Case='process path does not exist'; Mode='path-nonexistent' }
+        @{ Case='native query fails and service config alone cannot authorize'; Mode='native-failure' }
+        @{ Case='native process name mismatches WMI name'; Mode='native-name-mismatch' }
+        @{ Case='native process path mismatches service binary'; Mode='native-path-mismatch' }
+        @{ Case='native process start mismatches WMI creation'; Mode='native-start-mismatch' }
         @{ Case='first snapshot name mismatches'; Mode='first-name' }
         @{ Case='first snapshot state mismatches'; Mode='first-state' }
         @{ Case='first snapshot PID mismatches'; Mode='first-pid' }
@@ -1402,9 +1446,15 @@ Describe 'internal scan_inventory collector' {
                     CreationDate=$script:CollectorStartUtc
                 }
             }
-            if ($ClassName -ceq 'Win32_Process' -and $Filter -ceq "ProcessId = $badPid") { return @() }
+            if ($ClassName -ceq 'Win32_Process' -and $Filter -ceq "ProcessId = $badPid") {
+                return [pscustomobject]@{
+                    ProcessId=$badPid; Name='other.exe'; ExecutablePath=$null
+                    CreationDate=$script:CollectorStartUtc
+                }
+            }
             throw 'unexpected class or filter'
         }
+        Mock Get-NativeProcessIdentity { $null } -ParameterFilter { $ProcessId -eq $badPid }
 
         $package = Invoke-ScanInventory -Nonce $script:Nonce
 
@@ -1416,6 +1466,7 @@ Describe 'internal scan_inventory collector' {
         $package.services[1].ProcessPath | Should -BeExactly ''
         $package.services[1].ProcessStartTimeUtc | Should -BeExactly ''
         @($package.warnings) | Should -Be @($script:UnavailableIdentityWarning)
+        Should -Invoke Get-NativeProcessIdentity -Times 1 -Exactly -ParameterFilter { $ProcessId -eq $badPid }
         @($script:TwoServiceQueryLog) | Should -Be @(
             "Win32_Service|Name = 'GoodSvc'"
             "Win32_Process|ProcessId = $goodPid"

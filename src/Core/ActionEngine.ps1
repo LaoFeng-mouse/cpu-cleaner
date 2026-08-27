@@ -2300,15 +2300,34 @@ function Get-CurrentServiceProcessIdentity {
     $process = $processes[0]
     $processId = Get-StrictServiceProcessId $process.ProcessId
     $processName = Get-StrictNonBlankStringProperty $process 'Name'
-    $processPath = Get-StrictNonBlankStringProperty $process 'ExecutablePath'
-    $startTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
+    $wmiProcessPath = Get-StrictNonBlankStringProperty $process 'ExecutablePath'
+    $wmiStartTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
     if ($null -eq $processId -or $processId -ne $first.ProcessId -or $null -eq $processName -or
-        $null -eq $processPath -or -not [System.IO.Path]::IsPathRooted($processPath) -or
-        [string]::IsNullOrWhiteSpace([string]$startTimeUtc)) {
+        [string]::IsNullOrWhiteSpace([string]$wmiStartTimeUtc)) {
         return [pscustomobject]@{ Identity=$null; Reason='current process identity is incomplete; rescan required' }
     }
-    try { $processPath = [System.IO.Path]::GetFullPath($processPath) } catch {
-        return [pscustomobject]@{ Identity=$null; Reason='current process path is invalid; rescan required' }
+    $normalizedWmiPath = Get-NormalizedServiceProcessPath $wmiProcessPath
+    $wmiPathIsValid = $null -ne $normalizedWmiPath -and [System.IO.File]::Exists($normalizedWmiPath) -and
+        [string]::Equals($normalizedWmiPath, $first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($wmiPathIsValid) {
+        $processPath = $normalizedWmiPath
+        $startTimeUtc = $wmiStartTimeUtc
+    } else {
+        $nativeIdentity = Get-NativeProcessIdentity -ProcessId $first.ProcessId
+        $nativePath = if ($null -ne $nativeIdentity) { Get-NormalizedServiceProcessPath $nativeIdentity.Path } else { $null }
+        if ($null -eq $nativeIdentity -or
+            (Get-StrictServiceProcessId $nativeIdentity.PID) -ne $first.ProcessId -or
+            $nativeIdentity.Name -isnot [string] -or
+            -not [string]::Equals([string]$nativeIdentity.Name, $processName, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $null -eq $nativePath -or -not [System.IO.File]::Exists($nativePath) -or
+            -not [string]::Equals($nativePath, $first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $nativeIdentity.StartTimeUtc -isnot [string] -or
+            [string]$nativeIdentity.StartTimeUtc -cne $wmiStartTimeUtc) {
+            return [pscustomobject]@{ Identity=$null; Reason='current native process identity is inconsistent; rescan required' }
+        }
+        $processName = [string]$nativeIdentity.Name
+        $processPath = $nativePath
+        $startTimeUtc = [string]$nativeIdentity.StartTimeUtc
     }
     $canonicalProcessName = Get-CanonicalServiceProcessFileName -Identity ([pscustomobject]@{
         process_name=$processName; process_path=$processPath; service_binary_path=$first.BinaryPath
@@ -2544,8 +2563,25 @@ function Get-BoundProcessTarget($ProcessId) {
     try { $name = [string]$process.ProcessName } catch {}
     $canonicalName = Get-CanonicalProcessFileName -Name $name -ExecutablePath $path -AllowExtensionlessName
     if ($null -eq $canonicalName) {
-        try { $process.Dispose() } catch {}
-        return $null
+        $nativeIdentity = Get-NativeProcessIdentity -ProcessId ([int]$process.Id)
+        $nativePath = if ($null -ne $nativeIdentity) { Get-NormalizedServiceProcessPath $nativeIdentity.Path } else { $null }
+        $nativeName = if ($null -ne $nativeIdentity) {
+            Get-CanonicalProcessFileName -Name $name -ExecutablePath $nativePath -AllowExtensionlessName
+        } else { $null }
+        $boundStart = Get-NormalizedStrictUtcProcessStartTime $startTimeUtc
+        $nativeStart = if ($null -ne $nativeIdentity) { Get-NormalizedStrictUtcProcessStartTime $nativeIdentity.StartTimeUtc } else { $null }
+        if ($null -eq $nativeIdentity -or
+            (Get-StrictServiceProcessId $nativeIdentity.PID) -ne [int]$process.Id -or
+            $null -eq $nativeName -or
+            -not [string]::Equals($nativeName, [string]$nativeIdentity.Name, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $null -eq $nativePath -or -not [System.IO.File]::Exists($nativePath) -or
+            $null -eq $boundStart -or $null -eq $nativeStart -or $boundStart -cne $nativeStart) {
+            try { $process.Dispose() } catch {}
+            return $null
+        }
+        $canonicalName = [string]$nativeIdentity.Name
+        $path = $nativePath
+        $startTimeUtc = $nativeStart
     }
     return [pscustomobject]@{
         Process = $process
