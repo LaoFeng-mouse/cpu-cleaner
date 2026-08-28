@@ -1,5 +1,21 @@
 ﻿# Shared fail-closed primitives for protected-service handoff evidence.
 
+# 联想官方卸载证据只信任这两个注册表视图和明确的名称、发布者白名单。
+$script:LenovoOfficialUninstallRegistryQueryPaths = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+$script:LenovoOfficialUninstallRegistryRoots = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+)
+$script:LenovoOfficialUninstallDisplayNamePrefixes = @('联想电脑管家')
+$script:LenovoOfficialUninstallPublishers = @(
+    '联想（北京）有限公司',
+    '联想(北京)有限公司',
+    'Lenovo (Beijing) Limited'
+)
+
 # 初始化只读 SCM LaunchProtected 查询接口；重复调用不会重复定义类型。
 function Initialize-ServiceProtectionNativeApi {
     $typeName = 'ShushuCleaner.ServiceProtectionNativeV1'
@@ -169,4 +185,132 @@ function ConvertFrom-StrictOfficialUninstallString {
         return $null
     }
     return $canonicalPath
+}
+
+# 为所有发现失败返回固定字段顺序和固定空值。
+function New-UnavailableLenovoOfficialUninstallEvidence {
+    return [pscustomobject][ordered]@{
+        UninstallEvidenceStatus  = 'unavailable'
+        UninstallRegistryPath    = ''
+        UninstallDisplayName     = ''
+        UninstallPublisher       = ''
+        UninstallDisplayVersion  = ''
+        UninstallInstallLocation = ''
+        UninstallString          = ''
+        UninstallExecutablePath  = ''
+    }
+}
+
+# 将注册表提供程序路径转换为可审阅的 HKLM 路径，并保留原始值类型供严格校验。
+function Read-LenovoOfficialUninstallRegistryItems {
+    param([Parameter(Mandatory=$true)][string[]]$Paths)
+
+    $providerPrefix = 'Microsoft.PowerShell.Core\Registry::HKEY_LOCAL_MACHINE\'
+    foreach ($path in $Paths) {
+        foreach ($item in @(Get-ItemProperty -Path $path -ErrorAction Stop)) {
+            $registryPath = ''
+            if ($item.PSPath -is [string] -and
+                $item.PSPath.StartsWith($providerPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                $registryPath = 'HKLM:\' + $item.PSPath.Substring($providerPrefix.Length)
+            }
+
+            [pscustomobject]@{
+                RegistryPath = $registryPath
+                DisplayName = $item.DisplayName
+                Publisher = $item.Publisher
+                DisplayVersion = $item.DisplayVersion
+                InstallLocation = $item.InstallLocation
+                UninstallString = $item.UninstallString
+            }
+        }
+    }
+}
+
+# 只接受标准 HKLM 卸载根下的一个直接子键。
+function Test-LenovoOfficialUninstallRegistryPath {
+    param([object]$RegistryPath)
+
+    if ($RegistryPath -isnot [string] -or $RegistryPath.Length -eq 0) { return $false }
+    foreach ($root in $script:LenovoOfficialUninstallRegistryRoots) {
+        $prefix = $root + '\'
+        if ($RegistryPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $subKey = $RegistryPath.Substring($prefix.Length)
+            return ($subKey.Length -gt 0 -and $subKey.IndexOf('\') -lt 0)
+        }
+    }
+    return $false
+}
+
+# 从两个标准 HKLM 卸载视图中提取唯一、完整且自洽的联想官方卸载快照。
+function Get-LenovoOfficialUninstallEvidence {
+    param([scriptblock]$RegistryReader)
+
+    $unavailable = New-UnavailableLenovoOfficialUninstallEvidence
+    try {
+        if ($null -eq $RegistryReader) {
+            $RegistryReader = { param($Paths) Read-LenovoOfficialUninstallRegistryItems -Paths $Paths }
+        }
+
+        $registryItems = @(& $RegistryReader $script:LenovoOfficialUninstallRegistryQueryPaths)
+        $validCandidates = @(
+            foreach ($item in $registryItems) {
+                if ($null -eq $item -or
+                    -not (Test-LenovoOfficialUninstallRegistryPath -RegistryPath $item.RegistryPath) -or
+                    $item.DisplayName -isnot [string] -or
+                    $item.Publisher -isnot [string] -or
+                    $item.DisplayVersion -isnot [string] -or
+                    $item.InstallLocation -isnot [string] -or
+                    $item.UninstallString -isnot [string]) {
+                    continue
+                }
+
+                $displayNameAllowed = $false
+                foreach ($prefix in $script:LenovoOfficialUninstallDisplayNamePrefixes) {
+                    if ($item.DisplayName.StartsWith($prefix, [StringComparison]::Ordinal)) {
+                        $displayNameAllowed = $true
+                        break
+                    }
+                }
+                if (-not $displayNameAllowed -or
+                    -not ($script:LenovoOfficialUninstallPublishers -ccontains $item.Publisher) -or
+                    $item.InstallLocation.Length -eq 0 -or
+                    $item.UninstallString.Length -eq 0 -or
+                    -not (Test-StrictOfficialUninstallLocalDrivePath -Path $item.InstallLocation)) {
+                    continue
+                }
+
+                try { $installLocation = [System.IO.Path]::GetFullPath($item.InstallLocation) }
+                catch { continue }
+                if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $installLocation) -or
+                    -not $item.InstallLocation.Equals($installLocation, [StringComparison]::OrdinalIgnoreCase)) {
+                    continue
+                }
+
+                $executablePath = ConvertFrom-StrictOfficialUninstallString -Command $item.UninstallString
+                if ($executablePath -isnot [string] -or $executablePath.Length -eq 0) { continue }
+
+                $installRoot = $installLocation.TrimEnd('\') + '\'
+                if (-not $executablePath.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                    continue
+                }
+
+                [pscustomobject][ordered]@{
+                    UninstallEvidenceStatus  = 'complete'
+                    UninstallRegistryPath    = $item.RegistryPath
+                    UninstallDisplayName     = $item.DisplayName
+                    UninstallPublisher       = $item.Publisher
+                    UninstallDisplayVersion  = $item.DisplayVersion
+                    UninstallInstallLocation = $installLocation
+                    UninstallString          = $item.UninstallString
+                    UninstallExecutablePath  = $executablePath
+                }
+            }
+        )
+
+        if ($validCandidates.Count -ne 1) { return $unavailable }
+        return $validCandidates[0]
+    }
+    catch {
+        return $unavailable
+    }
 }
