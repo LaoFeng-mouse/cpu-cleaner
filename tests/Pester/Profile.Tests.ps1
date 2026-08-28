@@ -126,6 +126,24 @@ Describe 'Profile 加载' {
         Remove-Item $tmp -ErrorAction SilentlyContinue
         @($p.profiles).Count | Should -Be 0
     }
+    It 'UTF8 profile 的完整 ISO 时间戳从加载到 hit 始终保持精确字符串' {
+        $tmp = Join-Path $TestDrive 'iso-evidence-profile.json'
+        $timestamp = '2026-08-24T01:02:03.4567890Z'
+        $json = '{"schema_version":3,"profiles":[{"id":"iso-evidence","vendor":"Test","name_cn":"时间戳证据","risk":"low","safe":true,"reason_cn":"测试时间戳字符串","evidence":{"tested":true,"captured_at":"' + $timestamp + '"},"detect":{"services":[{"match":"IsoEvidenceSvc","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},"actions":{"service":"disable_service"},"execution":{"allow_auto":true}}]}'
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        $script:ProfileFile = $tmp
+
+        $loaded = Load-Profiles -Path $tmp
+        $hit = @(Match-Profiles -Services @([pscustomobject]@{
+            Name='IsoEvidenceSvc'; DisplayName='ISO Evidence Service'; State='Running'; StartMode='Automatic'
+        }) -AutoStarts @() -Tasks @() -TopProcs @())[0]
+
+        $loaded.profiles[0].name_cn | Should -BeExactly '时间戳证据'
+        ($loaded.profiles[0].evidence.captured_at -is [string]) | Should -BeTrue
+        $loaded.profiles[0].evidence.captured_at | Should -BeExactly $timestamp
+        ($hit.evidence.captured_at -is [string]) | Should -BeTrue
+        $hit.evidence.captured_at | Should -BeExactly $timestamp
+    }
     It '错误 JSON 安全退出(throw)' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         [System.IO.File]::WriteAllText($tmp, '{"schema_version":2,"profiles":[{"id":"dup","risk":"high"}]}', (New-Object System.Text.UTF8Encoding($false)))

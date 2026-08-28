@@ -2,6 +2,10 @@
 # Read-Utf8Json / Normalize-ProcessName — 跨域共用
 function Read-Utf8Json($path) {
     $raw = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+    $convertFromJson = Get-Command ConvertFrom-Json -ErrorAction Stop
+    if ($convertFromJson.Parameters.ContainsKey('DateKind')) {
+        return $raw | ConvertFrom-Json -DateKind String -ErrorAction Stop
+    }
     return $raw | ConvertFrom-Json
 }
 
