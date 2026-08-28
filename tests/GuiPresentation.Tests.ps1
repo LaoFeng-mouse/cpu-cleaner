@@ -140,6 +140,12 @@ Describe 'GUI presentation model' {
         (Get-GuiReviewPresentation -Branch observations -Name '观察项' -ExecutionClass observation -Necessity informational -ImpactCn '仅观察' -CleanupReasonCn '保留证据').NecessityLabel | Should -BeExactly '必要性：仅供参考'
     }
 
+    It 'exposes the same necessity localization for confirmation text' {
+        Get-GuiNecessityText optional | Should -BeExactly '按需处理'
+        Get-GuiNecessityText recommended | Should -BeExactly '建议处理'
+        Get-GuiNecessityText informational | Should -BeExactly '仅供参考'
+    }
+
     It 'formats exact matcher provenance without granting authority' {
         $raw = [pscustomobject]@{
             hit_type='service'; service_name='ExactSvc'; action='disable_service'

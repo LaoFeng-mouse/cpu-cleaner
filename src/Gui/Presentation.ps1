@@ -43,6 +43,17 @@ function Get-GuiItemSummary {
     }
 }
 
+function Get-GuiNecessityText {
+    param([Parameter(Mandatory=$true)][string]$Necessity)
+    $text = switch ($Necessity) {
+        'recommended'   { '建议处理' }
+        'optional'      { '按需处理' }
+        'informational' { '仅供参考' }
+        default         { $Necessity }
+    }
+    return $text
+}
+
 function Get-GuiReviewPresentation {
     param(
         [Parameter(Mandatory=$true)][ValidateSet('actions','resolved','observations')][string]$Branch,
@@ -67,12 +78,7 @@ function Get-GuiReviewPresentation {
         default       { '仅观察' }
     }
     $statusLabel = if ($groupKey -eq 'resolved') { '已处理' } elseif ($groupKey -eq 'observation') { '仅观察' } elseif ($groupKey -eq 'manual') { '需确认' } else { '可执行' }
-    $necessityText = switch ($Necessity) {
-        'recommended'   { '建议处理' }
-        'optional'      { '按需处理' }
-        'informational' { '仅供参考' }
-        default         { $Necessity }
-    }
+    $necessityText = Get-GuiNecessityText $Necessity
     $necessityLabel = '必要性：{0}' -f $necessityText
     return [pscustomobject]@{
         GroupKey           = $groupKey

@@ -336,14 +336,14 @@ Describe 'GUI 壳 (无窗口)' {
         @{ Name='scanning'; Lang='zh'; Panel='ScanningPanel'; Stage=2; Title='正在看清现实'; Subtitle='只展示真实阶段，不伪造完成百分比。' }
         @{ Name='results'; Lang='zh'; Panel='ResultsPanel'; Stage=3; Title='扫描结论'; Subtitle='可处理项与观察项分开显示，目前尚未修改系统。' }
         @{ Name='review'; Lang='zh'; Panel='ReviewPanel'; Stage=3; Title='确认处理边界'; Subtitle='只有安全、已测试且窄匹配命中的项目可以选择。' }
-        @{ Name='executing'; Lang='zh'; Panel='ExecutingPanel'; Stage=3; Title='鼠鼠正在谨慎整理'; Subtitle='每项都会重新验证、备份并记录结果。' }
+        @{ Name='executing'; Lang='zh'; Panel='ExecutingPanel'; Stage=3; Title='鼠鼠正在谨慎整理'; Subtitle='每项都会重新验证；持久设置先备份，并记录结果。' }
         @{ Name='completed'; Lang='zh'; Panel='CompletedPanel'; Stage=4; Title='幻想落地'; Subtitle='结果按成功、失败和跳过逐项展示。' }
         @{ Name='error'; Lang='zh'; Panel='ErrorPanel'; Stage=1; Title='鼠鼠的幻想被打断了'; Subtitle='查看真实原因后可以安全重试。' }
         @{ Name='idle'; Lang='en'; Panel='IdlePanel'; Stage=1; Title='The fantasy begins'; Subtitle='Start with a read-only scan. No system settings will change.' }
         @{ Name='scanning'; Lang='en'; Panel='ScanningPanel'; Stage=2; Title='Looking at reality'; Subtitle='Showing real scan phases without a fabricated percentage.' }
         @{ Name='results'; Lang='en'; Panel='ResultsPanel'; Stage=3; Title='Scan result'; Subtitle='Safe actions and observations are separated. Nothing has changed yet.' }
         @{ Name='review'; Lang='en'; Panel='ReviewPanel'; Stage=3; Title='Review the safety boundary'; Subtitle='Only tested items produced by narrow matches can be selected.' }
-        @{ Name='executing'; Lang='en'; Panel='ExecutingPanel'; Stage=3; Title='Cleaning carefully'; Subtitle='Every item is revalidated, backed up, and recorded.' }
+        @{ Name='executing'; Lang='en'; Panel='ExecutingPanel'; Stage=3; Title='Cleaning carefully'; Subtitle='Every item is revalidated; persistent changes are backed up and results are recorded.' }
         @{ Name='completed'; Lang='en'; Panel='CompletedPanel'; Stage=4; Title='Fantasy delivered'; Subtitle='Success, failure, and skipped results are shown item by item.' }
         @{ Name='error'; Lang='en'; Panel='ErrorPanel'; Stage=1; Title='The fantasy was interrupted'; Subtitle='Read the real cause, then retry safely.' }
     ) {
@@ -2126,6 +2126,16 @@ Describe '勾选视图 (v1.5.5)' {
         $script:Win.FindName('BtnExecute').IsEnabled | Should -BeTrue
     }
 
+    It 'uses the core identity key for the manual-impact confirmation digest' {
+        $source = Get-Content (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw -Encoding UTF8
+        $source | Should -Not -Match 'function\s+Get-PendingIdentityKey'
+
+        $pending = New-GuiHRWSCCtrlPendingFixture
+        $key = Get-PendingIdentityKey $pending.actions[0]
+        $key | Should -Match '"service_binary_path":"C:\\\\Program Files\\\\Lenovo Security Center\\\\wsctrl11\.exe"'
+        $key | Should -Match '"process_start_time_utc":"2026-08-24T01:02:03\.0000000Z"'
+    }
+
     It 'HRWSCCtrl identity fallback is a nonselectable observation with the exact rescan reason' {
         $safeReason = '受保护扫描没有提供完整服务进程身份，请重新扫描。'
         $repositoryDiagnostics = Join-Path $script:GuiRoot 'diagnostics'
@@ -2997,6 +3007,8 @@ Describe '勾选视图 (v1.5.5)' {
             }
 
             $result | Should -BeFalse
+            $script:CapturedImpactText | Should -Match '必要性：按需处理'
+            $script:CapturedImpactText | Should -Not -Match '必要性：optional'
             $script:CapturedImpactText | Should -Match '只结束当前实例'
             $script:CapturedImpactText | Should -Match '不创建备份或恢复包'
             $script:CapturedImpactText | Should -Match '无法通过.*恢复.*撤销'

@@ -28,7 +28,7 @@ $script:I18N = @{
     'zh' = @{
         AppName='鼠鼠 Cleaner'; SubTitle='识别可以宽，执行必须窄'; Privilege='普通权限'; Hint0='图形界面只是壳，核心逻辑与命令行版一致'
         Stage1='1 轻盈幻想'; Stage2='2 看清现实'; Stage3='3 谨慎整理'; Stage4='4 幻想落地'
-        IdleBody='扫描只读，不会修改系统。'; ResultsNoMutation='目前尚未修改任何内容。'; ExecutingBody='正在逐项处理；每项均会备份并复核。'
+        IdleBody='扫描只读，不会修改系统。'; ResultsNoMutation='目前尚未修改任何内容。'; ExecutingBody='正在逐项处理；持久设置先备份，每项均会复核。'
         BtnStartScan='开始安全扫描'; BtnOpenReview='查看处理建议'; BtnSkipReview='这次先不处理'; BtnExecute='处理已选择项目'; BtnRescan='重新扫描'; BtnRetry='重试'
         ResultStatus='扫描完成，发现需要关注的项目'; ResultStatusEmpty='扫描完成，未发现匹配项'; ResultStatusDegraded='扫描完成，但扫描信息不完整'; ResultHeadlinePrefix='抓到 '; ResultHeadlineSuffix=' 个偷偷常驻的后台'; ResultHeadlineEmpty='这次没有抓到偷偷常驻的后台'; ResultHeadlineDegraded='部分信息使用兼容方式读取，暂不能判断电脑是否干净'; ResultsEvidence='专业证据与服务名称（点击展开）'; ResultsEvidenceEmpty='没有可展示的匹配证据。'; ScanResultDegradedSuffix='；部分分类使用兼容采集'
         SelectAll='选择全部安全项'; ClearAll='清空选择'; ReviewBoundary='观察项不会自动执行；执行前将再次验证。'; SuspiciousBoundary='可疑进程：只结束本次进程，不删除文件或关闭自启。'; SuspiciousHint='默认不勾选；执行前会复核 PID、名称、路径和启动时间。'; BtnStopProcesses='一次性结束已选进程'; TechnicalDetails='技术详情'; ErrorDetails='查看技术详情'
@@ -39,7 +39,7 @@ $script:I18N = @{
         ScanRequestingInventory='正在请求管理员只读授权'; ScanCollectingInventory='正在读取完整服务和计划任务'; ScanValidatingInventory='正在验证受保护扫描结果'; ScanLimitedWarning='计划任务和完整服务信息未检查，本次结果不能判断电脑是否干净。'; ScanInventoryReadonly='只读取服务和计划任务，不会修改系统设置。'; ScanInventoryFailed='管理员只读采集失败'; ScanInventoryTimeout='管理员只读采集超过 180 秒；进程状态确认前将保持安全锁定。'
         ReviewErrorSummary='待处理清单已过期，必须重新扫描。'; ReviewNoMutation='没有执行任何系统修改。'
         BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
-        ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='每个动作自动备份、执行后自动验证。会弹管理员确认窗口，点【是】。'
+        ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='持久设置会先备份；当前实例类不创建恢复包；每项执行后复核。会弹管理员确认窗口，点【是】。'
         BtnExec='处理已勾选项目（需要管理员）'; ExecEmpty='请先勾选要处理的项目（【2. 处理建议】页勾选）。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
         ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2} / manual {3}'; ExecPartialFailed='部分项目失败。'; ExecCloseBlocked='管理员处理仍在启动、运行或状态未知，暂不能关闭窗口。'; ExecStatusUnknown='管理员进程状态未知'
         ExecUnauthorized='未授权、未开始处理。'; ExecNotStarted='管理员授权未完成，未开始处理，系统设置没有变化。'; ExecPartialPossible='执行进程异常结束，可能已有部分动作执行。'; ExecResultReadFailed='无法完整读取逐项结果。'
@@ -50,7 +50,7 @@ $script:I18N = @{
         State_scanning_Title='正在看清现实'; State_scanning_Sub='只展示真实阶段，不伪造完成百分比。'
         State_results_Title='扫描结论'; State_results_Sub='可处理项与观察项分开显示，目前尚未修改系统。'
         State_review_Title='确认处理边界'; State_review_Sub='只有安全、已测试且窄匹配命中的项目可以选择。'
-        State_executing_Title='鼠鼠正在谨慎整理'; State_executing_Sub='每项都会重新验证、备份并记录结果。'
+        State_executing_Title='鼠鼠正在谨慎整理'; State_executing_Sub='每项都会重新验证；持久设置先备份，并记录结果。'
         State_completed_Title='幻想落地'; State_completed_Sub='结果按成功、失败和跳过逐项展示。'
         State_error_Title='鼠鼠的幻想被打断了'; State_error_Sub='查看真实原因后可以安全重试。'
         LangLabel='EN'
@@ -58,7 +58,7 @@ $script:I18N = @{
     'en' = @{
         AppName='Shushu Cleaner'; SubTitle='Detection may be broad; execution must be narrow'; Privilege='Standard privileges'; Hint0='GUI is a shell; core logic is identical to CLI'
         Stage1='1 Light fantasy'; Stage2='2 Face reality'; Stage3='3 Tidy carefully'; Stage4='4 Fantasy delivered'
-        IdleBody='Scanning is read-only and changes no system settings.'; ResultsNoMutation='Nothing has been changed yet.'; ExecutingBody='Processing item by item; each action is backed up and verified.'
+        IdleBody='Scanning is read-only and changes no system settings.'; ResultsNoMutation='Nothing has been changed yet.'; ExecutingBody='Processing item by item; persistent changes are backed up and every action is verified.'
         BtnStartScan='Start safe scan'; BtnOpenReview='Review recommendations'; BtnSkipReview='Not this time'; BtnExecute='Process selected items'; BtnRescan='Scan again'; BtnRetry='Retry'
         ResultStatus='Scan complete — items need attention'; ResultStatusEmpty='Scan complete — no matching items found'; ResultStatusDegraded='Scan complete, but some scan information is incomplete'; ResultHeadlinePrefix='Found '; ResultHeadlineSuffix=' resident background items'; ResultHeadlineEmpty='No resident background items found this time'; ResultHeadlineDegraded='Compatibility collection was used; this scan cannot declare the PC clean'; ResultsEvidence='Evidence and service names (expand)'; ResultsEvidenceEmpty='No matcher evidence to display.'; ScanResultDegradedSuffix='; some categories used compatibility collection'
         SelectAll='Select all safe items'; ClearAll='Clear selection'; ReviewBoundary='Observation items never run automatically; every action is revalidated.'; SuspiciousBoundary='Suspicious processes: stop this instance only; do not delete files or disable startup.'; SuspiciousHint='Unchecked by default; PID, name, path, and start time are revalidated.'; BtnStopProcesses='Stop selected once'; TechnicalDetails='Technical details'; ErrorDetails='View technical details'
@@ -69,7 +69,7 @@ $script:I18N = @{
         ScanRequestingInventory='Requesting administrator read-only access'; ScanCollectingInventory='Reading the complete service and scheduled-task inventory'; ScanValidatingInventory='Validating the protected scan result'; ScanLimitedWarning='Scheduled tasks and complete service information were not checked; this scan cannot declare the PC clean.'; ScanInventoryReadonly='This reads services and scheduled tasks only and changes no system settings.'; ScanInventoryFailed='Administrator read-only inventory failed'; ScanInventoryTimeout='Administrator read-only inventory exceeded 180 seconds; safety lock remains until process state is confirmed.'
         ReviewErrorSummary='The pending review is stale and must be rescanned.'; ReviewNoMutation='No system settings were changed.'
         BtnLoad='Load Pending Items'; PendingHint='Risk & evidence shown; check items to process (unverified = observe only, unchecked)'; PendingNone='No pending items — run Scan first (or all done)'; PendingCount='{0} item(s) pending. Check items, then go to tab 3.'
-        ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Every action is backed up and verified. UAC popup: click YES.'
+        ExecInfo1='Check items in tab 2, then process them here.'; ExecInfo2='Persistent changes are backed up; current-instance actions create no restore package; every action is verified. UAC popup: click YES.'
         BtnExec='Process Checked Items (admin)'; ExecEmpty='Check items first (tab 2).'; ExecStart='Processing {0} item(s). UAC requested, click YES…'; ExecDone='Processing done. See tab 4 (restart PC recommended).'
         ExecFailed='Execution failed: ExitCode={0} (cancelled or error)'; ExecDoneSum='Done: success {0} / failed {1} / skipped {2} / manual {3}'; ExecPartialFailed='Some items failed.'; ExecCloseBlocked='The elevated operation is starting, running, or has unknown status. Keep this window open.'; ExecStatusUnknown='Elevated process status is unknown'
         ExecUnauthorized='Not authorized; processing did not start.'; ExecNotStarted='Administrator authorization was not completed. Processing did not start and no system settings changed.'; ExecPartialPossible='The execution process ended abnormally; some actions may already have run.'; ExecResultReadFailed='The per-item result could not be read completely.'
@@ -80,7 +80,7 @@ $script:I18N = @{
         State_scanning_Title='Looking at reality'; State_scanning_Sub='Showing real scan phases without a fabricated percentage.'
         State_results_Title='Scan result'; State_results_Sub='Safe actions and observations are separated. Nothing has changed yet.'
         State_review_Title='Review the safety boundary'; State_review_Sub='Only tested items produced by narrow matches can be selected.'
-        State_executing_Title='Cleaning carefully'; State_executing_Sub='Every item is revalidated, backed up, and recorded.'
+        State_executing_Title='Cleaning carefully'; State_executing_Sub='Every item is revalidated; persistent changes are backed up and results are recorded.'
         State_completed_Title='Fantasy delivered'; State_completed_Sub='Success, failure, and skipped results are shown item by item.'
         State_error_Title='The fantasy was interrupted'; State_error_Sub='Read the real cause, then retry safely.'
         LangLabel='中文'
@@ -432,28 +432,6 @@ function Get-PendingItems {
     $p = Read-GuiPendingFile -Path $pf
     if (-not $p.actions) { return @() }
     return @($p.actions)
-}
-
-function Get-PendingIdentityKey($Item) {
-    $identity = [ordered]@{
-        id                   = $Item.id
-        hit_type             = $Item.hit_type
-        action               = $Item.action
-        service_name         = $Item.service_name
-        service_display_name = $Item.service_display_name
-        autostart_source     = $Item.autostart_source
-        autostart_name       = $Item.autostart_name
-        autostart_value      = $Item.autostart_value
-        task_name            = $Item.task_name
-        task_path            = $Item.task_path
-        process_name         = $Item.process_name
-        process_id           = $Item.process_id
-        process_path         = $Item.process_path
-        matched_pattern      = $Item.matched_pattern
-        matched_type         = $Item.matched_type
-        matched_field        = $Item.matched_field
-    }
-    return ConvertTo-Json -InputObject $identity -Compress -Depth 4
 }
 
 function Copy-PendingActionForSubset($RawAction) {
@@ -1997,7 +1975,7 @@ function Confirm-GuiImpactActions {
                 $lines += 'Impact: ' + $action.impact_cn
             } else {
                 $lines += '目标：' + $action.name_cn
-                $lines += '必要性：' + $action.necessity
+                $lines += '必要性：' + (Get-GuiNecessityText $action.necessity)
                 $lines += '清理原因：' + $action.cleanup_reason_cn
                 $lines += '影响：' + $action.impact_cn
             }
