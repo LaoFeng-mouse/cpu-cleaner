@@ -1086,6 +1086,27 @@ Describe '勾选视图 (v1.5.5)' {
             }
         }
 
+        function New-GuiOfficialUninstallerPendingFixture {
+            $action = [pscustomobject][ordered]@{
+                id='lenovo-hrwscctrl'; vendor='Lenovo'; name_cn='联想安全中心组件 HRWSCCtrl'
+                hit_type='service'; action='open_official_uninstaller'; status='pending'; detail='HRWSCCtrl'; reason_cn='官方卸载 handoff'
+                service_name='HRWSCCtrl'; matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+                execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                impact_cn='可能移除联想电脑管家的安全、防护、通知和相关后台组件'
+                cleanup_reason_cn='Windows 受保护服务阻止普通管理员实时停止；不需要联想电脑管家时可按需打开联想官方卸载程序'
+                launch_protected_status='complete'; launch_protected_level=[int]3; uninstall_evidence_status='complete'
+                uninstall_registry_path='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+                uninstall_display_name='联想电脑管家'; uninstall_publisher='联想（北京）有限公司'; uninstall_display_version='5.1.0'
+                uninstall_install_location='C:\Program Files\Lenovo\PCManager'
+                uninstall_string='"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+                uninstall_executable_path='C:\Program Files\Lenovo\PCManager\uninst.exe'
+            }
+            return [pscustomobject]@{
+                pending_schema_version=[int64]3; generated='trusted inventory handoff'
+                actions=[object[]]@($action); resolved=[object[]]@(); observations=[object[]]@(); suspicious=[object[]]@()
+            }
+        }
+
         function New-GuiFourGroupPendingFixture {
             $pending = New-GuiReviewPendingFixture
             $manual = $pending.actions[0].PSObject.Copy()
@@ -2124,6 +2145,49 @@ Describe '勾选视图 (v1.5.5)' {
 
         $row.IsChecked | Should -BeTrue
         $script:Win.FindName('BtnExecute').IsEnabled | Should -BeTrue
+    }
+
+    It 'official-uninstaller reviewed allowlist subset digest and selection preserve the exact unchecked handoff' {
+        $pending = New-GuiOfficialUninstallerPendingFixture
+        $fixture = Set-GuiReviewedPendingFixture -Pending $pending
+        $row = $fixture.List.Items[0]
+        $expected = $pending.actions[0]
+        $boundFields = @(
+            'launch_protected_status','launch_protected_level','uninstall_evidence_status','uninstall_registry_path',
+            'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
+            'uninstall_string','uninstall_executable_path'
+        )
+
+        $row.CanExecute | Should -BeTrue
+        $row.NeedsConfirmation | Should -BeTrue
+        $row.IsChecked | Should -BeFalse
+        $script:ReviewedActionIdentityKeys.Contains((Get-PendingIdentityKey $expected)) | Should -BeTrue
+        Set-AllChecked $fixture.List $true
+        $row.IsChecked | Should -BeFalse
+
+        $row.IsChecked = $true
+        $resolved = @(Resolve-GuiReviewedActions -List $fixture.List)
+        $resolved.Count | Should -Be 1
+        [object]::ReferenceEquals($resolved[0]._raw, $expected) | Should -BeTrue
+        $subset = New-PendingSubsetPayload -Checked $resolved -SourcePending $pending
+        Get-PendingIdentityKey $subset.actions[0] | Should -BeExactly (Get-PendingIdentityKey $expected)
+        Get-ManualImpactDigest @($subset.actions[0]) | Should -BeExactly (Get-ManualImpactDigest @($expected))
+        foreach ($field in $boundFields) {
+            $subset.actions[0].$field | Should -BeExactly $expected.$field -Because "$field must survive reviewed subset copying"
+        }
+        $subset.actions[0].PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+    }
+
+    It 'official-uninstaller malformed evidence or internal marker cannot enter the reviewed allowlist' -TestCases @(
+        @{ Label='malformed'; Mutate={ param($a) $a.uninstall_string='"C:\Program Files\Lenovo\PCManager\uninst.exe" /S' } }
+        @{ Label='marker'; Mutate={ param($a) $a | Add-Member -NotePropertyName ProcessIdentitySource -NotePropertyValue 'trusted_inventory_v3' } }
+    ) {
+        param($Label, $Mutate)
+        $pending = New-GuiOfficialUninstallerPendingFixture
+        & $Mutate $pending.actions[0]
+
+        { Assert-GuiPendingPresentationShape -Pending $pending } | Should -Throw -Because $Label
+        { Get-GuiValidatedActionIdentityKeys -Pending $pending } | Should -Throw -Because $Label
     }
 
     It 'uses the core identity key for the manual-impact confirmation digest' {

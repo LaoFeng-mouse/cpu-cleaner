@@ -778,6 +778,9 @@ function Assert-GuiPendingPresentationRow {
         throw "pending review shape invalid: $context.observation must be non-executable and unchecked."
     }
     if ($Branch -eq 'actions') {
+        if ($Item.action -ceq 'open_official_uninstaller' -and -not (Test-OfficialUninstallerActionShape $Item)) {
+            throw "pending review shape invalid: $context official uninstaller handoff is invalid."
+        }
         $status = Get-GuiReviewScalarString -Item $Item -PropertyName 'status' -Context $context
         if ($status -cnotin @('pending','failed','success','skipped','manual_required')) {
             throw "pending review shape invalid: $context.status must be an exact known status."
@@ -847,7 +850,7 @@ function Assert-GuiPendingPresentationShape {
 
 function Get-GuiValidatedActionIdentityKeys {
     param([Parameter(Mandatory=$true)]$Pending)
-    $null = Assert-GuiPendingEnvelopeShape $Pending
+    Assert-GuiPendingPresentationShape -Pending $Pending
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     $selectableKeys = [System.Collections.Generic.List[string]]::new()
     foreach ($action in @($Pending.actions)) {

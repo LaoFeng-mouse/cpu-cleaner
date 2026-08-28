@@ -43,7 +43,7 @@ function Test-ActionMatchesHitType($Action, $HitType) {
         return @('service','process','autostart','task') -ccontains $HitType
     }
     switch -CaseSensitive ($HitType) {
-        'service'   { return @('disable_service','stop_service_runtime') -ccontains $Action }
+        'service'   { return @('disable_service','stop_service_runtime','open_official_uninstaller') -ccontains $Action }
         'autostart' { return $Action -ceq 'remove_autostart' }
         'task'      { return $Action -ceq 'disable_task' }
         default     { return $false }
@@ -536,6 +536,106 @@ function Test-ServiceProcessActionShape($Action) {
     return $Action.safe -is [bool] -and $Action.safe -eq $false -and
         $null -ne $policy -and $policy.execution_class -ceq 'manual_impact' -and
         $policy.default_selected -eq $false -and $policy.requires_confirmation -eq $true
+}
+
+function Get-ExactPendingProperty($Object, [string]$PropertyName) {
+    if ($null -eq $Object) { return $null }
+    foreach ($property in $Object.PSObject.Properties) {
+        if ([string]::Equals($property.Name, $PropertyName, [System.StringComparison]::Ordinal)) {
+            return $property
+        }
+    }
+    return $null
+}
+
+function Test-PendingBoundedCleanString($Value, [bool]$AllowEmpty = $false) {
+    if ($Value -isnot [string] -or $Value.Length -gt 32767 -or $Value -cne $Value.Trim()) { return $false }
+    if (-not $AllowEmpty -and $Value.Length -eq 0) { return $false }
+    return ($Value -cnotmatch '[\x00-\x1F\x7F-\x9F]')
+}
+
+function Test-PendingOfficialUninstallEvidenceSemantics($Action) {
+    foreach ($name in @(
+        'uninstall_registry_path','uninstall_display_name','uninstall_publisher','uninstall_install_location',
+        'uninstall_string','uninstall_executable_path'
+    )) {
+        if (-not (Test-PendingBoundedCleanString $Action.$name)) { return $false }
+    }
+    if (-not (Test-PendingBoundedCleanString $Action.uninstall_display_version -AllowEmpty $true)) { return $false }
+    if (-not (Test-LenovoOfficialUninstallRegistryPath -RegistryPath $Action.uninstall_registry_path)) { return $false }
+    $displayNameAllowed = $false
+    foreach ($prefix in $script:LenovoOfficialUninstallDisplayNamePrefixes) {
+        if ($Action.uninstall_display_name.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+            $displayNameAllowed = $true
+            break
+        }
+    }
+    if (-not $displayNameAllowed -or -not ($script:LenovoOfficialUninstallPublishers -ccontains $Action.uninstall_publisher)) {
+        return $false
+    }
+    $installLocation = $Action.uninstall_install_location
+    if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $installLocation)) { return $false }
+    try { $canonicalInstallLocation = [System.IO.Path]::GetFullPath($installLocation) } catch { return $false }
+    if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $canonicalInstallLocation) -or
+        -not $installLocation.Equals($canonicalInstallLocation, [System.StringComparison]::Ordinal) -or
+        $canonicalInstallLocation.Equals([System.IO.Path]::GetPathRoot($canonicalInstallLocation), [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $rawExecutablePath = if ($Action.uninstall_string -cmatch '^"([^"\r\n]+\.exe)"$') { $matches[1] }
+        elseif ($Action.uninstall_string -cmatch '^([^"\r\n]+\.exe)$') { $matches[1] }
+        else { $null }
+    if ($rawExecutablePath -isnot [string]) { return $false }
+    try { $canonicalRawExecutablePath = [System.IO.Path]::GetFullPath($rawExecutablePath) } catch { return $false }
+    if (-not $rawExecutablePath.Equals($canonicalRawExecutablePath, [System.StringComparison]::Ordinal)) { return $false }
+    $parsedExecutablePath = ConvertFrom-StrictOfficialUninstallString -Command $Action.uninstall_string
+    if ($parsedExecutablePath -isnot [string] -or
+        -not $Action.uninstall_executable_path.Equals($parsedExecutablePath, [System.StringComparison]::Ordinal)) {
+        return $false
+    }
+    $installBoundary = $canonicalInstallLocation.TrimEnd('\') + '\'
+    return $parsedExecutablePath.StartsWith($installBoundary, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-OfficialUninstallerActionShape($Action) {
+    if ($null -eq $Action) { return $false }
+    foreach ($property in $Action.PSObject.Properties) {
+        if ([string]::Equals($property.Name, 'ProcessIdentitySource', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+    foreach ($name in @(
+        'action','hit_type','matched_pattern','matched_type','matched_field','service_name',
+        'execution_class','necessity','impact_cn','cleanup_reason_cn','launch_protected_status',
+        'uninstall_evidence_status','uninstall_registry_path','uninstall_display_name','uninstall_publisher',
+        'uninstall_display_version','uninstall_install_location','uninstall_string','uninstall_executable_path'
+    )) {
+        $property = Get-ExactPendingProperty $Action $name
+        if ($null -eq $property -or $property.Value -isnot [string]) { return $false }
+    }
+    foreach ($name in @('safe','default_selected','requires_confirmation')) {
+        $property = Get-ExactPendingProperty $Action $name
+        if ($null -eq $property -or $property.Value -isnot [bool]) { return $false }
+    }
+    if ($Action.action -cne 'open_official_uninstaller' -or
+        $Action.hit_type -cne 'service' -or
+        $Action.matched_pattern -cne 'HRWSCCtrl' -or
+        $Action.matched_type -cne 'exact' -or
+        $Action.matched_field -cne 'service_name' -or
+        -not (Test-HitMatcherEvidenceShape $Action -AllowedMatchTypes @('exact')) -or
+        -not [string]::Equals($Action.service_name, 'HRWSCCtrl', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $Action.safe -ne $false -or
+        $Action.execution_class -cne 'manual_impact' -or $Action.necessity -cne 'optional' -or
+        $Action.default_selected -ne $false -or $Action.requires_confirmation -ne $true -or
+        [string]::IsNullOrWhiteSpace($Action.impact_cn) -or [string]::IsNullOrWhiteSpace($Action.cleanup_reason_cn) -or
+        $Action.launch_protected_status -cne 'complete' -or
+        $Action.uninstall_evidence_status -cne 'complete') {
+        return $false
+    }
+    $levelProperty = Get-ExactPendingProperty $Action 'launch_protected_level'
+    if ($null -eq $levelProperty -or -not (Test-ProfileStrictInteger $levelProperty.Value) -or [int64]$levelProperty.Value -ne 3) {
+        return $false
+    }
+    return Test-PendingOfficialUninstallEvidenceSemantics $Action
 }
 
 function Test-PendingEnvelopeShape($Pending) {
@@ -1060,6 +1160,16 @@ function Get-PendingIdentityKey($Item) {
         $identity | Add-Member NoteProperty service_binary_path $Item.service_binary_path
         $identity | Add-Member NoteProperty process_start_time_utc $Item.process_start_time_utc
     }
+    if ($Item.action -ceq 'open_official_uninstaller') {
+        foreach ($name in @(
+            'launch_protected_status','launch_protected_level','uninstall_evidence_status','uninstall_registry_path',
+            'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
+            'uninstall_string','uninstall_executable_path'
+        )) {
+            $property = Get-ExactPendingProperty $Item $name
+            $identity | Add-Member NoteProperty $name $(if ($null -eq $property) { $null } else { $property.Value })
+        }
+    }
     return ConvertTo-Json -InputObject $identity -Compress -Depth 4
 }
 
@@ -1085,6 +1195,7 @@ function Test-ManualImpactDigestActionShape($Action) {
     switch -CaseSensitive ($Action.hit_type) {
         'service' {
             if ($Action.action -ceq 'stop_service_runtime') { return Test-ServiceProcessActionShape $Action }
+            if ($Action.action -ceq 'open_official_uninstaller') { return Test-OfficialUninstallerActionShape $Action }
             return $null -ne (Get-StrictNonBlankStringProperty $Action 'service_name')
         }
         'autostart' {
@@ -1280,6 +1391,16 @@ function New-PendingPersistedHit($Hit, $Policy, [string]$Status = '', [string]$C
         impact_cn            = $Policy.impact_cn
         cleanup_reason_cn    = $Policy.cleanup_reason_cn
     }
+    if ((Get-PendingHitProperty $Hit 'action') -ceq 'open_official_uninstaller' -and
+        (Test-OfficialUninstallerActionShape $Hit)) {
+        foreach ($name in @(
+            'launch_protected_status','launch_protected_level','uninstall_evidence_status','uninstall_registry_path',
+            'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
+            'uninstall_string','uninstall_executable_path'
+        )) {
+            $item[$name] = (Get-ExactPendingProperty $Hit $name).Value
+        }
+    }
     if (-not [string]::IsNullOrEmpty($Status)) { $item.status = $Status }
     if (-not [string]::IsNullOrEmpty($CurrentState)) { $item.current_state = $CurrentState }
     return [pscustomobject]$item
@@ -1361,6 +1482,9 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             $categoryComplete
         if ($executable -and $h.action -ceq 'stop_service_runtime') {
             $executable = Test-ServiceProcessActionShape $h
+        }
+        if ($executable -and $h.action -ceq 'open_official_uninstaller') {
+            $executable = Test-OfficialUninstallerActionShape $h
         }
 
         # observations 保持 rule/action/provenance 身份，防止宽匹配观察压制同目标的窄匹配动作。
@@ -1470,6 +1594,7 @@ function Test-PendingActionEligible($p, $profiles) {
     if ($p.action -cnotin $script:DangerousActions) { return $false }
     if (-not (Test-HitMatcherEvidenceShape $p)) { return $false }
     if ($p.action -ceq 'stop_service_runtime' -and -not (Test-ServiceProcessActionShape $p)) { return $false }
+    if ($p.action -ceq 'open_official_uninstaller' -and -not (Test-OfficialUninstallerActionShape $p)) { return $false }
 
     if ($profiles.PSObject.Properties.Name -notcontains 'profiles') { return $false }
     $rules = @($profiles.profiles | Where-Object {
@@ -3160,6 +3285,12 @@ function Invoke-Clean {
                     if ($taskResult.status -eq 'success') { Write-Host "  验证通过: 已禁用计划任务: $($p.task_path) (备份: $($taskResult.backup))" -ForegroundColor Green }
                     elseif ($taskResult.status -eq 'skipped') { Write-Host "  跳过: $($taskResult.result_reason)" -ForegroundColor DarkYellow }
                     else { Write-Host "  失败: $($taskResult.result_reason)" -ForegroundColor Red }
+                }
+                'open_official_uninstaller' {
+                    Write-Host '  跳过: 该动作只能返回 GUI 完成人工确认并打开官方卸载程序。' -ForegroundColor DarkYellow
+                    Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
+                        status='skipped'; result_reason='需要返回 GUI 完成人工确认并打开官方卸载程序'; failure_stage=''
+                    })
                 }
                 'uninstall' {
                     Write-Host '  uninstall 动作需要人工确认, 请到 设置 -> 应用 -> 已安装的应用 手动卸载。' -ForegroundColor Yellow

@@ -493,7 +493,7 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
     BeforeEach {
         $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
         $script:Root = $projectRoot
-        foreach ($file in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
+        foreach ($file in @('Utils','ProtectedServiceHandoff','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
             . (Join-Path $projectRoot ('src\Core\' + $file + '.ps1'))
         }
         function Is-Admin { return $false }
@@ -516,6 +516,22 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
                 matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
                 execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
                 impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
+            }
+        }
+        function New-OfficialUninstallerCleanAction {
+            return [pscustomobject][ordered]@{
+                id='lenovo-hrwscctrl'; name_cn='HRWSCCtrl'; detail='HRWSCCtrl'; reason_cn='official handoff'
+                hit_type='service'; action='open_official_uninstaller'; status='pending'; service_name='HRWSCCtrl'
+                matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+                execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                impact_cn='可能移除联想电脑管家的安全、防护、通知和相关后台组件'
+                cleanup_reason_cn='Windows 受保护服务阻止普通管理员实时停止；不需要联想电脑管家时可按需打开联想官方卸载程序'
+                launch_protected_status='complete'; launch_protected_level=[int]3; uninstall_evidence_status='complete'
+                uninstall_registry_path='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+                uninstall_display_name='联想电脑管家'; uninstall_publisher='联想（北京）有限公司'; uninstall_display_version='5.1.0'
+                uninstall_install_location='C:\Program Files\Lenovo\PCManager'
+                uninstall_string='"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+                uninstall_executable_path='C:\Program Files\Lenovo\PCManager\uninst.exe'
             }
         }
         function Write-CleanExitPending([string]$Name, $Actions) {
@@ -776,6 +792,43 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         $saved.actions[1].failure_stage | Should -BeOfType [string]
         $saved.actions[1].failure_stage | Should -BeNullOrEmpty
         Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+    }
+
+    It 'CLI clean always skips an authorized official-uninstaller handoff without launch backup or mutation' {
+        $action = New-OfficialUninstallerCleanAction
+        $path = Write-CleanExitPending 'official-uninstaller-cli-skip.json' @($action)
+        $oldPendingFile = $script:PendingFile
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $script:ConfirmedImpactSha256 = Get-ManualImpactDigest @($action)
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Start-Process { throw 'CLI clean must never launch the official uninstaller' }
+        Mock Initialize-ProtectedBackupDirectory { throw 'official handoff must not create a backup' }
+        Mock Invoke-ServiceDisableAction { throw 'official handoff must not mutate a service' }
+        Mock Invoke-ServiceProcessStopAction { throw 'official handoff must not stop a service runtime' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        $saved.actions[0].result_reason | Should -Match 'GUI|界面'
+        $saved.actions[0].result_reason | Should -Match '确认|打开'
+        $saved.actions[0].result_reason | Should -Not -Match 'C:\\|token|secret|Start-Process'
+        Should -Invoke Start-Process -Times 0 -Exactly
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceProcessStopAction -Times 0 -Exactly
     }
 
     It 'persists authorization rejection and final identity drift as skipped metadata' -TestCases @(
