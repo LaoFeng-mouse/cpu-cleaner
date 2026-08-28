@@ -15,6 +15,17 @@ $script:LenovoOfficialUninstallPublishers = @(
     '联想(北京)有限公司',
     'Lenovo (Beijing) Limited'
 )
+$script:LenovoUninstallerValidationCodes = @(
+    'reviewed_action_invalid',
+    'registry_revalidation_failed',
+    'registry_binding_changed',
+    'file_revalidation_failed',
+    'signature_invalid',
+    'signer_certificate_missing',
+    'signer_organization_invalid',
+    'file_identity_changed',
+    'security_revalidation_failed'
+)
 
 # 初始化只读 SCM LaunchProtected 查询接口；重复调用不会重复定义类型。
 function Initialize-ServiceProtectionNativeApi {
@@ -356,5 +367,452 @@ function Get-LenovoOfficialUninstallEvidence {
     }
     catch {
         return $unavailable
+    }
+}
+
+# 构造严格且净化后的启动前验证结果；拒绝任意非白名单代码或字段组合。
+function ConvertTo-LenovoUninstallerValidationResult {
+    param(
+        [ValidateSet('validated','skipped')][string]$Status,
+        [string]$ExecutablePath = '',
+        [string]$Code = ''
+    )
+
+    if ($Status -ceq 'validated') {
+        if ([string]::IsNullOrEmpty($ExecutablePath) -or $Code.Length -ne 0) { throw 'Invalid validated result.' }
+    }
+    elseif ($ExecutablePath.Length -ne 0 -or $script:LenovoUninstallerValidationCodes -cnotcontains $Code) {
+        throw 'Invalid skipped result.'
+    }
+    return [pscustomobject][ordered]@{
+        Status = $Status
+        ExecutablePath = $ExecutablePath
+        Code = $Code
+    }
+}
+
+# 初始化稳定文件身份读取所需的 Win32 API；重复调用保持幂等。
+function Initialize-LenovoUninstallerFileNativeApi {
+    $typeName = 'ShushuCleaner.LenovoUninstallerFileNativeV1'
+    if ($null -ne ($typeName -as [type])) { return }
+
+    $source = @'
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace ShushuCleaner {
+    public sealed class LenovoUninstallerFileSnapshotV1 {
+        public UInt32 VolumeSerialNumber { get; set; }
+        public UInt32 FileIndexHigh { get; set; }
+        public UInt32 FileIndexLow { get; set; }
+        public UInt32 NumberOfLinks { get; set; }
+        public Int64 Length { get; set; }
+        public DateTime LastWriteTimeUtc { get; set; }
+        public string FinalPath { get; set; }
+        public string Sha256 { get; set; }
+    }
+
+    public static class LenovoUninstallerFileNativeV1 {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FILETIME_NATIVE { public UInt32 Low; public UInt32 High; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BY_HANDLE_FILE_INFORMATION {
+            public UInt32 FileAttributes;
+            public FILETIME_NATIVE CreationTime;
+            public FILETIME_NATIVE LastAccessTime;
+            public FILETIME_NATIVE LastWriteTime;
+            public UInt32 VolumeSerialNumber;
+            public UInt32 FileSizeHigh;
+            public UInt32 FileSizeLow;
+            public UInt32 NumberOfLinks;
+            public UInt32 FileIndexHigh;
+            public UInt32 FileIndexLow;
+        }
+
+        [DllImport("kernel32.dll", SetLastError=true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetFileInformationByHandle(
+            SafeFileHandle file, out BY_HANDLE_FILE_INFORMATION information);
+
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        private static extern UInt32 GetFinalPathNameByHandleW(
+            SafeFileHandle file, StringBuilder path, UInt32 pathLength, UInt32 flags);
+
+        private static string NormalizeFinalDosPath(SafeFileHandle handle) {
+            UInt32 capacity = 512;
+            for (int attempt = 0; attempt < 3; attempt++) {
+                StringBuilder buffer = new StringBuilder((int)capacity);
+                UInt32 length = GetFinalPathNameByHandleW(handle, buffer, capacity, 0);
+                if (length == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                if (length < capacity) {
+                    string result = buffer.ToString();
+                    if (result.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("UNC final paths are not allowed.");
+                    if (result.StartsWith(@"\\?\", StringComparison.Ordinal)) result = result.Substring(4);
+                    if (result.Length < 3 || !Char.IsLetter(result[0]) || result[1] != ':' || result[2] != '\\')
+                        throw new IOException("Final path is not a DOS drive path.");
+                    return Path.GetFullPath(result);
+                }
+                capacity = length + 1;
+            }
+            throw new IOException("Final path is unavailable.");
+        }
+
+        private static void RejectReparseComponents(string fullPath) {
+            string root = Path.GetPathRoot(fullPath);
+            if (String.IsNullOrEmpty(root)) throw new IOException("Path root is unavailable.");
+            string current = root;
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("A reparse component is not allowed.");
+            string remainder = fullPath.Substring(root.Length);
+            foreach (string component in remainder.Split(new char[] {'\\'}, StringSplitOptions.RemoveEmptyEntries)) {
+                current = Path.Combine(current, component);
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("A reparse component is not allowed.");
+            }
+        }
+
+        public static LenovoUninstallerFileSnapshotV1 Capture(string path) {
+            if (String.IsNullOrEmpty(path)) throw new ArgumentException("Path is required.", "path");
+            string fullPath = Path.GetFullPath(path);
+            if (fullPath.Length < 3 || !Char.IsLetter(fullPath[0]) || fullPath[1] != ':' || fullPath[2] != '\\')
+                throw new IOException("Only DOS drive paths are allowed.");
+            RejectReparseComponents(fullPath);
+            if ((File.GetAttributes(fullPath) & FileAttributes.Directory) != 0)
+                throw new IOException("Directories are not allowed.");
+
+            using (FileStream stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                BY_HANDLE_FILE_INFORMATION info;
+                if (!GetFileInformationByHandle(stream.SafeFileHandle, out info))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                if ((info.FileAttributes & (UInt32)FileAttributes.Directory) != 0)
+                    throw new IOException("Directories are not allowed.");
+                if ((info.FileAttributes & (UInt32)FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("Reparse files are not allowed.");
+                if (info.NumberOfLinks != 1) throw new IOException("File link count is not one.");
+
+                string finalPath = NormalizeFinalDosPath(stream.SafeFileHandle);
+                Int64 length = ((Int64)info.FileSizeHigh << 32) | info.FileSizeLow;
+                Int64 writeFileTime = ((Int64)info.LastWriteTime.High << 32) | info.LastWriteTime.Low;
+                stream.Position = 0;
+                byte[] digest;
+                using (SHA256 sha = SHA256.Create()) { digest = sha.ComputeHash(stream); }
+
+                return new LenovoUninstallerFileSnapshotV1 {
+                    VolumeSerialNumber = info.VolumeSerialNumber,
+                    FileIndexHigh = info.FileIndexHigh,
+                    FileIndexLow = info.FileIndexLow,
+                    NumberOfLinks = info.NumberOfLinks,
+                    Length = length,
+                    LastWriteTimeUtc = DateTime.FromFileTimeUtc(writeFileTime),
+                    FinalPath = finalPath,
+                    Sha256 = BitConverter.ToString(digest).Replace("-", String.Empty)
+                };
+            }
+        }
+    }
+}
+'@
+    try { Add-Type -TypeDefinition $source -ErrorAction Stop }
+    catch { if ($null -eq ($typeName -as [type])) { throw } }
+}
+
+# 从同一个只读共享句柄捕获文件身份、元数据、最终路径和 SHA256。
+function Get-StableLenovoUninstallerFileSnapshot {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    Initialize-LenovoUninstallerFileNativeApi
+    return [ShushuCleaner.LenovoUninstallerFileNativeV1]::Capture($Path)
+}
+
+# 按 X500 分隔与转义规则提取明确的 Organization/O 属性，拒绝借用 CN/OU 文本。
+function Get-X500OrganizationAttribute {
+    param([Parameter(Mandatory=$true)][string]$Subject)
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $current = [System.Text.StringBuilder]::new()
+    $escaped = $false
+    $quoted = $false
+    foreach ($character in $Subject.ToCharArray()) {
+        if ($escaped) {
+            [void]$current.Append($character)
+            $escaped = $false
+            continue
+        }
+        if ($character -ceq '\') {
+            $escaped = $true
+            [void]$current.Append($character)
+            continue
+        }
+        if ($character -ceq '"') {
+            $quoted = -not $quoted
+            [void]$current.Append($character)
+            continue
+        }
+        if (-not $quoted -and ($character -ceq ',' -or $character -ceq ';' -or $character -ceq '+')) {
+            $parts.Add($current.ToString())
+            [void]$current.Clear()
+            continue
+        }
+        [void]$current.Append($character)
+    }
+    if ($escaped -or $quoted) { return @() }
+    $parts.Add($current.ToString())
+
+    $organizations = @(
+        foreach ($part in $parts) {
+            $separator = $part.IndexOf('=')
+            if ($separator -le 0) { continue }
+            $name = $part.Substring(0, $separator).Trim()
+            if (-not ($name.Equals('O', [StringComparison]::OrdinalIgnoreCase) -or
+                    $name.Equals('2.5.4.10', [StringComparison]::Ordinal))) { continue }
+            $value = $part.Substring($separator + 1).Trim()
+            if ($value.Length -ge 2 -and $value[0] -ceq '"' -and $value[$value.Length - 1] -ceq '"') {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            $value = $value -replace '\\([,;+=<>#"\\])', '$1'
+            $value
+        }
+    )
+    return $organizations
+}
+
+# 只允许明确列出的联想北京签名组织名。
+function Test-LenovoSignerOrganization {
+    param([Parameter(Mandatory=$true)]$Certificate)
+
+    try {
+        $subject = if ($Certificate -is [System.Security.Cryptography.X509Certificates.X509Certificate2]) {
+            $Certificate.SubjectName.Name
+        }
+        elseif ($Certificate.PSObject.Properties.Name -ccontains 'Subject' -and $Certificate.Subject -is [string]) {
+            $Certificate.Subject
+        }
+        else { return $false }
+        if ($subject -isnot [string] -or $subject.Length -eq 0) { return $false }
+
+        $organizations = @(Get-X500OrganizationAttribute -Subject $subject)
+        if ($organizations.Count -ne 1) { return $false }
+        $organization = $organizations[0].Trim()
+        if ($organization -ceq '联想（北京）有限公司') { return $true }
+        return ($organization.Equals('LENOVO (BEIJING) LIMITED', [StringComparison]::OrdinalIgnoreCase) -or
+            $organization.Equals('Lenovo (Beijing) Limited', [StringComparison]::OrdinalIgnoreCase))
+    }
+    catch { return $false }
+}
+
+# 验证单份文件快照结构、单链接约束及最终路径安装根边界。
+function Test-StableLenovoUninstallerSnapshot {
+    param($Snapshot, [Parameter(Mandatory=$true)][string]$ReviewedInstallRoot)
+
+    $required = @('VolumeSerialNumber','FileIndexHigh','FileIndexLow','NumberOfLinks','Length','LastWriteTimeUtc','FinalPath','Sha256')
+    if ($null -eq $Snapshot) { return $false }
+    foreach ($name in $required) {
+        if ($Snapshot.PSObject.Properties.Name -cnotcontains $name) { return $false }
+    }
+    if ([uint64]$Snapshot.NumberOfLinks -ne 1 -or $Snapshot.Length -isnot [long] -or
+        $Snapshot.LastWriteTimeUtc -isnot [datetime] -or $Snapshot.FinalPath -isnot [string] -or
+        $Snapshot.Sha256 -isnot [string] -or $Snapshot.Sha256 -cnotmatch '^[0-9A-F]{64}$') { return $false }
+
+    try {
+        $root = [System.IO.Path]::GetFullPath($ReviewedInstallRoot).TrimEnd('\') + '\'
+        $finalPath = [System.IO.Path]::GetFullPath($Snapshot.FinalPath)
+    }
+    catch { return $false }
+    return $finalPath.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)
+}
+
+# 比较两次快照的稳定文件身份、元数据、最终路径和摘要。
+function Test-LenovoUninstallerSnapshotMatch {
+    param($Before, $After)
+
+    return ([uint64]$Before.VolumeSerialNumber -eq [uint64]$After.VolumeSerialNumber -and
+        [uint64]$Before.FileIndexHigh -eq [uint64]$After.FileIndexHigh -and
+        [uint64]$Before.FileIndexLow -eq [uint64]$After.FileIndexLow -and
+        [int64]$Before.Length -eq [int64]$After.Length -and
+        $Before.LastWriteTimeUtc.ToUniversalTime().Ticks -eq $After.LastWriteTimeUtc.ToUniversalTime().Ticks -and
+        $Before.FinalPath.Equals($After.FinalPath, [StringComparison]::OrdinalIgnoreCase) -and
+        $Before.Sha256.Equals($After.Sha256, [StringComparison]::Ordinal))
+}
+
+# 执行共享的启动前失败关闭验证，并可向 handoff 返回最后一份可信快照。
+function Invoke-ReviewedLenovoUninstallerValidationCore {
+    param(
+        [Parameter(Mandatory=$true)]$Action,
+        [scriptblock]$RegistryReader,
+        [scriptblock]$FileSnapshotReader,
+        [scriptblock]$SignatureReader,
+        [ref]$ValidatedSnapshot
+    )
+
+    $skip = { param($Code) ConvertTo-LenovoUninstallerValidationResult -Status skipped -Code $Code }
+    try {
+        $requiredFields = @(
+            'action','uninstall_evidence_status','uninstall_registry_path','uninstall_display_name',
+            'uninstall_publisher','uninstall_display_version','uninstall_install_location',
+            'uninstall_string','uninstall_executable_path'
+        )
+        if ($null -eq $Action) { return & $skip 'reviewed_action_invalid' }
+        foreach ($field in $requiredFields) {
+            if ($Action.PSObject.Properties.Name -cnotcontains $field -or $Action.$field -isnot [string]) {
+                return & $skip 'reviewed_action_invalid'
+            }
+        }
+        if ($Action.action -cne 'open_official_uninstaller' -or $Action.uninstall_evidence_status -cne 'complete') {
+            return & $skip 'reviewed_action_invalid'
+        }
+
+        if ($null -eq $RegistryReader) {
+            $RegistryReader = { param($Paths) $null = $Paths; Read-LenovoOfficialUninstallRegistryItems }
+        }
+        $registryItems = @(& $RegistryReader $script:LenovoOfficialUninstallRegistryQueryPaths)
+        $reviewedSourceItems = @(
+            foreach ($item in $registryItems) {
+                if ($null -ne $item -and $item.PSObject.Properties.Name -ccontains 'RegistryPath' -and
+                    $item.RegistryPath -is [string] -and
+                    $item.RegistryPath.Equals($Action.uninstall_registry_path, [StringComparison]::OrdinalIgnoreCase)) {
+                    $item
+                }
+            }
+        )
+        if ($reviewedSourceItems.Count -ne 1) { return & $skip 'registry_revalidation_failed' }
+        $current = Get-LenovoOfficialUninstallEvidence -RegistryReader {
+            param($Paths)
+            $null = $Paths
+            $reviewedSourceItems[0]
+        }.GetNewClosure()
+        if ($current.UninstallEvidenceStatus -cne 'complete') { return & $skip 'registry_revalidation_failed' }
+        $pathBindings = @(
+            @($Action.uninstall_registry_path, $current.UninstallRegistryPath),
+            @($Action.uninstall_install_location, $current.UninstallInstallLocation),
+            @($Action.uninstall_executable_path, $current.UninstallExecutablePath)
+        )
+        foreach ($binding in $pathBindings) {
+            if (-not $binding[0].Equals($binding[1], [StringComparison]::OrdinalIgnoreCase)) {
+                return & $skip 'registry_binding_changed'
+            }
+        }
+        $valueBindings = @(
+            @($Action.uninstall_display_name, $current.UninstallDisplayName),
+            @($Action.uninstall_publisher, $current.UninstallPublisher),
+            @($Action.uninstall_display_version, $current.UninstallDisplayVersion),
+            @($Action.uninstall_string, $current.UninstallString)
+        )
+        foreach ($binding in $valueBindings) {
+            if (-not $binding[0].Equals($binding[1], [StringComparison]::Ordinal)) {
+                return & $skip 'registry_binding_changed'
+            }
+        }
+
+        if ($null -eq $FileSnapshotReader) {
+            $FileSnapshotReader = { param($Path) Get-StableLenovoUninstallerFileSnapshot -Path $Path }
+        }
+        $before = & $FileSnapshotReader $current.UninstallExecutablePath
+        if (-not (Test-StableLenovoUninstallerSnapshot $before $current.UninstallInstallLocation)) {
+            return & $skip 'file_revalidation_failed'
+        }
+
+        if ($null -eq $SignatureReader) {
+            $SignatureReader = { param($Path) Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop }
+        }
+        $signature = & $SignatureReader $current.UninstallExecutablePath
+        if ($null -eq $signature -or $signature.PSObject.Properties.Name -cnotcontains 'Status' -or
+            $signature.Status.ToString() -cne 'Valid') { return & $skip 'signature_invalid' }
+        if ($signature.PSObject.Properties.Name -cnotcontains 'SignerCertificate' -or
+            $null -eq $signature.SignerCertificate) { return & $skip 'signer_certificate_missing' }
+        if (-not (Test-LenovoSignerOrganization $signature.SignerCertificate)) {
+            return & $skip 'signer_organization_invalid'
+        }
+
+        $after = & $FileSnapshotReader $current.UninstallExecutablePath
+        if (-not (Test-StableLenovoUninstallerSnapshot $after $current.UninstallInstallLocation) -or
+            -not (Test-LenovoUninstallerSnapshotMatch $before $after)) {
+            return & $skip 'file_identity_changed'
+        }
+        if ($null -ne $ValidatedSnapshot) { $ValidatedSnapshot.Value = $after }
+        return ConvertTo-LenovoUninstallerValidationResult -Status validated -ExecutablePath $after.FinalPath
+    }
+    catch {
+        return & $skip 'security_revalidation_failed'
+    }
+}
+
+# 公开验证接缝：仅返回 validated/canonical path 或 skipped/固定代码。
+function Test-ReviewedLenovoUninstaller {
+    param(
+        [Parameter(Mandatory=$true)]$Action,
+        [scriptblock]$RegistryReader,
+        [scriptblock]$FileSnapshotReader,
+        [scriptblock]$SignatureReader
+    )
+
+    return Invoke-ReviewedLenovoUninstallerValidationCore -Action $Action -RegistryReader $RegistryReader `
+        -FileSnapshotReader $FileSnapshotReader -SignatureReader $SignatureReader
+}
+
+# 构造不含原始路径或异常的终态 handoff 结果。
+function ConvertTo-LenovoUninstallerHandoffResult {
+    param(
+        [ValidateSet('manual_required','skipped','failed')][string]$Status,
+        [Parameter(Mandatory=$true)][string]$Reason,
+        [string]$FailureStage = ''
+    )
+    return [pscustomobject][ordered]@{
+        status = $Status
+        result_reason = $Reason
+        failure_stage = $FailureStage
+    }
+}
+
+# 通过第三次即时快照后仅打开已验证路径，并净化所有终态结果。
+function Invoke-ReviewedLenovoUninstallerHandoff {
+    param(
+        [Parameter(Mandatory=$true)]$Action,
+        [scriptblock]$RegistryReader,
+        [scriptblock]$FileSnapshotReader,
+        [scriptblock]$SignatureReader,
+        [scriptblock]$Launcher
+    )
+
+    $validatedSnapshot = $null
+    $validated = Invoke-ReviewedLenovoUninstallerValidationCore -Action $Action -RegistryReader $RegistryReader `
+        -FileSnapshotReader $FileSnapshotReader -SignatureReader $SignatureReader `
+        -ValidatedSnapshot ([ref]$validatedSnapshot)
+    if ($validated.Status -cne 'validated') {
+        return ConvertTo-LenovoUninstallerHandoffResult -Status skipped -Reason '启动前安全复核失败，请重新扫描后再试'
+    }
+
+    try {
+        if ($null -eq $FileSnapshotReader) {
+            $FileSnapshotReader = { param($Path) Get-StableLenovoUninstallerFileSnapshot -Path $Path }
+        }
+        $finalSnapshot = & $FileSnapshotReader $validated.ExecutablePath
+        if (-not (Test-StableLenovoUninstallerSnapshot $finalSnapshot $Action.uninstall_install_location) -or
+            -not (Test-LenovoUninstallerSnapshotMatch $validatedSnapshot $finalSnapshot)) {
+            return ConvertTo-LenovoUninstallerHandoffResult -Status skipped -Reason '启动前安全复核失败，请重新扫描后再试'
+        }
+    }
+    catch {
+        return ConvertTo-LenovoUninstallerHandoffResult -Status skipped -Reason '启动前安全复核失败，请重新扫描后再试'
+    }
+
+    try {
+        if ($null -eq $Launcher) {
+            $null = Start-Process -FilePath $validated.ExecutablePath -PassThru -ErrorAction Stop
+        }
+        else {
+            $null = & $Launcher $validated.ExecutablePath
+        }
+        return ConvertTo-LenovoUninstallerHandoffResult -Status manual_required `
+            -Reason '联想官方卸载程序已打开，请在其中确认或取消'
+    }
+    catch {
+        return ConvertTo-LenovoUninstallerHandoffResult -Status failed `
+            -Reason '无法启动联想官方卸载程序' -FailureStage launch
     }
 }

@@ -17,6 +17,15 @@
     if (-not (Get-Command Initialize-ServiceProtectionNativeApi -ErrorAction SilentlyContinue)) {
         function Initialize-ServiceProtectionNativeApi { throw 'Initialize-ServiceProtectionNativeApi is not implemented.' }
     }
+    if (-not (Get-Command Test-ReviewedLenovoUninstaller -ErrorAction SilentlyContinue)) {
+        function Test-ReviewedLenovoUninstaller { throw 'Test-ReviewedLenovoUninstaller is not implemented.' }
+    }
+    if (-not (Get-Command Invoke-ReviewedLenovoUninstallerHandoff -ErrorAction SilentlyContinue)) {
+        function Invoke-ReviewedLenovoUninstallerHandoff { throw 'Invoke-ReviewedLenovoUninstallerHandoff is not implemented.' }
+    }
+    if (-not (Get-Command Get-StableLenovoUninstallerFileSnapshot -ErrorAction SilentlyContinue)) {
+        function Get-StableLenovoUninstallerFileSnapshot { throw 'Get-StableLenovoUninstallerFileSnapshot is not implemented.' }
+    }
 
     function New-LenovoUninstallRegistryItem {
         param(
@@ -90,6 +99,359 @@
             [void]($this.DisposeCallCount++)
         }
         return $key
+    }
+
+    function New-ReviewedLenovoUninstallerAction {
+        [pscustomobject][ordered]@{
+            action = 'open_official_uninstaller'
+            uninstall_evidence_status = 'complete'
+            uninstall_registry_path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+            uninstall_display_name = '联想电脑管家 5.1'
+            uninstall_publisher = '联想（北京）有限公司'
+            uninstall_display_version = '5.1.0.0'
+            uninstall_install_location = 'C:\Program Files (x86)\Lenovo\PCManager\5.1'
+            uninstall_string = '"C:\Program Files (x86)\Lenovo\PCManager\5.1\uninst.exe"'
+            uninstall_executable_path = 'C:\Program Files (x86)\Lenovo\PCManager\5.1\uninst.exe'
+        }
+    }
+
+    function New-StableUninstallerSnapshot {
+        [pscustomobject][ordered]@{
+            VolumeSerialNumber = [uint32]123
+            FileIndexHigh = [uint32]456
+            FileIndexLow = [uint32]789
+            NumberOfLinks = [uint32]1
+            Length = [int64]4096
+            LastWriteTimeUtc = [datetime]'2026-08-28T01:02:03Z'
+            FinalPath = 'C:\Program Files (x86)\Lenovo\PCManager\5.1\uninst.exe'
+            Sha256 = '0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF'
+        }
+    }
+
+    function Copy-TestObject {
+        param([Parameter(Mandatory=$true)]$InputObject)
+        return $InputObject.PSObject.Copy()
+    }
+
+    function Assert-SkippedValidationResult {
+        param([Parameter(Mandatory=$true)]$Result)
+        @($Result.PSObject.Properties.Name) | Should -Be @('Status', 'ExecutablePath', 'Code')
+        $Result.Status | Should -BeExactly 'skipped'
+        $Result.ExecutablePath | Should -BeNullOrEmpty
+        $Result.Code | Should -Match '^[a-z0-9_]+$'
+        $Result.Code | Should -Not -Match '[\\/:\s]'
+    }
+}
+
+Describe 'reviewed Lenovo official uninstaller launch-time validation' {
+    It 'returns only the canonical executable when every launch-time binding is unchanged' {
+        $action = New-ReviewedLenovoUninstallerAction
+        $registryItem = New-LenovoUninstallRegistryItem
+        $snapshot = New-StableUninstallerSnapshot
+        $registryReader = { param($Paths) $registryItem }.GetNewClosure()
+        $fileSnapshotReader = { param($Path) $snapshot }.GetNewClosure()
+        $signatureReader = {
+            param($Path)
+            [pscustomobject]@{
+                Status = 'Valid'
+                SignerCertificate = [pscustomobject]@{ Subject = 'CN=Lenovo Setup, O=LENOVO (BEIJING) LIMITED, C=CN' }
+            }
+        }
+
+        $result = Test-ReviewedLenovoUninstaller -Action $action `
+            -RegistryReader $registryReader -FileSnapshotReader $fileSnapshotReader -SignatureReader $signatureReader
+
+        @($result.PSObject.Properties.Name) | Should -Be @('Status', 'ExecutablePath', 'Code')
+        $result.Status | Should -BeExactly 'validated'
+        $result.ExecutablePath | Should -BeExactly 'C:\Program Files (x86)\Lenovo\PCManager\5.1\uninst.exe'
+        $result.Code | Should -BeNullOrEmpty
+    }
+
+    It 'rejects registry source missing or drift and every reviewed bound-field drift <Label>' -TestCases @(
+        @{ Label='source missing'; Field='RegistryPath'; Value='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Other' }
+        @{ Label='source case is path-equivalent'; Field='RegistryPath'; Value='hklm:\software\microsoft\windows\currentversion\uninstall\lenovopcmanager'; ExpectedValidated=$true }
+        @{ Label='display name'; Field='DisplayName'; Value='联想电脑管家 5.2' }
+        @{ Label='publisher'; Field='Publisher'; Value='Lenovo (Beijing) Limited' }
+        @{ Label='version'; Field='DisplayVersion'; Value='5.1.0.1' }
+        @{ Label='install location'; Field='InstallLocation'; Value='C:\Program Files (x86)\Lenovo\PCManager\5.2'; UninstallString='C:\Program Files (x86)\Lenovo\PCManager\5.2\uninst.exe' }
+        @{ Label='uninstall string'; Field='UninstallString'; Value='C:\Program Files (x86)\Lenovo\PCManager\5.1\uninst.exe' }
+    ) {
+        param($Label, $Field, $Value, $UninstallString, $ExpectedValidated)
+        $action = New-ReviewedLenovoUninstallerAction
+        $parameters = @{}
+        $parameters[$Field] = $Value
+        if ($UninstallString) { $parameters.UninstallString = $UninstallString }
+        $item = New-LenovoUninstallRegistryItem @parameters
+        $snapshot = New-StableUninstallerSnapshot
+        $result = Test-ReviewedLenovoUninstaller -Action $action `
+            -RegistryReader ({ param($Paths) $item }.GetNewClosure()) `
+            -FileSnapshotReader ({ param($Path) $snapshot }.GetNewClosure()) `
+            -SignatureReader { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='O=联想（北京）有限公司'}} }
+
+        if ($ExpectedValidated) { $result.Status | Should -BeExactly 'validated' }
+        else { Assert-SkippedValidationResult $result }
+    }
+
+    It 'rejects malformed current registry entries without using a fallback candidate' {
+        $action = New-ReviewedLenovoUninstallerAction
+        $malformed = New-LenovoUninstallRegistryItem -DisplayName @('联想电脑管家', '联想电脑管家 5.1')
+        $fallback = New-LenovoUninstallRegistryItem `
+            -RegistryPath 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\LenovoOther'
+        $script:malformedFallbackFileCalls = 0
+        $result = Test-ReviewedLenovoUninstaller -Action $action `
+            -RegistryReader ({ param($Paths) $malformed, $fallback }.GetNewClosure()) `
+            -FileSnapshotReader { $script:malformedFallbackFileCalls++; throw 'must not read file' } `
+            -SignatureReader { throw 'must not read signature' }
+
+        Assert-SkippedValidationResult $result
+        $script:malformedFallbackFileCalls | Should -Be 0
+    }
+
+    It 'rejects malformed reviewed action scalar fields' {
+        $action = New-ReviewedLenovoUninstallerAction
+        $action.uninstall_executable_path = @($action.uninstall_executable_path)
+        $result = Test-ReviewedLenovoUninstaller -Action $action `
+            -RegistryReader { throw 'must not read registry' } -FileSnapshotReader { throw 'must not read file' } `
+            -SignatureReader { throw 'must not read signature' }
+
+        Assert-SkippedValidationResult $result
+    }
+
+    It 'rejects invalid stable snapshot data <Label>' -TestCases @(
+        @{ Label='directory or malformed reader result'; Mutate={ param($s) $s.PSObject.Properties.Remove('Length') } }
+        @{ Label='multiple hard links'; Mutate={ param($s) $s.NumberOfLinks=[uint32]2 } }
+        @{ Label='resolved path outside reviewed root'; Mutate={ param($s) $s.FinalPath='C:\Windows\System32\notepad.exe' } }
+        @{ Label='lower-case digest'; Mutate={ param($s) $s.Sha256=$s.Sha256.ToLowerInvariant() } }
+    ) {
+        param($Label, $Mutate)
+        $action = New-ReviewedLenovoUninstallerAction
+        $item = New-LenovoUninstallRegistryItem
+        $snapshot = New-StableUninstallerSnapshot
+        & $Mutate $snapshot
+        $result = Test-ReviewedLenovoUninstaller -Action $action `
+            -RegistryReader ({ param($Paths) $item }.GetNewClosure()) `
+            -FileSnapshotReader ({ param($Path) $snapshot }.GetNewClosure()) `
+            -SignatureReader { throw 'must not read signature' }
+
+        Assert-SkippedValidationResult $result
+    }
+
+    It 'rejects pre/post file identity, metadata, final path, or SHA256 drift <Label>' -TestCases @(
+        @{ Label='volume serial'; Field='VolumeSerialNumber'; Value=[uint32]124 }
+        @{ Label='file index high'; Field='FileIndexHigh'; Value=[uint32]457 }
+        @{ Label='file index low'; Field='FileIndexLow'; Value=[uint32]790 }
+        @{ Label='length'; Field='Length'; Value=[int64]4097 }
+        @{ Label='last write'; Field='LastWriteTimeUtc'; Value=[datetime]'2026-08-28T01:02:04Z' }
+        @{ Label='final path'; Field='FinalPath'; Value='C:\Program Files (x86)\Lenovo\PCManager\5.1\other.exe' }
+        @{ Label='SHA256'; Field='Sha256'; Value='1123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF' }
+    ) {
+        param($Label, $Field, $Value)
+        $action = New-ReviewedLenovoUninstallerAction
+        $item = New-LenovoUninstallRegistryItem
+        $before = New-StableUninstallerSnapshot
+        $after = Copy-TestObject $before
+        $after.$Field = $Value
+        $queue = [System.Collections.Queue]::new(); $queue.Enqueue($before); $queue.Enqueue($after)
+        $result = Test-ReviewedLenovoUninstaller -Action $action `
+            -RegistryReader ({ param($Paths) $item }.GetNewClosure()) `
+            -FileSnapshotReader ({ param($Path) $queue.Dequeue() }.GetNewClosure()) `
+            -SignatureReader { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='O=Lenovo (Beijing) Limited'}} }
+
+        Assert-SkippedValidationResult $result
+    }
+
+    It 'rejects invalid signature status, absent certificate, and non-O Lenovo text <Label>' -TestCases @(
+        @{ Label='invalid status'; Signature=[pscustomobject]@{Status='NotSigned';SignerCertificate=[pscustomobject]@{Subject='O=Lenovo (Beijing) Limited'}} }
+        @{ Label='status case drift'; Signature=[pscustomobject]@{Status='valid';SignerCertificate=[pscustomobject]@{Subject='O=Lenovo (Beijing) Limited'}} }
+        @{ Label='absent certificate'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=$null} }
+        @{ Label='wrong organization'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='O=Lenovo Group Limited'}} }
+        @{ Label='Lenovo only in OU'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='OU=Lenovo (Beijing) Limited, O=Other Company'}} }
+        @{ Label='Lenovo only in CN'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='CN=LENOVO (BEIJING) LIMITED, O=Other Company'}} }
+    ) {
+        param($Label, $Signature)
+        $action = New-ReviewedLenovoUninstallerAction
+        $item = New-LenovoUninstallRegistryItem
+        $snapshot = New-StableUninstallerSnapshot
+        $result = Test-ReviewedLenovoUninstaller -Action $action `
+            -RegistryReader ({ param($Paths) $item }.GetNewClosure()) `
+            -FileSnapshotReader ({ param($Path) $snapshot }.GetNewClosure()) `
+            -SignatureReader ({ param($Path) $Signature }.GetNewClosure())
+
+        Assert-SkippedValidationResult $result
+    }
+
+    It 'accepts only the exact allowed signer organization <Organization>' -TestCases @(
+        @{ Organization='LENOVO (BEIJING) LIMITED' }
+        @{ Organization='lenovo (beijing) limited' }
+        @{ Organization=' Lenovo (Beijing) Limited ' }
+        @{ Organization='联想（北京）有限公司' }
+    ) {
+        param($Organization)
+        $action = New-ReviewedLenovoUninstallerAction
+        $item = New-LenovoUninstallRegistryItem
+        $snapshot = New-StableUninstallerSnapshot
+        $signature = [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject="CN=Setup, O=$Organization, C=CN"}}
+        $result = Test-ReviewedLenovoUninstaller -Action $action `
+            -RegistryReader ({ param($Paths) $item }.GetNewClosure()) `
+            -FileSnapshotReader ({ param($Path) $snapshot }.GetNewClosure()) `
+            -SignatureReader ({ param($Path) $signature }.GetNewClosure())
+        $result.Status | Should -BeExactly 'validated'
+    }
+
+    It 'rejects exceptions from boundary <Label>' -TestCases @(
+        @{ Label='registry'; Registry={ throw 'secret registry path C:\private' }; File={ throw 'must not run' }; Signature={ throw 'must not run' } }
+        @{ Label='first file snapshot'; Registry=$null; File={ throw 'secret file C:\private' }; Signature={ throw 'must not run' } }
+        @{ Label='signature'; Registry=$null; File=$null; Signature={ throw 'secret certificate details' } }
+        @{ Label='post-signature file snapshot'; Registry=$null; File='post'; Signature=$null }
+    ) {
+        param($Label, $Registry, $File, $Signature)
+        $action = New-ReviewedLenovoUninstallerAction
+        $item = New-LenovoUninstallRegistryItem
+        $snapshot = New-StableUninstallerSnapshot
+        if ($null -eq $Registry) { $Registry = { param($Paths) $item }.GetNewClosure() }
+        if ($File -ceq 'post') {
+            $calls=0; $File={ param($Path) $script:calls++; if($script:calls -eq 1){$snapshot}else{throw 'secret post snapshot'} }.GetNewClosure()
+        } elseif ($null -eq $File) { $File = { param($Path) $snapshot }.GetNewClosure() }
+        if ($null -eq $Signature) { $Signature = { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='O=联想（北京）有限公司'}} } }
+
+        $result = Test-ReviewedLenovoUninstaller -Action $action -RegistryReader $Registry -FileSnapshotReader $File -SignatureReader $Signature
+
+        Assert-SkippedValidationResult $result
+    }
+}
+
+Describe 'reviewed Lenovo official uninstaller handoff' {
+    BeforeEach {
+        $script:handoffAction = New-ReviewedLenovoUninstallerAction
+        $script:handoffItem = New-LenovoUninstallRegistryItem
+        $script:handoffSnapshot = New-StableUninstallerSnapshot
+        $script:handoffRegistry = { param($Paths) $script:handoffItem }
+        $script:handoffFile = { param($Path) $script:handoffSnapshot }
+        $script:handoffSignature = { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='O=联想（北京）有限公司'}} }
+    }
+
+    It 'opens only the validated canonical path after a third immediate stable snapshot' {
+        $script:fileSnapshotCalls = 0
+        $fileReader = { param($Path) $script:fileSnapshotCalls++; $script:handoffSnapshot }
+        $script:launchedPath = ''
+        $launcher = { param($Path) $script:launchedPath=$Path; [pscustomobject]@{Id=1234} }
+
+        $result = Invoke-ReviewedLenovoUninstallerHandoff -Action $script:handoffAction `
+            -RegistryReader $script:handoffRegistry -FileSnapshotReader $fileReader `
+            -SignatureReader $script:handoffSignature -Launcher $launcher
+
+        $script:fileSnapshotCalls | Should -Be 3
+        $script:launchedPath | Should -BeExactly $script:handoffSnapshot.FinalPath
+        @($result.PSObject.Properties.Name) | Should -Be @('status','result_reason','failure_stage')
+        $result.status | Should -BeExactly 'manual_required'
+        $result.result_reason | Should -BeExactly '联想官方卸载程序已打开，请在其中确认或取消'
+        $result.failure_stage | Should -BeNullOrEmpty
+    }
+
+    It 'never calls launcher when final immediate snapshot changed' {
+        $changed = Copy-TestObject $script:handoffSnapshot; $changed.Sha256='1123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF'
+        $queue=[System.Collections.Queue]::new(); $queue.Enqueue($script:handoffSnapshot); $queue.Enqueue($script:handoffSnapshot); $queue.Enqueue($changed)
+        $script:launcherCalls=0
+        $result = Invoke-ReviewedLenovoUninstallerHandoff -Action $script:handoffAction `
+            -RegistryReader $script:handoffRegistry -FileSnapshotReader ({param($Path)$queue.Dequeue()}.GetNewClosure()) `
+            -SignatureReader $script:handoffSignature -Launcher {param($Path)$script:launcherCalls++}
+
+        $script:launcherCalls | Should -Be 0
+        $result.status | Should -BeExactly 'skipped'
+        $result.result_reason | Should -BeExactly '启动前安全复核失败，请重新扫描后再试'
+        $result.failure_stage | Should -BeNullOrEmpty
+    }
+
+    It 'never calls launcher for a validation-boundary rejection <Label>' -TestCases @(
+        @{ Label='registry reader'; Registry={throw 'registry secret'}; File=$null; Signature=$null }
+        @{ Label='file snapshot reader'; Registry=$null; File={throw 'file secret'}; Signature=$null }
+        @{ Label='signature reader'; Registry=$null; File=$null; Signature={throw 'signature secret'} }
+    ) {
+        param($Label, $Registry, $File, $Signature)
+        if ($null -eq $Registry) { $Registry=$script:handoffRegistry }
+        if ($null -eq $File) { $File=$script:handoffFile }
+        if ($null -eq $Signature) { $Signature=$script:handoffSignature }
+        $script:rejectedLauncherCalls=0
+
+        $result = Invoke-ReviewedLenovoUninstallerHandoff -Action $script:handoffAction `
+            -RegistryReader $Registry -FileSnapshotReader $File -SignatureReader $Signature `
+            -Launcher {param($Path)$script:rejectedLauncherCalls++}
+
+        $script:rejectedLauncherCalls | Should -Be 0
+        $result.status | Should -BeExactly 'skipped'
+        $result.result_reason | Should -BeExactly '启动前安全复核失败，请重新扫描后再试'
+        $result.failure_stage | Should -BeNullOrEmpty
+    }
+
+    It 'never calls launcher when the final immediate snapshot reader throws' {
+        $script:finalSnapshotCalls=0
+        $reader={param($Path)$script:finalSnapshotCalls++;if($script:finalSnapshotCalls -lt 3){$script:handoffSnapshot}else{throw 'final secret'}}
+        $script:finalExceptionLauncherCalls=0
+
+        $result = Invoke-ReviewedLenovoUninstallerHandoff -Action $script:handoffAction `
+            -RegistryReader $script:handoffRegistry -FileSnapshotReader $reader `
+            -SignatureReader $script:handoffSignature -Launcher {param($Path)$script:finalExceptionLauncherCalls++}
+
+        $script:finalExceptionLauncherCalls | Should -Be 0
+        $result.status | Should -BeExactly 'skipped'
+        $result.result_reason | Should -BeExactly '启动前安全复核失败，请重新扫描后再试'
+        $result.failure_stage | Should -BeNullOrEmpty
+    }
+
+    It 'returns launch-stage failure only when the process creation API throws' {
+        $result = Invoke-ReviewedLenovoUninstallerHandoff -Action $script:handoffAction `
+            -RegistryReader $script:handoffRegistry -FileSnapshotReader $script:handoffFile `
+            -SignatureReader $script:handoffSignature -Launcher {param($Path)throw 'secret process failure'}
+
+        $result.status | Should -BeExactly 'failed'
+        $result.result_reason | Should -BeExactly '无法启动联想官方卸载程序'
+        $result.failure_stage | Should -BeExactly 'launch'
+    }
+
+    It 'uses Start-Process with only FilePath PassThru and ErrorAction in the production launcher' {
+        Mock Start-Process { [pscustomobject]@{Id=1234} }
+        $result = Invoke-ReviewedLenovoUninstallerHandoff -Action $script:handoffAction `
+            -RegistryReader $script:handoffRegistry -FileSnapshotReader $script:handoffFile `
+            -SignatureReader $script:handoffSignature
+
+        $result.status | Should -BeExactly 'manual_required'
+        Should -Invoke Start-Process -Times 1 -Exactly -ParameterFilter {
+            $FilePath -ceq 'C:\Program Files (x86)\Lenovo\PCManager\5.1\uninst.exe' -and $PassThru -and
+            $ErrorAction -ceq 'Stop' -and -not $PSBoundParameters.ContainsKey('ArgumentList') -and
+            -not $PSBoundParameters.ContainsKey('Verb') -and -not $PSBoundParameters.ContainsKey('WorkingDirectory')
+        }
+    }
+}
+
+Describe 'native stable Lenovo uninstaller file snapshot' {
+    It 'captures one-link identity, metadata, final DOS path, and SHA256 from a safe temporary file' {
+        $path = Join-Path $TestDrive 'uninst.exe'
+        [System.IO.File]::WriteAllBytes($path, [byte[]](1,2,3,4,5))
+        $hasher = [System.Security.Cryptography.SHA256]::Create()
+        try { $expectedHash = ([BitConverter]::ToString($hasher.ComputeHash([byte[]](1,2,3,4,5)))).Replace('-', '') }
+        finally { $hasher.Dispose() }
+
+        $snapshot = Get-StableLenovoUninstallerFileSnapshot -Path $path
+
+        $snapshot.NumberOfLinks | Should -Be 1
+        $snapshot.Length | Should -Be 5
+        $snapshot.FinalPath | Should -BeExactly ([System.IO.Path]::GetFullPath($path))
+        $snapshot.Sha256 | Should -BeExactly $expectedHash
+    }
+
+    It 'rejects a missing file and directory' {
+        { Get-StableLenovoUninstallerFileSnapshot -Path (Join-Path $TestDrive 'missing.exe') } | Should -Throw
+        { Get-StableLenovoUninstallerFileSnapshot -Path $TestDrive } | Should -Throw
+    }
+
+    It 'rejects a reparse point in any existing path component' {
+        $target = Join-Path $TestDrive 'target'
+        $junction = Join-Path $TestDrive 'junction'
+        $null = New-Item -ItemType Directory -Path $target
+        [System.IO.File]::WriteAllBytes((Join-Path $target 'uninst.exe'), [byte[]](1,2,3))
+        $null = New-Item -ItemType Junction -Path $junction -Target $target
+
+        { Get-StableLenovoUninstallerFileSnapshot -Path (Join-Path $junction 'uninst.exe') } | Should -Throw
     }
 }
 
