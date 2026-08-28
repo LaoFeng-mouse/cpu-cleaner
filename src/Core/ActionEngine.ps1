@@ -2714,7 +2714,17 @@ function Invoke-ServiceProcessStopAction {
         } catch {
             return New-ServiceProcessStopResult 'failed' "exact service runtime stop could not be started for reviewed PID $targetPid" 'mutation'
         }
-        if ($null -eq $serviceStop -or $serviceStop.Status -isnot [string] -or $serviceStop.StopSent -isnot [bool]) {
+        $validNativeStatuses = @('stopped','identity_changed','open_failed','query_failed','control_rejected','verification_unknown','timeout','invalid')
+        $zeroErrorStatuses = @('stopped','identity_changed','timeout','invalid')
+        $nonzeroErrorStatuses = @('open_failed','query_failed','control_rejected','verification_unknown')
+        if ($null -eq $serviceStop -or $serviceStop.Status -isnot [string] -or
+            $validNativeStatuses -cnotcontains $serviceStop.Status -or $serviceStop.StopSent -isnot [bool] -or
+            $serviceStop.ErrorCode -isnot [int32] -or [int32]$serviceStop.ErrorCode -lt 0 -or
+            ($zeroErrorStatuses -ccontains $serviceStop.Status -and [int32]$serviceStop.ErrorCode -ne 0) -or
+            ($nonzeroErrorStatuses -ccontains $serviceStop.Status -and [int32]$serviceStop.ErrorCode -eq 0) -or
+            ($serviceStop.Status -ceq 'stopped' -and -not $serviceStop.StopSent) -or
+            ($serviceStop.Status -cin @('identity_changed','open_failed','query_failed','control_rejected','invalid') -and $serviceStop.StopSent) -or
+            ($serviceStop.Status -cin @('verification_unknown','timeout') -and -not $serviceStop.StopSent)) {
             return New-ServiceProcessStopResult 'failed' "exact service runtime stop returned an invalid result for reviewed PID $targetPid" 'mutation'
         }
         if ($serviceStop.Status -cne 'stopped') {
@@ -2725,7 +2735,7 @@ function Invoke-ServiceProcessStopAction {
             $reason = if ($serviceStop.StopSent) {
                 "service STOP was sent but final state is $($serviceStop.Status) for reviewed PID $targetPid"
             } else {
-                "exact service runtime stop was rejected before mutation for reviewed PID $targetPid"
+                "exact service runtime stop failed before mutation: status=$($serviceStop.Status) win32=$([int32]$serviceStop.ErrorCode) reviewed PID $targetPid"
             }
             return New-ServiceProcessStopResult 'failed' $reason $stage
         }

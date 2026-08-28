@@ -391,6 +391,51 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         Should -Invoke Stop-ExactServiceRuntime -Times 1 -Exactly
     }
 
+    It 'persists only the fixed native status and numeric Win32 code when SCM rejects before STOP' {
+        Mock Stop-ExactServiceRuntime { [pscustomobject]@{ Status='open_failed'; StopSent=$false; ErrorCode=5; ProcessId=0 } }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'failed'
+        $result.result_reason | Should -BeExactly 'exact service runtime stop failed before mutation: status=open_failed win32=5 reviewed PID 4321'
+        $result.failure_stage | Should -BeExactly 'mutation'
+    }
+
+    It 'rejects an unrecognized native status instead of reflecting it into the result reason' {
+        Mock Stop-ExactServiceRuntime { [pscustomobject]@{ Status='evil C:\secret --token=abc'; StopSent=$false; ErrorCode=5; ProcessId=0 } }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'failed'
+        $result.result_reason | Should -BeExactly 'exact service runtime stop returned an invalid result for reviewed PID 4321'
+        $result.result_reason | Should -Not -Match 'secret|token'
+        $result.failure_stage | Should -BeExactly 'mutation'
+    }
+
+    It 'rejects contradictory or malformed native result contracts: <Label>' -TestCases @(
+        @{ Label='stopped with error'; Status='stopped'; StopSent=$true; ErrorCode=5 },
+        @{ Label='timeout with error'; Status='timeout'; StopSent=$true; ErrorCode=5 },
+        @{ Label='identity change with error'; Status='identity_changed'; StopSent=$false; ErrorCode=5 },
+        @{ Label='open failure without error'; Status='open_failed'; StopSent=$false; ErrorCode=0 },
+        @{ Label='query failure without error'; Status='query_failed'; StopSent=$false; ErrorCode=0 },
+        @{ Label='control rejection without error'; Status='control_rejected'; StopSent=$false; ErrorCode=0 },
+        @{ Label='verification unknown without error'; Status='verification_unknown'; StopSent=$true; ErrorCode=0 },
+        @{ Label='stopped without STOP'; Status='stopped'; StopSent=$false; ErrorCode=0 },
+        @{ Label='open failure after STOP'; Status='open_failed'; StopSent=$true; ErrorCode=5 },
+        @{ Label='negative error'; Status='open_failed'; StopSent=$false; ErrorCode=-1 },
+        @{ Label='string error'; Status='open_failed'; StopSent=$false; ErrorCode='5' },
+        @{ Label='uint64 overflow error'; Status='open_failed'; StopSent=$false; ErrorCode=[uint64]::MaxValue }
+    ) {
+        param($Status, $StopSent, $ErrorCode)
+        Mock Stop-ExactServiceRuntime { [pscustomobject]@{ Status=$Status; StopSent=$StopSent; ErrorCode=$ErrorCode; ProcessId=0 } }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'failed'
+        $result.result_reason | Should -BeExactly 'exact service runtime stop returned an invalid result for reviewed PID 4321'
+        $result.failure_stage | Should -BeExactly 'mutation'
+    }
+
     It 'uses one native SCM service handle and direct ControlService without dependent-service cascading' {
         $source = Get-Content (Join-Path $projectRoot 'src\Core\ActionEngine.ps1') -Raw -Encoding UTF8
         $helperStart = $source.IndexOf('function Initialize-NativeExactServiceRuntimeStopApi')
