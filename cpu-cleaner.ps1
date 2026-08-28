@@ -59,7 +59,7 @@ function Is-Admin {
 
 
 # ---------- v1.7.0 模块化: 按域拆分到 src/Core/ (dot-source 保持 $script: 作用域共享) ----------
-foreach ($f in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager','InventoryManager')) {
+foreach ($f in @('Utils','ProtectedServiceHandoff','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager','InventoryManager')) {
     . (Join-Path $script:Root ('src\Core\' + $f + '.ps1'))
 }
 

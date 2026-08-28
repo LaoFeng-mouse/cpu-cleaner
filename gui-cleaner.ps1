@@ -10,6 +10,7 @@ $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:Lang = 'zh'   # zh / en
 $script:MaxGuiPendingJsonDepth = 64
 # Task4 的 manual-impact 摘要必须与管理员 clean 使用同一实现；这里只加载既有 core，不改其逻辑。
+. (Join-Path $script:Root 'src\Core\ProtectedServiceHandoff.ps1')
 . (Join-Path $script:Root 'src\Core\ProfileEngine.ps1')
 . (Join-Path $script:Root 'src\Core\ActionEngine.ps1')
 # v1.5.3: 测试模式 (SHUSHU_CLEANER_TEST=1) — 跳过单实例检查与窗口显示, 供 CI 无窗口验证 (Pester)
