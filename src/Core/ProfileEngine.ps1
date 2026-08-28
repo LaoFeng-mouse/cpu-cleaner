@@ -382,28 +382,82 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
     return $profiles
 }
 
-function Copy-ProfileEvidenceValue($Value) {
+$script:MaxProfileEvidenceCloneDepth = 16
+
+function Test-ProfileEvidenceJsonScalar($Value) {
+    return ($Value -is [string] -or $Value -is [bool] -or
+        $Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64] -or
+        $Value -is [single] -or $Value -is [double] -or
+        $Value -is [decimal] -or $Value -is [System.Numerics.BigInteger])
+}
+
+function Test-ProfileEvidenceReferenceOnStack($ReferenceStack, $Value) {
+    foreach ($candidate in $ReferenceStack) {
+        if ([object]::ReferenceEquals($candidate, $Value)) { return $true }
+    }
+    return $false
+}
+
+function Copy-ProfileEvidenceValue($Value, [int]$Depth, $ReferenceStack) {
+    if ($Depth -gt $script:MaxProfileEvidenceCloneDepth) {
+        throw 'Profile evidence depth limit exceeded.'
+    }
     if ($null -eq $Value) { return $null }
+    if (($Value -is [double] -and ([double]::IsNaN($Value) -or [double]::IsInfinity($Value))) -or
+        ($Value -is [single] -and ([single]::IsNaN($Value) -or [single]::IsInfinity($Value)))) {
+        throw 'Profile evidence numeric values must be finite.'
+    }
+    if (Test-ProfileEvidenceJsonScalar $Value) { return $Value }
+    if ($Value -is [System.Collections.IDictionary]) {
+        throw 'Profile evidence IDictionary values are not supported.'
+    }
     if ($Value -is [System.Array]) {
-        $copy = $Value.Clone()
-        for ($i = 0; $i -lt $Value.Length; $i++) {
-            $copy.SetValue((Copy-ProfileEvidenceValue $Value.GetValue($i)), $i)
+        if ($Value.Rank -ne 1) { throw 'Profile evidence arrays must be one-dimensional.' }
+        if (Test-ProfileEvidenceReferenceOnStack $ReferenceStack $Value) {
+            throw 'Profile evidence contains a cyclic reference.'
         }
-        return ,$copy
+        $ReferenceStack.Add($Value)
+        try {
+            $copy = $Value.Clone()
+            for ($i = $Value.GetLowerBound(0); $i -le $Value.GetUpperBound(0); $i++) {
+                $copy.SetValue((Copy-ProfileEvidenceValue $Value.GetValue($i) ($Depth + 1) $ReferenceStack), $i)
+            }
+            return ,$copy
+        } finally {
+            $ReferenceStack.RemoveAt($ReferenceStack.Count - 1)
+        }
+    }
+    if ($Value -is [System.Collections.IList]) {
+        throw 'Profile evidence IList values other than System.Array are not supported.'
     }
     if ($Value -is [pscustomobject]) {
-        $copy = [ordered]@{}
-        foreach ($property in $Value.PSObject.Properties) {
-            $copy[$property.Name] = Copy-ProfileEvidenceValue $property.Value
+        if (Test-ProfileEvidenceReferenceOnStack $ReferenceStack $Value) {
+            throw 'Profile evidence contains a cyclic reference.'
         }
-        return [pscustomobject]$copy
+        $ReferenceStack.Add($Value)
+        try {
+            $copy = [ordered]@{}
+            $propertyNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            foreach ($property in $Value.PSObject.Properties) {
+                if ($property.Name -isnot [string] -or -not $propertyNames.Add($property.Name)) {
+                    throw 'Profile evidence property names must be unique scalar strings.'
+                }
+                $copy[$property.Name] = Copy-ProfileEvidenceValue $property.Value ($Depth + 1) $ReferenceStack
+            }
+            return [pscustomobject]$copy
+        } finally {
+            $ReferenceStack.RemoveAt($ReferenceStack.Count - 1)
+        }
     }
-    return $Value
+    throw ('Profile evidence contains unsupported value type: ' + $Value.GetType().FullName + '.')
 }
 
 function Copy-ProfileEvidence($Evidence) {
-    if ($null -eq $Evidence) { return $null }
-    return Copy-ProfileEvidenceValue $Evidence
+    $referenceStack = New-Object 'System.Collections.Generic.List[object]'
+    return Copy-ProfileEvidenceValue $Evidence 0 $referenceStack
 }
 
 # 构造一条命中记录 (结构化字段)

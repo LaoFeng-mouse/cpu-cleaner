@@ -229,6 +229,49 @@ Describe 'Profile 加载' {
         $handoff.uninstall_display_name | Should -BeExactly '联想电脑管家'
     }
 
+    It 'hit 创建拒绝非 JSON evidence 图: <label>' -TestCases @(
+        @{ label='hashtable'; expected='*IDictionary*'; build={ @{ tested=$true } } }
+        @{ label='ArrayList'; expected='*IList*'; build={ $v=New-Object System.Collections.ArrayList; [void]$v.Add('value'); return ,$v } }
+        @{ label='two-dimensional-array'; expected='*Profile evidence arrays must be one-dimensional.*'; build={ $v=New-Object 'object[,]' 1,1; $v.SetValue('value',0,0); return ,$v } }
+        @{ label='PSCustomObject-cycle'; expected='*cyclic reference*'; build={ $v=[pscustomobject]@{ self=$null }; $v.self=$v; return $v } }
+        @{ label='array-cycle'; expected='*cyclic reference*'; build={ $v=New-Object object[] 1; $v.SetValue($v,0); return ,$v } }
+        @{ label='depth-limit'; expected='*depth limit*'; build={ $v='leaf'; foreach($i in 1..17){ $v=[pscustomobject]@{ child=$v } }; return $v } }
+        @{ label='DateTime'; expected='*unsupported value type*'; build={ [datetime]'2026-08-24T00:00:00Z' } }
+        @{ label='non-finite-number'; expected='*numeric values must be finite*'; build={ [double]::NaN } }
+    ) {
+        param($label, $expected, $build)
+        $profile = [pscustomobject]@{
+            id='invalid-evidence'; vendor='Test'; name_cn='非法证据'; risk='low'; safe=$false; reason_cn='r'
+            evidence=(& $build)
+        }
+        $decision = [pscustomobject]@{
+            Action='investigate'; ExecutionClass='observation'; Necessity='informational'
+            DefaultSelected=$false; RequiresConfirmation=$false; ImpactCn='impact'; CleanupReasonCn='reason'
+        }
+
+        { New-Hit -p $profile -hitType 'service' -detail 'invalid' -srvName 'Svc' -autostartSource '' -autostartName '' -taskPath '' -procName '' -decision $decision -matchEvidence $null } | Should -Throw $expected
+    }
+
+    It 'hit evidence 允许深度边界和重复非循环引用并逐分支克隆' {
+        $shared = [pscustomobject]@{ model='original' }
+        $bounded = 'leaf'
+        foreach ($i in 1..15) { $bounded = [pscustomobject]@{ child=$bounded } }
+        $profile = [pscustomobject]@{
+            id='valid-evidence'; vendor='Test'; name_cn='合法证据'; risk='low'; safe=$false; reason_cn='r'
+            evidence=[pscustomobject]@{ left=$shared; right=$shared; bounded=$bounded }
+        }
+        $decision = [pscustomobject]@{
+            Action='investigate'; ExecutionClass='observation'; Necessity='informational'
+            DefaultSelected=$false; RequiresConfirmation=$false; ImpactCn='impact'; CleanupReasonCn='reason'
+        }
+
+        $hit = New-Hit -p $profile -hitType 'service' -detail 'valid' -srvName 'Svc' -autostartSource '' -autostartName '' -taskPath '' -procName '' -decision $decision -matchEvidence $null
+        $hit.evidence.left.model = 'mutated'
+
+        $hit.evidence.right.model | Should -BeExactly 'original'
+        $profile.evidence.left.model | Should -BeExactly 'original'
+    }
+
     It '合法 v3 manual_impact 策略加载并按严格形状标准化' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $policyInput = [pscustomobject]@{
