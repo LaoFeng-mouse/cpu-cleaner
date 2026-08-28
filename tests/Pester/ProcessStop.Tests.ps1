@@ -286,6 +286,7 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         @{ field='process_name'; value='other.exe'; reason='process name' }
         @{ field='process_path'; value='C:\Other\wsctrl11.exe'; reason='process path' }
         @{ field='process_start_time_utc'; value='2026-08-24T01:02:04.0000000Z'; reason='start time' }
+        @{ field='process_start_time_utc'; value='2026-08-24T01:02:03.0000001Z'; reason='start time' }
     ) {
         param($field, $value, $reason)
         $current = $script:currentIdentity.PSObject.Copy()
@@ -718,14 +719,20 @@ Describe 'HRWSCCtrl stable identity capture primitive' {
         Mock Get-CimInstance {
             [pscustomobject]@{
                 ProcessId=[int]4321; Name='wsctrl11.exe'; ExecutablePath=$null
-                CreationDate=[datetimeoffset]::Parse('2026-08-24T01:02:03.0000000+00:00',[Globalization.CultureInfo]::InvariantCulture)
+                CreationDate=[datetimeoffset]::Parse('2026-08-25T01:51:29.5408150+00:00',[Globalization.CultureInfo]::InvariantCulture)
             }
         } -ParameterFilter { $ClassName -ceq 'Win32_Process' }
+        Mock Get-NativeProcessIdentity {
+            [pscustomobject][ordered]@{
+                PID=[int]4321; Name='wsctrl11.exe'; Path=$script:captureBinary
+                StartTimeUtc='2026-08-25T01:51:29.5408156Z'
+            }
+        }
 
         $capture = Get-CurrentServiceProcessIdentity -ServiceName 'HRWSCCtrl'
 
         $capture.Identity.process_path | Should -BeExactly $script:captureBinary
-        $capture.Identity.process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.0000000Z'
+        $capture.Identity.process_start_time_utc | Should -BeExactly '2026-08-25T01:51:29.5408156Z'
         Should -Invoke Get-NativeProcessIdentity -Times 1 -Exactly -ParameterFilter { $ProcessId -eq 4321 }
         Should -Invoke Get-CimInstance -Times 2 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Service' }
     }

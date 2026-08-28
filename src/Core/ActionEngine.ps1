@@ -2322,7 +2322,7 @@ function Get-CurrentServiceProcessIdentity {
             $null -eq $nativePath -or -not [System.IO.File]::Exists($nativePath) -or
             -not [string]::Equals($nativePath, $first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase) -or
             $nativeIdentity.StartTimeUtc -isnot [string] -or
-            [string]$nativeIdentity.StartTimeUtc -cne $wmiStartTimeUtc) {
+            -not (Test-WmiNativeProcessStartTimeEqual -WmiStartTimeUtc $wmiStartTimeUtc -NativeStartTimeUtc $nativeIdentity.StartTimeUtc)) {
             return [pscustomobject]@{ Identity=$null; Reason='current native process identity is inconsistent; rescan required' }
         }
         $processName = [string]$nativeIdentity.Name

@@ -112,6 +112,39 @@ function Test-NativeIdentityFullyQualifiedWindowsPath($Value) {
     return $Value -cmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+\\)'
 }
 
+function ConvertFrom-StrictCanonicalUtcProcessStartTime($Value) {
+    if ($Value -isnot [string] -or $Value -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$') { return $null }
+    try {
+        $parsed = [datetime]::MinValue
+        $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+        if (-not [datetime]::TryParseExact(
+                $Value,
+                "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
+                [Globalization.CultureInfo]::InvariantCulture,
+                $styles,
+                [ref]$parsed
+            ) -or $parsed.Kind -ne [DateTimeKind]::Utc -or $parsed.Year -lt 1970 -or $parsed -gt [datetime]::UtcNow) {
+            return $null
+        }
+        return $parsed
+    } catch {
+        return $null
+    }
+}
+
+function Test-WmiNativeProcessStartTimeEqual {
+    param($WmiStartTimeUtc, $NativeStartTimeUtc)
+
+    $wmiStart = ConvertFrom-StrictCanonicalUtcProcessStartTime $WmiStartTimeUtc
+    $nativeStart = ConvertFrom-StrictCanonicalUtcProcessStartTime $NativeStartTimeUtc
+    if ($null -eq $wmiStart -or $null -eq $nativeStart) { return $false }
+
+    $remainder = [int64]0
+    $wmiMicrosecond = [Math]::DivRem([int64]$wmiStart.Ticks, [int64]10, [ref]$remainder)
+    $nativeMicrosecond = [Math]::DivRem([int64]$nativeStart.Ticks, [int64]10, [ref]$remainder)
+    return $wmiMicrosecond -eq $nativeMicrosecond
+}
+
 function Get-NativeProcessIdentity {
     param($ProcessId)
 

@@ -914,7 +914,7 @@ function Get-PrivilegedServiceProcessIdentity($Service) {
                 -not [System.IO.File]::Exists([string]$nativeIdentity.Path) -or
                 -not [string]::Equals([System.IO.Path]::GetFullPath([string]$nativeIdentity.Path), [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase) -or
                 $nativeIdentity.StartTimeUtc -isnot [string] -or
-                [string]$nativeIdentity.StartTimeUtc -cne $wmiProcessStartTimeUtc) {
+                -not (Test-WmiNativeProcessStartTimeEqual -WmiStartTimeUtc $wmiProcessStartTimeUtc -NativeStartTimeUtc $nativeIdentity.StartTimeUtc)) {
                 throw 'unavailable'
             }
             $processName = [string]$nativeIdentity.Name

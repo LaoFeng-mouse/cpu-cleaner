@@ -53,3 +53,35 @@ Describe 'native read-only process identity helper' {
         Should -Invoke Invoke-NativeCloseProcessHandle -Times 0 -Exactly
     }
 }
+
+Describe 'WMI and native process start precision reconciliation' {
+    BeforeEach {
+        $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
+        . (Join-Path $projectRoot 'src\Core\Utils.ps1')
+    }
+
+    It 'accepts only canonical UTC values in the same WMI microsecond' {
+        Test-WmiNativeProcessStartTimeEqual `
+            -WmiStartTimeUtc '2026-08-25T01:51:29.5408150Z' `
+            -NativeStartTimeUtc '2026-08-25T01:51:29.5408156Z' | Should -BeTrue
+    }
+
+    It 'rejects the next WMI microsecond' {
+        Test-WmiNativeProcessStartTimeEqual `
+            -WmiStartTimeUtc '2026-08-25T01:51:29.5408150Z' `
+            -NativeStartTimeUtc '2026-08-25T01:51:29.5408160Z' | Should -BeFalse
+    }
+
+    It 'rejects invalid, noncanonical, and future values' -TestCases @(
+        @{ Wmi='invalid'; Native='2026-08-25T01:51:29.5408156Z'; Label='invalid WMI value' }
+        @{ Wmi='2026-08-25T01:51:29.540815Z'; Native='2026-08-25T01:51:29.5408156Z'; Label='six-digit WMI value' }
+        @{ Wmi='2026-08-25T01:51:29.5408150+00:00'; Native='2026-08-25T01:51:29.5408156Z'; Label='offset WMI value' }
+        @{ Wmi='2026-08-25T01:51:29.5408150Z'; Native='2026-08-25T01:51:29.5408156'; Label='non-UTC native value' }
+        @{ Wmi='2999-01-01T00:00:00.0000000Z'; Native='2999-01-01T00:00:00.0000006Z'; Label='future values' }
+    ) {
+        param($Wmi, $Native, $Label)
+
+        Test-WmiNativeProcessStartTimeEqual -WmiStartTimeUtc $Wmi -NativeStartTimeUtc $Native |
+            Should -BeFalse -Because $Label
+    }
+}

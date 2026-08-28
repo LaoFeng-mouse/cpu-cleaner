@@ -1236,6 +1236,10 @@ Describe 'internal scan_inventory collector' {
                 'path-mismatch' { $process.ExecutablePath = $script:CollectorOtherExecutable }
                 'path-nonexistent' { $process.ExecutablePath = Join-Path $TestDrive 'missing.exe' }
                 'native-valid' { $process.ExecutablePath = $null }
+                'native-submicrosecond' {
+                    $process.ExecutablePath = $null
+                    $process.CreationDate = [datetime]::SpecifyKind([datetime]'2026-08-25T01:51:29.5408150', [DateTimeKind]::Utc)
+                }
                 'native-failure' { $process.ExecutablePath = $null }
                 'native-name-mismatch' { $process.ExecutablePath = $null }
                 'native-path-mismatch' { $process.ExecutablePath = $null }
@@ -1244,7 +1248,7 @@ Describe 'internal scan_inventory collector' {
             return [pscustomobject]$process
         }
         Mock Get-NativeProcessIdentity {
-            if ($script:CollectorFailureMode -cnotin @('native-valid','native-name-mismatch','native-path-mismatch','native-start-mismatch')) {
+            if ($script:CollectorFailureMode -cnotin @('native-valid','native-submicrosecond','native-name-mismatch','native-path-mismatch','native-start-mismatch')) {
                 return $null
             }
             $identity = [ordered]@{
@@ -1253,6 +1257,7 @@ Describe 'internal scan_inventory collector' {
                 Path=$script:CollectorServiceExecutable
                 StartTimeUtc='2026-08-13T08:09:10.1234567Z'
             }
+            if ($script:CollectorFailureMode -ceq 'native-submicrosecond') { $identity.StartTimeUtc = '2026-08-25T01:51:29.5408156Z' }
             if ($script:CollectorFailureMode -ceq 'native-name-mismatch') { $identity.Name = 'other.exe' }
             if ($script:CollectorFailureMode -ceq 'native-path-mismatch') { $identity.Path = $script:CollectorOtherExecutable }
             if ($script:CollectorFailureMode -ceq 'native-start-mismatch') { $identity.StartTimeUtc = '2026-08-13T08:09:11.1234567Z' }
@@ -1327,6 +1332,16 @@ Describe 'internal scan_inventory collector' {
         $script:ServiceSnapshotQueryCount | Should -Be 2
         $script:ProcessQueryCount | Should -Be 1
         Should -Invoke Get-NativeProcessIdentity -Times 1 -Exactly -ParameterFilter { $ProcessId -eq $script:CollectorPid }
+        @($package.warnings).Count | Should -Be 0
+    }
+
+    It 'stores the full native 100ns start time when WMI agrees at microsecond precision' {
+        $script:CollectorFailureMode = 'native-submicrosecond'
+
+        $package = Invoke-ScanInventory -Nonce $script:Nonce
+
+        $package.services[0].ProcessIdentityStatus | Should -BeExactly 'complete'
+        $package.services[0].ProcessStartTimeUtc | Should -BeExactly '2026-08-25T01:51:29.5408156Z'
         @($package.warnings).Count | Should -Be 0
     }
 
