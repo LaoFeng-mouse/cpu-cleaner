@@ -509,7 +509,7 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         function New-ServiceStopCleanAction {
             return [pscustomobject]@{
                 id='lenovo-hrwscctrl'; name_cn='HRWSCCtrl'; detail='HRWSCCtrl'; reason_cn='manual'
-                hit_type='service'; action='stop_service_process'; status='pending'; service_name='HRWSCCtrl'
+                hit_type='service'; action='stop_service_runtime'; status='pending'; service_name='HRWSCCtrl'
                 service_binary_path='C:\Program Files\Lenovo Security Center\wsctrl11.exe'; process_id=[int]4321
                 process_name='wsctrl11.exe'; process_path='C:\Program Files\Lenovo Security Center\wsctrl11.exe'
                 process_start_time_utc='2026-08-24T01:02:03.0000000Z'
@@ -625,7 +625,7 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         $pendingAction = New-ServiceStopCleanAction
         $profiles = [pscustomobject]@{ profiles=@([pscustomobject]@{
             id='lenovo-hrwscctrl'; safe=$false; evidence=[pscustomobject]@{tested=$true}
-            actions=[pscustomobject]@{service='none'}; manual_actions=[pscustomobject]@{service='stop_service_process'}
+            actions=[pscustomobject]@{service='none'}; manual_actions=[pscustomobject]@{service='stop_service_runtime'}
             cleanup_policy=[pscustomobject]@{
                 execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
                 impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'

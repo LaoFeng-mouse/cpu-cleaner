@@ -1059,13 +1059,13 @@ Describe '勾选视图 (v1.5.5)' {
             $safeReason = '受保护扫描没有提供完整服务进程身份，请重新扫描。'
             $row = [pscustomobject]@{
                 id='lenovo-hrwscctrl'; vendor='Lenovo'; name_cn='联想安全中心组件 HRWSCCtrl'
-                hit_type='service'; action=$(if ($Observation) { 'investigate' } else { 'stop_service_process' })
-                status=$(if ($Observation) { '观察' } else { 'pending' }); detail='HRWSCCtrl'; reason_cn=$(if ($Observation) { $safeReason } else { '用户确认后仅结束当前服务进程实例' })
+                hit_type='service'; action=$(if ($Observation) { 'investigate' } else { 'stop_service_runtime' })
+                status=$(if ($Observation) { '观察' } else { 'pending' }); detail='HRWSCCtrl'; reason_cn=$(if ($Observation) { $safeReason } else { '用户确认后停止 exact HRWSCCtrl 服务当前运行态' })
                 service_name='HRWSCCtrl'; matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
                 execution_class=$(if ($Observation) { 'observation' } else { 'manual_impact' })
                 necessity=$(if ($Observation) { 'informational' } else { 'optional' }); default_selected=$false
                 requires_confirmation=$(if ($Observation) { $false } else { $true })
-                impact_cn=$(if ($Observation) { $safeReason } else { '只结束当前实例，联想安全中心功能可能暂时中断' })
+                impact_cn=$(if ($Observation) { $safeReason } else { '停止 exact HRWSCCtrl 服务当前运行态；不修改启动方式；服务可能再次启动' })
                 cleanup_reason_cn=$(if ($Observation) { $safeReason } else { '不使用该功能时减少当前后台占用' })
             }
             if ($Observation) {
@@ -2110,13 +2110,13 @@ Describe '勾选视图 (v1.5.5)' {
         $row.IsChecked | Should -BeFalse
         $row.NeedsConfirmation | Should -BeTrue
         $row.NecessityLabel | Should -BeExactly '必要性：按需处理'
-        $row.action_label | Should -BeExactly '结束当前服务进程'
-        $row.restorable_label | Should -BeExactly '仅当前实例（不可恢复）'
-        $row.ImpactText | Should -BeExactly '影响：只结束当前实例，联想安全中心功能可能暂时中断'
+        $row.action_label | Should -BeExactly '停止服务当前运行态'
+        $row.restorable_label | Should -BeExactly '不改启动方式（无恢复包）'
+        $row.ImpactText | Should -BeExactly '影响：停止 exact HRWSCCtrl 服务当前运行态；不修改启动方式；服务可能再次启动'
         $row.CleanupReasonText | Should -BeExactly '清理原因：不使用该功能时减少当前后台占用'
         $row.AutomationName | Should -Match 'HRWSCCtrl'
         $row._raw.service_name | Should -BeExactly 'HRWSCCtrl'
-        (Get-GuiExecutionTargetLabel -Item $row._raw) | Should -BeExactly 'wsctrl11.exe（PID 4321）'
+        (Get-GuiExecutionTargetLabel -Item $row._raw) | Should -BeExactly 'HRWSCCtrl（扫描 PID 4321）'
         $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
 
         $row.IsChecked = $true
@@ -2995,7 +2995,7 @@ Describe '勾选视图 (v1.5.5)' {
         { Copy-PendingActionForSubset $action } | Should -Throw '*internal inventory marker*'
     }
 
-    It 'truthfully warns that stop_service_process is current-instance-only and not restorable' {
+    It 'truthfully warns that stop_service_runtime stops the exact service runtime without changing startup type' {
         $oldLang = $script:Lang
         $script:Lang = 'zh'
         $script:CapturedImpactText = $null
@@ -3009,10 +3009,10 @@ Describe '勾选视图 (v1.5.5)' {
             $result | Should -BeFalse
             $script:CapturedImpactText | Should -Match '必要性：按需处理'
             $script:CapturedImpactText | Should -Not -Match '必要性：optional'
-            $script:CapturedImpactText | Should -Match '只结束当前实例'
+            $script:CapturedImpactText | Should -Match '停止 exact 服务的当前运行态'
+            $script:CapturedImpactText | Should -Match '不修改启动方式'
             $script:CapturedImpactText | Should -Match '不创建备份或恢复包'
-            $script:CapturedImpactText | Should -Match '无法通过.*恢复.*撤销'
-            $script:CapturedImpactText | Should -Match '服务可能.*重新启动'
+            $script:CapturedImpactText | Should -Match '其他组件可能再次启动该服务'
             $script:CapturedImpactText | Should -Not -Match '每个动作.*可通过恢复撤销'
         } finally {
             $script:Lang = $oldLang
@@ -3042,7 +3042,7 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It 'renders both recoverable and current-instance-only boundaries for mixed selections' {
+    It 'renders both recoverable and exact-service-runtime boundaries for mixed selections' {
         $oldLang = $script:Lang
         $script:Lang = 'zh'
         $persistent = (New-GuiReviewPendingFixture).actions[0]
@@ -3061,7 +3061,7 @@ Describe '勾选视图 (v1.5.5)' {
             $script:CapturedImpactText | Should -Match '先创建备份'
             $script:CapturedImpactText | Should -Match '可通过.*恢复.*撤销'
             $script:CapturedImpactText | Should -Match '不创建备份或恢复包'
-            $script:CapturedImpactText | Should -Match '服务可能.*重新启动'
+            $script:CapturedImpactText | Should -Match '其他组件可能再次启动该服务'
             $script:CapturedImpactText | Should -Not -Match '每个动作.*可通过恢复撤销'
         } finally {
             $script:Lang = $oldLang

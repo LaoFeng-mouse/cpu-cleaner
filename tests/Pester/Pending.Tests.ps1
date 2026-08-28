@@ -823,12 +823,12 @@ Invoke-Clean
 
         $profile.safe | Should -BeFalse
         $profile.evidence.tested | Should -BeTrue
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_process'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_runtime'
         $hit.safe | Should -BeFalse
         $hit.evidence.tested | Should -BeTrue
         $hit.matched_type | Should -BeExactly 'exact'
         $hit.execution_class | Should -BeExactly 'manual_impact'
-        $hit.action | Should -BeExactly 'stop_service_process'
+        $hit.action | Should -BeExactly 'stop_service_runtime'
         $hit.service_binary_path | Should -BeExactly $binary
         $hit.process_id | Should -Be 4321
         $hit.process_name | Should -BeExactly 'wsctrl11.exe'
@@ -849,7 +849,7 @@ Invoke-Clean
         @($p.resolved).Count | Should -Be 0
         @($p.observations).Count | Should -Be 0
         $p.actions[0].execution_class | Should -BeExactly 'manual_impact'
-        $p.actions[0].action | Should -BeExactly 'stop_service_process'
+        $p.actions[0].action | Should -BeExactly 'stop_service_runtime'
         $p.actions[0].service_name | Should -BeExactly 'HRWSCCtrl'
         $p.actions[0].service_binary_path | Should -BeExactly $binary
         $p.actions[0].process_id | Should -Be 4321
@@ -861,10 +861,10 @@ Invoke-Clean
         $p.actions[0].requires_confirmation | Should -BeTrue
     }
 
-    It 'accepts stop_service_process only for service hits with exact provenance' {
-        Test-ActionMatchesHitType 'stop_service_process' 'service' | Should -BeTrue
-        Test-ActionMatchesHitType 'stop_service_process' 'process' | Should -BeFalse
-        Test-ActionMatchesHitType 'stop_service_process' 'task' | Should -BeFalse
+    It 'accepts stop_service_runtime only for service hits with exact provenance' {
+        Test-ActionMatchesHitType 'stop_service_runtime' 'service' | Should -BeTrue
+        Test-ActionMatchesHitType 'stop_service_runtime' 'process' | Should -BeFalse
+        Test-ActionMatchesHitType 'stop_service_runtime' 'task' | Should -BeFalse
     }
 
     It 'persists stopped HRWSCCtrl exact hit as observation rather than resolved disabled' {
@@ -876,7 +876,7 @@ Invoke-Clean
 
         $profile.safe | Should -BeFalse
         $profile.evidence.tested | Should -BeTrue
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_process'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_runtime'
         $hit.safe | Should -BeFalse
         $hit.evidence.tested | Should -BeTrue
         $hit.matched_type | Should -BeExactly 'exact'
@@ -923,7 +923,7 @@ Invoke-Clean
 
         $profile.safe | Should -BeFalse
         $profile.evidence.tested | Should -BeTrue
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_process'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_runtime'
         $hit.safe | Should -BeFalse
         $hit.evidence.tested | Should -BeTrue
         $hit.matched_type | Should -BeExactly 'contains'

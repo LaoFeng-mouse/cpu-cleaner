@@ -211,7 +211,7 @@ Assert-Equal 'HRWSCCtrl 规则存在' ($null -ne $hrwscctrl) $true
 Assert-Equal 'HRWSCCtrl safe=false' $hrwscctrl.safe $false
 Assert-Equal 'HRWSCCtrl actions.service=none' $hrwscctrl.actions.service 'none'
 Assert-Equal 'HRWSCCtrl actions.process=none' $hrwscctrl.actions.process 'none'
-Assert-Equal 'HRWSCCtrl manual service=stop_service_process' $hrwscctrl.manual_actions.service 'stop_service_process'
+Assert-Equal 'HRWSCCtrl manual service=stop_service_runtime' $hrwscctrl.manual_actions.service 'stop_service_runtime'
 Assert-Equal 'HRWSCCtrl manual_impact' $hrwscctrl.cleanup_policy.execution_class 'manual_impact'
 Assert-Equal 'HRWSCCtrl default_selected=false' $hrwscctrl.cleanup_policy.default_selected $false
 Assert-Equal 'HRWSCCtrl requires_confirmation=true' $hrwscctrl.cleanup_policy.requires_confirmation $true
@@ -222,15 +222,15 @@ $manualStopRule = '{
   "id":"manual-stop","vendor":"T","name_cn":"手动结束服务进程","risk":"low","safe":false,
   "reason_cn":"仅手动处理","evidence":{"tested":true},
   "detect":{"services":[{"match":"Svc","type":"exact"}],"processes":[],"autostarts":[],"tasks":[]},
-  "actions":{"service":"none"},"manual_actions":{"service":"stop_service_process"},
+  "actions":{"service":"none"},"manual_actions":{"service":"stop_service_runtime"},
   "cleanup_policy":{"execution_class":"manual_impact","necessity":"optional","default_selected":false,"requires_confirmation":true,"impact_cn":"只结束当前实例","cleanup_reason_cn":"减少当前后台"}
 }'
-Test-Load '合法 stop_service_process 手动合同' ('{"schema_version":3,"profiles":[' + $manualStopRule + ']}') $true
-Test-Load 'stop_service_process 拒绝 actions.service' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"service":"none"},"manual_actions":\{"service":"stop_service_process"\}', '"service":"stop_service_process"},"manual_actions":{"service":"none"}') + ']}') $false
-Test-Load 'stop_service_process 拒绝 automatic_safe' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"execution_class":"manual_impact"', '"execution_class":"automatic_safe"') + ']}') $false
-Test-Load 'stop_service_process 拒绝 tested=false' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"tested":true', '"tested":false') + ']}') $false
-Test-Load 'stop_service_process 拒绝 default_selected=true' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"default_selected":false', '"default_selected":true') + ']}') $false
-Test-Load 'stop_service_process 拒绝 requires_confirmation=false' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"requires_confirmation":true', '"requires_confirmation":false') + ']}') $false
+Test-Load '合法 stop_service_runtime 手动合同' ('{"schema_version":3,"profiles":[' + $manualStopRule + ']}') $true
+Test-Load 'stop_service_runtime 拒绝 actions.service' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"service":"none"},"manual_actions":\{"service":"stop_service_runtime"\}', '"service":"stop_service_runtime"},"manual_actions":{"service":"none"}') + ']}') $false
+Test-Load 'stop_service_runtime 拒绝 automatic_safe' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"execution_class":"manual_impact"', '"execution_class":"automatic_safe"') + ']}') $false
+Test-Load 'stop_service_runtime 拒绝 tested=false' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"tested":true', '"tested":false') + ']}') $false
+Test-Load 'stop_service_runtime 拒绝 default_selected=true' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"default_selected":false', '"default_selected":true') + ']}') $false
+Test-Load 'stop_service_runtime 拒绝 requires_confirmation=false' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"requires_confirmation":true', '"requires_confirmation":false') + ']}') $false
 
 # 12. v1.8.1 文档分别承担自己的用户、安全与历史契约，禁止跨文档拼接代答
 $cleanerText = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
@@ -245,10 +245,10 @@ Assert-Match '脚本标题版本精确为 1.8.1' $cleanerText '(?m)^#  CPU 后�
 
 # README：用户行为与可见结果
 Assert-Match 'README 顶部区分持久恢复与一次性不可恢复' $readmeText '(?m)^一键扫描[^\r\n]{0,180}持久化变更[^\r\n]{0,80}(自动备份|备份)[^\r\n]{0,40}可恢复[^\r\n]{0,80}一次性结束进程[^\r\n]{0,40}不可恢复'
-Assert-Match 'README 明确 HRWSCCtrl 使用 stop_service_process' $readmeText '`?HRWSCCtrl`?[\s\S]{0,180}`?manual_actions\.service=stop_service_process`?'
+Assert-Match 'README 明确 HRWSCCtrl 使用 stop_service_runtime' $readmeText '`?HRWSCCtrl`?[\s\S]{0,180}`?manual_actions\.service=stop_service_runtime`?'
 Assert-Match 'README 明确默认不选和二次确认' $readmeText 'HRWSCCtrl[\s\S]{0,240}默认不选[\s\S]{0,100}二次确认'
-Assert-Match 'README 明确一次性不可恢复且 StartMode 不变' $readmeText 'stop_service_process[\s\S]{0,180}(一次性|非持久)[\s\S]{0,160}不可.{0,20}恢复包.{0,20}恢复[\s\S]{0,500}不修改 `?StartMode`?|不修改 `?StartMode`?[\s\S]{0,500}stop_service_process[\s\S]{0,180}(一次性|非持久)[\s\S]{0,160}不可.{0,20}恢复包.{0,20}恢复'
-Assert-Match 'README 明确约 5 秒与正 replacement PID 失败' $readmeText '旧 PID[\s\S]{0,100}约 5 秒[\s\S]{0,160}任意正 replacement PID[\s\S]{0,120}`?failed/verification`?'
+Assert-Match 'README 明确一次性不可恢复且 StartMode 不变' $readmeText 'stop_service_runtime[\s\S]{0,180}(一次性|非持久)[\s\S]{0,160}不可.{0,20}恢复包.{0,20}恢复[\s\S]{0,500}不修改 `?StartMode`?|不修改 `?StartMode`?[\s\S]{0,500}stop_service_runtime[\s\S]{0,180}(一次性|非持久)[\s\S]{0,160}不可.{0,20}恢复包.{0,20}恢复'
+Assert-Match 'README 明确约 5 秒与任意正服务 PID 失败' $readmeText '停止后[\s\S]{0,40}约 5 秒[\s\S]{0,160}任意正 PID[\s\S]{0,120}`?failed/verification`?'
 Assert-Equal 'README GUI 仅显示严格验证和净化后的安全字段' (Test-GuiSafeResultContract $readmeText) $true
 Assert-Match 'README 明确 30 秒真实机器验收待完成' $readmeText '(还需要|仍待)[^\r\n]{0,40}30 秒真实机器验收|30 秒真实机器验收[^\r\n]{0,40}仍待'
 Assert-Match 'README 说明受保护 inventory v2 完整身份才可选' $readmeText 'inventory_schema_version:?\s*2[\s\S]{0,300}complete[\s\S]{0,180}HRWSCCtrl[\s\S]{0,180}(可选|勾选)'
@@ -263,8 +263,8 @@ Assert-Equal 'README 当前区域禁止无否定上下文的完成声称' (Test-
 
 # SECURITY：信任边界、失败关闭与安全展示
 Assert-Match 'SECURITY 明确六字段执行前复验' $securityText '执行前复验服务/路径/PID/进程名/进程路径/启动时间'
-Assert-Match 'SECURITY 身份漂移失败关闭' $securityText '(任一|任何).{0,30}(变化|不一致)[^\r\n]{0,80}(拒绝|失败关闭|重新扫描)'
-Assert-Match 'SECURITY replacement PID 失败关闭' $securityText '任意正 replacement PID[\s\S]{0,100}`?failed/verification`?'
+Assert-Match 'SECURITY 身份漂移失败关闭' $securityText '任何身份漂移[^\r\n]{0,120}`?skipped`?[^\r\n]{0,180}重新扫描'
+Assert-Match 'SECURITY 服务重新出现正 PID 失败关闭' $securityText '出现任意正 PID[\s\S]{0,100}`?failed/verification`?'
 Assert-Match 'SECURITY inventory v2 拒绝旧版未来版且不迁移' $securityText 'inventory_schema_version:?\s*2[\s\S]{0,220}(v1|旧版)[\s\S]{0,100}(未来|future|v3)[\s\S]{0,180}(重新扫描|fresh scan)[\s\S]{0,100}(不自动迁移|不静默迁移)'
 Assert-Match 'SECURITY complete 使用真实受保护清单字段名' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*`complete`[^\r\n]{0,180}(稳定运行 PID|运行中的稳定 PID)[^\r\n]{0,180}`ProcessName`[^\r\n]{0,100}`ProcessPath`[^\r\n]{0,100}`ProcessStartTimeUtc`'
 Assert-NotMatch 'SECURITY complete 禁止不存在的 collector 字段名' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*`process_started_utc`'
@@ -274,7 +274,7 @@ Assert-Match 'SECURITY 只读采集双服务快照和单记录隔离' $securityT
 Assert-Match 'SECURITY marker 仅在可信包验证后附加且不序列化' $securityText 'ProcessIdentitySource[\s\S]{0,220}(可信包|受保护包|inventory 包)[\s\S]{0,120}(验证通过|验证成功|完成验证)[\s\S]{0,260}(不序列化|不得序列化)[\s\S]{0,120}(pending|执行子集|subset)'
 Assert-Match 'SECURITY marker 执行动作失败关闭' $securityText 'ProcessIdentitySource[\s\S]{0,500}(带有|携带|含有).{0,40}(reviewed action|已复核动作|执行动作)[\s\S]{0,120}(失败关闭|拒绝执行)'
 Assert-Match 'SECURITY 普通扫描消费可信证据与双快照' $securityText '(普通扫描|normal scan)[\s\S]{0,260}(不再需要|无需)[\s\S]{0,160}Win32_Process[\s\S]{0,80}ExecutablePath[\s\S]{0,300}(可信证据|受信证据)[\s\S]{0,160}(两次|两个|双)服务快照'
-Assert-Match 'SECURITY 只有 exact service_name 授权服务进程停止' $securityText 'stop_service_process[\s\S]{0,260}exact[\s\S]{0,100}service_name[\s\S]{0,280}(显示名|display.?name)[\s\S]{0,180}(contains|regex)[\s\S]{0,180}(不授权|不能授权|不得授权)'
+Assert-Match 'SECURITY 只有 exact service_name 授权服务进程停止' $securityText 'stop_service_runtime[\s\S]{0,260}exact[\s\S]{0,100}service_name[\s\S]{0,280}(显示名|display.?name)[\s\S]{0,180}(contains|regex)[\s\S]{0,180}(不授权|不能授权|不得授权)'
 Assert-Match 'SECURITY 漂移为 skipped 且 failure_stage 为空' $securityText '(漂移|变化|不一致)[\s\S]{0,200}status.?=.?`?skipped`?[\s\S]{0,140}failure_stage[\s\S]{0,80}(空|empty)[\s\S]{0,220}result_reason[\s\S]{0,120}(重新扫描|rescan)'
 Assert-Match 'SECURITY failure_stage 仅供 failed 终态' $securityText 'failure_stage[\s\S]{0,120}(仅|只).{0,40}(status.?=.?`?failed`?|failed 终态)'
 Assert-Equal 'SECURITY GUI 仅显示严格验证和净化后的安全字段' (Test-GuiSafeResultContract $securityText) $true
@@ -286,7 +286,7 @@ Assert-Equal 'SECURITY 禁止无否定上下文的完成声称' (Test-NoUnsuppor
 # CHANGELOG：只审查 Unreleased 中目标 1.8.1，旧版本历史措辞不参与发布契约
 Assert-Match 'CHANGELOG Unreleased 目标版本为 1.8.1 未发布' $changelogTarget181 '(?m)^## \[Unreleased\][\s\S]{0,160}目标版本[：:]?\s*1\.8\.1[^\r\n]{0,30}未发布'
 Assert-NotMatch 'CHANGELOG 不得存在正式 1.8.1 标题' $changelogText '(?m)^## \[1\.8\.1\](?:\s*-\s*\d{4}-\d{2}-\d{2})?\s*$'
-Assert-Match 'CHANGELOG 目标 1.8.1 记录真实故障和修复' $changelogTarget181 '\*\*真实故障\*\*[\s\S]{0,500}\*\*最小修复\*\*'
+Assert-Match 'CHANGELOG 目标 1.8.1 记录真实故障和精确服务运行态修复' $changelogTarget181 '\*\*真实故障\*\*[\s\S]{0,500}\*\*精确服务运行态停止\*\*'
 Assert-Match 'CHANGELOG 目标 1.8.1 记录 restart 检测和结果字段' $changelogTarget181 '\*\*重启检测\*\*[\s\S]{0,500}`?result_reason`?[\s/、,，]+`?failure_stage`?'
 Assert-Match 'CHANGELOG 目标 1.8.1 记录持久动作安全恢复边界' $changelogTarget181 '`?disable_service`?[\s/、,，]+`?remove_autostart`?[\s/、,，]+`?disable_task`?[\s\S]{0,160}(备份.{0,30}恢复|可恢复)'
 Assert-Match 'CHANGELOG 目标 1.8.1 记录 v2 身份交接' $changelogTarget181 'inventory_schema_version:?\s*2[\s\S]{0,260}(服务进程身份|process identity)[\s\S]{0,220}(重新扫描|拒绝 v1|v1.{0,30}拒绝)'

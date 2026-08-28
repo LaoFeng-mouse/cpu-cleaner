@@ -1,9 +1,9 @@
 ﻿# 特征库引擎 (v1.7.0 拆分): Schema 校验/迁移/匹配分发/Match-Profiles
 # ---------- v1.3: 特征库加载与校验 (Schema 2.0) ----------
 $script:ValidRisks   = @('high','medium','low')
-$script:ValidActions = @('disable_service','stop_service_process','remove_autostart','disable_task','uninstall','investigate','none')
+$script:ValidActions = @('disable_service','stop_service_runtime','remove_autostart','disable_task','uninstall','investigate','none')
 $script:PersistentDangerousActions = @('disable_service','remove_autostart','disable_task','uninstall')
-$script:ManualImpactActions = @('disable_service','stop_service_process','remove_autostart','disable_task','uninstall')
+$script:ManualImpactActions = @('disable_service','stop_service_runtime','remove_autostart','disable_task','uninstall')
 # Pending/执行器兼容: 所有可执行动作仍视为危险动作；profile 授权另行区分持久化自动动作。
 $script:DangerousActions = $script:ManualImpactActions
 $script:ValidCleanupExecutionClasses = @('automatic_safe','manual_impact')
@@ -261,8 +261,8 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                 foreach ($ak in Get-ActionKeys $p.actions) {
                     $av = Get-ActionFor $p.actions $ak
                     if ($av -isnot [string] -or $script:ValidActions -cnotcontains $av) { $errors += "id=$($p.id) actions.$ak 非法: $av" }
-                    if ($av -ceq 'stop_service_process') {
-                        $errors += "id=$($p.id) stop_service_process 只允许 manual_actions.service"
+                    if ($av -ceq 'stop_service_runtime') {
+                        $errors += "id=$($p.id) stop_service_runtime 只允许 manual_actions.service"
                     }
                 }
                 # safe=false 只能配 none/investigate
@@ -304,8 +304,8 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                         if ($av -isnot [string] -or $script:ValidActions -cnotcontains $av) {
                             $errors += "id=$($p.id) manual_actions.$ak 非法: $av"
                         }
-                        if ($av -ceq 'stop_service_process' -and $ak -cne 'service') {
-                            $errors += "id=$($p.id) stop_service_process 只允许 manual_actions.service"
+                        if ($av -ceq 'stop_service_runtime' -and $ak -cne 'service') {
+                            $errors += "id=$($p.id) stop_service_runtime 只允许 manual_actions.service"
                         }
                         if ($script:ManualImpactActions -ccontains $av) {
                             $hasDangerousManualAction = $true
@@ -500,7 +500,7 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
         ($script:PersistentDangerousActions -cnotcontains $declaredAction) -and
         ($script:ManualImpactActions -ccontains $manualAction) -and
         $isTested -and
-        $(if ($manualAction -ceq 'stop_service_process') {
+        $(if ($manualAction -ceq 'stop_service_runtime') {
             $hitType -ceq 'service' -and $matchedType -ceq 'exact' -and $matchedField -ceq 'service_name'
         } else {
             $hasNarrowEvidence
@@ -569,7 +569,7 @@ function Match-Profiles {
                     $processPath = ''
                     $processStartTimeUtc = ''
                     $obsReason = ''
-                    if ($decision.Action -ceq 'stop_service_process') {
+                    if ($decision.Action -ceq 'stop_service_runtime') {
                         $identityReason = ''
                         $identity = Get-ServiceProcessExecutionIdentity -Service $s -FailureReason ([ref]$identityReason)
                         if ($null -ne $identity) {

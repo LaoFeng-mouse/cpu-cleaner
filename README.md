@@ -70,11 +70,11 @@
 | 已处理（`resolved`） | 目标当前已经是 `disabled` 等目标状态 | 不可选 | 不重复清理 |
 | 仅观察（`observation`） | 只有 `contains` / `regex` 等宽匹配，或身份/扫描信息不完整 | 不可选 | 只能识别和提示 |
 
-其中，联想通知与诊断计划任务属于推荐/自动安全项；`HRWSCCtrl`（联想 Windows Security Center）属于可选有影响项：必要性是 `optional`，默认不选，只有用户主动勾选后才会弹出二次确认。它可能影响联想电脑管家的安全状态、主动防护和通知。确认后，工具只结束本次精确绑定的当前 `wsctrl11.exe` 进程实例，不停止或禁用服务，不修改 `StartMode`；`HRWSCCtrl` 的宽匹配命中仍只进入“仅观察”，不能执行。
+其中，联想通知与诊断计划任务属于推荐/自动安全项；`HRWSCCtrl`（联想 Windows Security Center）属于可选有影响项：必要性是 `optional`，默认不选，只有用户主动勾选后才会弹出二次确认。它可能影响联想电脑管家的安全状态、主动防护和通知。确认后，工具停止 exact `HRWSCCtrl` 服务的当前运行态，但不禁用服务、不修改 `StartMode`；其他组件可能再次启动该服务。`HRWSCCtrl` 的宽匹配命中仍只进入“仅观察”，不能执行。
 
 受保护清单使用 `inventory_schema_version: 2`。只有服务进程身份状态为 `complete` 且验证稳定，`HRWSCCtrl` 才会成为可选项；`not_running` 或 `unavailable` 只观察、不可执行，并提示重新扫描。
 
-`stop_service_process` 是一次性、非持久动作，不进入恢复包，因此不可通过恢复包恢复。执行前会复验服务/路径/PID/进程名/进程路径/启动时间，只对六项均与扫描快照一致的当前实例操作。旧 PID 退出后继续进行约 5 秒稳定验证；期间服务出现任意正 replacement PID（`> 0`）都记录为 `failed/verification`，不会把自动重新拉起误报成成功。
+`stop_service_runtime` 是一次性、非持久动作，不进入恢复包，因此不可通过恢复包恢复。执行前会复验服务/路径/PID/进程名/进程路径/启动时间；随后在同一个原生 SCM 服务句柄上核对 exact 服务的原始配置和 PID，再直接发送 STOP。该动作授权停止 exact 服务的当前运行态，不修改 `StartMode`，也不会自动停止依赖服务。停止后继续进行约 5 秒稳定验证；期间服务出现任意正 PID（`> 0`）都记录为 `failed/verification`，不会把自动重新拉起误报成成功。
 
 执行清单中的每项结果都会持久化并写回 `result_reason` / `failure_stage`；GUI 只显示经过严格验证和安全净化的 `result_reason` / `failure_stage`。持久动作 `disable_service` / `remove_autostart` / `disable_task` 仍在修改前备份并可通过可信恢复包恢复，与一次性结束进程严格分开。
 
@@ -241,7 +241,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sha256`。危险动作只接受实际命中的 `exact`，或命中 `autostart_value` / `task_path` / `process_path` 的 `path`；`contains` / `regex` 只能识别，不能因为规则声明了动作或 `allow_auto` 就获得执行资格。
 
-可选清理规则还应声明 `cleanup_policy`：`execution_class`、必要性、默认选择、是否需要确认、中文影响和清理原因。`HRWSCCtrl` 通过 `manual_actions.service=stop_service_process` 进入手动路径；它不是自动安全项，默认不选，必须二次确认，且只执行一次性、不可恢复的当前进程实例结束，不修改服务 `StartMode`。
+可选清理规则还应声明 `cleanup_policy`：`execution_class`、必要性、默认选择、是否需要确认、中文影响和清理原因。`HRWSCCtrl` 通过 `manual_actions.service=stop_service_runtime` 进入手动路径；它不是自动安全项，默认不选，必须二次确认。该动作只停止 exact 服务当前运行态，不修改服务 `StartMode`，也不生成恢复包。
 
 **程序启动时自动校验，错误规则直接拒绝加载：**
 - 当前特征库格式为 Schema 3.0；Schema 2.0 可在加载时迁移，未来版本拒绝加载。特征库迁移规则与 pending 清单必须使用 schema 3、且不自动迁移的规则相互独立
@@ -278,7 +278,7 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 - **restore 按可信备份恢复稳定状态**：服务恢复 StartType/DelayedAutoStart，并尝试恢复备份记录的 Running/Stopped 状态；`sc start` 返回“已在运行”(1056)时仍会继续读取最终状态，只有最终状态吻合才算成功。删除的自启项和禁用的任务也按备份还原。
 - **卸载动作不自动执行**：uninstall 只提示，需要人工到"设置-应用"卸载（安全考虑）
 - **NOT_STOPPABLE 服务**（如联想 LISFService）：禁用成功但进程杀不掉，重启后消失，工具会如实提示
-- **联想 HRWSCCtrl**：属于可选有影响项，不自动处理；用户主动确认后只尝试结束精确绑定的当前进程实例，不修改服务启动模式。若系统拒绝访问或服务在稳定验证期内重新绑定正 PID，按失败结果记录，不应反复强行处理
+- **联想 HRWSCCtrl**：属于可选有影响项，不自动处理；用户主动确认后尝试停止 exact 服务当前运行态，但不修改服务启动模式。若系统拒绝 STOP，或服务在稳定验证期内再次出现正 PID，按失败结果记录，不应反复强行处理
 - **瞬时采样**：Top CPU 进程是 2 秒采样，长期监控请用任务管理器
 - PowerShell 5.1 环境下脚本为 UTF-8 BOM 编码；如自行编辑脚本，**必须保持 BOM**（否则中文报错）。特征库 JSON 用 UTF-8 即可。
 
@@ -286,7 +286,7 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 
 ## 版本记录
 
-- v1.8.1（待发布）：修复 HRWSCCtrl 的一次性精确进程结束语义，不修改服务启动模式；30 秒真实机器验收仍待人工执行。
+- v1.8.1（待发布）：新增 HRWSCCtrl 的一次性 exact 服务运行态停止语义，不修改服务启动模式、不级联停止依赖服务；30 秒真实机器验收仍待人工执行。
 - 2026-08-24 v1.8.0（联想可选清理与桌面 GUI）：Schema 3 matcher 来源绑定、可选 OEM 清理、受保护管理员扫描、一次性结束高 CPU 进程、鼠鼠 GUI 与桌面快捷方式；旧 pending 清单拒绝自动迁移，执行前重新验证当前身份与状态。
 - 2026-08-09 v1.7.0（模块化拆分）：cpu-cleaner.ps1 1539 行 → 主脚本 ~90 行 + src/Core/ 7 个域文件（Utils/ProfileEngine/Scanner/RiskEngine/ReportEngine/ActionEngine/BackupManager），dot-source 保持作用域共享；run-unit/CI analyzer 适配；测试 85+14 项。
 - 2026-08-09 v1.6.0（Schema 3.0 match_type）：detect 从字符串子串升级为显式 match_type（exact/contains/regex/path/publisher/sha256），**执行闸门**——危险动作必须是窄匹配（exact/path）才能自动执行，contains/regex 宽匹配默认降级 investigate（识别保留、执行收紧），实机验证过的规则可显式 execution.allow_auto=true 豁免；旧特征库加载自动迁移 v3（11 条联想实测规则保留自动资格）；测试 85+14 项。

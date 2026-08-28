@@ -186,7 +186,15 @@ function Get-GuiExecutionTargetLabel {
     param($Item)
     $hitType = [string]$Item.hit_type
     $action = [string]$Item.action
-    if ($hitType -cin @('process','service_process') -or $action -ceq 'stop_service_process') {
+    if ($action -ceq 'stop_service_runtime') {
+        $serviceName = [string]$Item.service_name
+        $processId = $Item.process_id
+        if (-not [string]::IsNullOrWhiteSpace($serviceName) -and
+            ($processId -is [int32] -or $processId -is [int64]) -and [int64]$processId -gt 0) {
+            return ('{0}（扫描 PID {1}）' -f $serviceName.Trim(), [int64]$processId)
+        }
+    }
+    if ($hitType -cin @('process','service_process')) {
         $processName = [string]$Item.process_name
         $processId = $Item.process_id
         if (-not [string]::IsNullOrWhiteSpace($processName) -and

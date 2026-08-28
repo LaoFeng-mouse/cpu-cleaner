@@ -195,7 +195,7 @@ Describe 'GUI presentation model' {
     It '逐项展示终态目标、结果和经验证的 result_reason' {
         $rows = @(ConvertTo-GuiExecutionRows @(
             [pscustomobject]@{ name_cn='服务 A'; action='disable_service'; status='success'; result_reason='服务已停止'; reason_cn='不应显示的旧原因' },
-            [pscustomobject]@{ name_cn='服务 B'; action='stop_service_process'; status='failed'; result_reason='当前实例已结束，但服务已自动重新拉起 PID 4321'; failure_stage='verification'; reason_cn='失败' },
+            [pscustomobject]@{ name_cn='服务 B'; action='stop_service_runtime'; status='failed'; result_reason='当前实例已结束，但服务已自动重新拉起 PID 4321'; failure_stage='verification'; reason_cn='失败' },
             [pscustomobject]@{ name_cn='服务 C'; action='disable_task'; status='skipped'; result_reason='目标状态已变化，请重新扫描' },
             [pscustomobject]@{ name_cn='项目 D'; action='uninstall'; status='manual_required'; result_reason='请在应用设置中手动卸载' }
         ))

@@ -686,7 +686,7 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
 
         $profile | Should -Not -BeNullOrEmpty
         $profile.safe | Should -BeFalse
-        $profile.reason_cn | Should -BeExactly '联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需结束当前进程'
+        $profile.reason_cn | Should -BeExactly '联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需停止 HRWSCCtrl 服务当前运行态'
         $services.Count | Should -Be 2
         $services[0].match | Should -BeExactly 'HRWSCCtrl'
         $services[0].type | Should -BeExactly 'exact'
@@ -694,17 +694,17 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
         $services[1].type | Should -BeExactly 'contains'
         Get-ActionFor $profile.actions 'service' | Should -BeExactly 'none'
         Get-ActionFor $profile.actions 'process' | Should -BeExactly 'none'
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_process'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_runtime'
 
         $policy = Get-CleanupPolicy $profile
         $policy.execution_class | Should -BeExactly 'manual_impact'
         $policy.necessity | Should -BeExactly 'optional'
         $policy.default_selected | Should -BeFalse
         $policy.requires_confirmation | Should -BeTrue
-        $policy.impact_cn | Should -BeExactly '只结束当前 wsctrl11.exe 实例；不可恢复；联想服务可能自动重新拉起'
-        $policy.cleanup_reason_cn | Should -BeExactly '不使用联想电脑管家时可结束当前安全中心后台进程'
+        $policy.impact_cn | Should -BeExactly '停止 exact HRWSCCtrl 服务当前运行态；不修改启动方式；不可通过恢复撤销；服务可能被其他组件重新启动'
+        $policy.cleanup_reason_cn | Should -BeExactly '不使用联想电脑管家时可停止当前安全中心服务运行态，减少本次会话后台占用'
 
-        $hit.action | Should -BeExactly 'stop_service_process'
+        $hit.action | Should -BeExactly 'stop_service_runtime'
         $hit.execution_class | Should -BeExactly 'manual_impact'
         $hit.matched_type | Should -BeExactly 'exact'
         $hit.matched_field | Should -BeExactly 'service_name'

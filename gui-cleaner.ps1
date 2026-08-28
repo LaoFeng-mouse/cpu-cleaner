@@ -39,7 +39,7 @@ $script:I18N = @{
         ScanRequestingInventory='正在请求管理员只读授权'; ScanCollectingInventory='正在读取完整服务和计划任务'; ScanValidatingInventory='正在验证受保护扫描结果'; ScanLimitedWarning='计划任务和完整服务信息未检查，本次结果不能判断电脑是否干净。'; ScanInventoryReadonly='只读取服务和计划任务，不会修改系统设置。'; ScanInventoryFailed='管理员只读采集失败'; ScanInventoryTimeout='管理员只读采集超过 180 秒；进程状态确认前将保持安全锁定。'
         ReviewErrorSummary='待处理清单已过期，必须重新扫描。'; ReviewNoMutation='没有执行任何系统修改。'
         BtnLoad='读取待处理清单'; PendingHint='按风险/实测展示，勾选要处理的项目（未实测=仅观察，默认不勾选）'; PendingNone='没有待处理项目——请先到【1. 扫描】页扫描（或已全部处理完）'; PendingCount='共 {0} 项待处理。勾选后到【3. 执行】页处理。'
-        ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='持久设置会先备份；当前实例类不创建恢复包；每项执行后复核。会弹管理员确认窗口，点【是】。'
+        ExecInfo1='在【2. 处理建议】页勾选要处理的项目，到这里一键执行。'; ExecInfo2='持久设置会先备份；一次性服务运行态操作不创建恢复包；每项执行后复核。会弹管理员确认窗口，点【是】。'
         BtnExec='处理已勾选项目（需要管理员）'; ExecEmpty='请先勾选要处理的项目（【2. 处理建议】页勾选）。'; ExecStart='将处理 {0} 项。已请求管理员权限，请在弹窗点【是】…'; ExecDone='处理窗口已结束。到【4. 结果】页查看（建议重启电脑让改动完全生效）。'
         ExecFailed='执行失败: ExitCode={0}（可能被取消或出错）'; ExecDoneSum='执行完成: success {0} / failed {1} / skipped {2} / manual {3}'; ExecPartialFailed='部分项目失败。'; ExecCloseBlocked='管理员处理仍在启动、运行或状态未知，暂不能关闭窗口。'; ExecStatusUnknown='管理员进程状态未知'
         ExecUnauthorized='未授权、未开始处理。'; ExecNotStarted='管理员授权未完成，未开始处理，系统设置没有变化。'; ExecPartialPossible='执行进程异常结束，可能已有部分动作执行。'; ExecResultReadFailed='无法完整读取逐项结果。'
@@ -605,7 +605,7 @@ function Get-ActionLabel($a) {
         'disable_service'  { return '禁用服务' }
         'remove_autostart' { return '删除自启' }
         'disable_task'     { return '禁用任务' }
-        'stop_service_process' { return '结束当前服务进程' }
+        'stop_service_runtime' { return '停止服务当前运行态' }
         'uninstall'        { return '手动卸载' }
         'investigate'      { return '仅观察' }
         'none'             { return '不处理' }
@@ -663,7 +663,7 @@ function Get-PendingViewItems {
             risk_label        = $d.risk_label
             evidence_label    = $d.evidence_label
             action_label      = Get-ActionLabel $i.action
-            restorable_label  = if ($i.action -ceq 'stop_service_process') { '仅当前实例（不可恢复）' } else { '可恢复' }
+            restorable_label  = if ($i.action -ceq 'stop_service_runtime') { '不改启动方式（无恢复包）' } else { '可恢复' }
             status            = $i.status
             reason_cn         = $i.reason_cn
             matcher_detail    = Format-GuiMatcherDetail $i
@@ -1952,7 +1952,7 @@ function Confirm-GuiImpactActions {
         $selectedActions = @($Actions)
         if ($selectedActions.Count -eq 0) { return $false }
         $english = ($script:Lang -ceq 'en')
-        $hasCurrentInstanceOnly = $false
+        $hasServiceRuntimeStop = $false
         $hasPersistentRecoverable = $false
         $lines = if ($english) {
             @('The selected items can affect OEM features.', '')
@@ -1963,8 +1963,8 @@ function Confirm-GuiImpactActions {
             foreach ($propertyName in @('name_cn','necessity','cleanup_reason_cn','impact_cn','action')) {
                 $null = Get-GuiReviewScalarString -Item $action -PropertyName $propertyName -Context 'manual confirmation'
             }
-            if ($action.action -ceq 'stop_service_process') {
-                $hasCurrentInstanceOnly = $true
+            if ($action.action -ceq 'stop_service_runtime') {
+                $hasServiceRuntimeStop = $true
             } elseif ($action.action -cin @('disable_service','remove_autostart','disable_task')) {
                 $hasPersistentRecoverable = $true
             }
@@ -1985,8 +1985,8 @@ function Confirm-GuiImpactActions {
             if ($hasPersistentRecoverable) {
                 $lines += 'Persistent setting changes create a backup first and can be undone through Restore.'
             }
-            if ($hasCurrentInstanceOnly) {
-                $lines += 'Stop-service-process actions end only the current instance. No backup or Restore package is created, they cannot be undone through Restore, and the service may restart.'
+            if ($hasServiceRuntimeStop) {
+                $lines += 'This stops the exact service runtime without changing its startup type. No backup or Restore package is created; the service may be started again by another component.'
             }
             $lines += 'Continue with these selected items?'
             $title = 'Confirm high-impact cleanup'
@@ -1994,8 +1994,8 @@ function Confirm-GuiImpactActions {
             if ($hasPersistentRecoverable) {
                 $lines += '持久设置变更会先创建备份，可通过“恢复”撤销。'
             }
-            if ($hasCurrentInstanceOnly) {
-                $lines += '结束服务进程只结束当前实例，不创建备份或恢复包，无法通过“恢复”撤销，服务可能会重新启动。'
+            if ($hasServiceRuntimeStop) {
+                $lines += '这会停止 exact 服务的当前运行态，但不修改启动方式；不创建备份或恢复包，其他组件可能再次启动该服务。'
             }
             $lines += '是否继续处理这些已选项目？'
             $title = '确认高影响清理'

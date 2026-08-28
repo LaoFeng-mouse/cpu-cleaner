@@ -160,7 +160,7 @@ Describe 'Profile 加载' {
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It 'stop_service_process 仅以 tested manual_impact service 动作加载' {
+    It 'stop_service_runtime 仅以 tested manual_impact service 动作加载' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $policy = [pscustomobject]@{
             execution_class = 'manual_impact'; necessity = 'optional'
@@ -168,41 +168,41 @@ Describe 'Profile 加载' {
             impact_cn = '只结束当前实例；不可恢复；服务可能重新拉起'
             cleanup_reason_cn = '不使用联想电脑管家时减少当前常驻后台'
         }
-        $profile = & $script:NewPolicyTestProfile -CleanupPolicy $policy -ManualActions ([pscustomobject]@{ service = 'stop_service_process' })
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy $policy -ManualActions ([pscustomobject]@{ service = 'stop_service_runtime' })
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
         try {
             $loaded = (Load-Profiles -Path $tmp).profiles[0]
-            Get-ManualActionFor $loaded 'service' | Should -BeExactly 'stop_service_process'
+            Get-ManualActionFor $loaded 'service' | Should -BeExactly 'stop_service_runtime'
             $decision = Get-HitExecutionDecision $loaded 'service' ([pscustomobject]@{ matched_type = 'exact'; matched_field = 'service_name' })
-            $decision.Action | Should -BeExactly 'stop_service_process'
+            $decision.Action | Should -BeExactly 'stop_service_runtime'
             $decision.ExecutionClass | Should -BeExactly 'manual_impact'
             $decision.DefaultSelected | Should -BeFalse
             $decision.RequiresConfirmation | Should -BeTrue
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It 'actions.service=stop_service_process 被拒绝为非手动声明' {
+    It 'actions.service=stop_service_runtime 被拒绝为非手动声明' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
             execution_class = 'manual_impact'; necessity = 'optional'
             default_selected = $false; requires_confirmation = $true
             impact_cn = '影响'; cleanup_reason_cn = '原因'
         })
-        $profile.actions.service = 'stop_service_process'
+        $profile.actions.service = 'stop_service_runtime'
         $profile.manual_actions.service = 'none'
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
-        try { { Load-Profiles -Path $tmp } | Should -Throw '*stop_service_process 只允许 manual_actions.service*' }
+        try { { Load-Profiles -Path $tmp } | Should -Throw '*stop_service_runtime 只允许 manual_actions.service*' }
         finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It 'stop_service_process 拒绝非 service manual key 和 automatic_safe 形状' -TestCases @(
-        @{ label = 'process-key'; key = 'process'; executionClass = 'manual_impact'; expected = '*stop_service_process 只允许 manual_actions.service*' }
+    It 'stop_service_runtime 拒绝非 service manual key 和 automatic_safe 形状' -TestCases @(
+        @{ label = 'process-key'; key = 'process'; executionClass = 'manual_impact'; expected = '*stop_service_runtime 只允许 manual_actions.service*' }
         @{ label = 'automatic-safe'; key = 'service'; executionClass = 'automatic_safe'; expected = '*危险 manual_actions 必须使用 manual_impact*' }
     ) {
         param($label, $key, $executionClass, $expected)
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $manual = [pscustomobject]@{}
-        $manual | Add-Member -NotePropertyName $key -NotePropertyValue 'stop_service_process'
+        $manual | Add-Member -NotePropertyName $key -NotePropertyValue 'stop_service_runtime'
         $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
             execution_class = $executionClass; necessity = 'optional'
             default_selected = $false; requires_confirmation = $true
@@ -213,7 +213,7 @@ Describe 'Profile 加载' {
         finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It 'stop_service_process 拒绝不完整的 manual_impact 安全形状: <label>' -TestCases @(
+    It 'stop_service_runtime 拒绝不完整的 manual_impact 安全形状: <label>' -TestCases @(
         @{ label = 'untested'; tested = $false; defaultSelected = $false; requiresConfirmation = $true; expected = '*manual_impact 要求 evidence.tested=true*' }
         @{ label = 'default-selected'; tested = $true; defaultSelected = $true; requiresConfirmation = $true; expected = '*manual_impact 要求 default_selected=false*' }
         @{ label = 'no-confirmation'; tested = $true; defaultSelected = $false; requiresConfirmation = $false; expected = '*manual_impact 要求 requires_confirmation=true*' }
@@ -224,14 +224,14 @@ Describe 'Profile 加载' {
             execution_class = 'manual_impact'; necessity = 'optional'
             default_selected = $defaultSelected; requires_confirmation = $requiresConfirmation
             impact_cn = '影响'; cleanup_reason_cn = '原因'
-        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_process' }) -Evidence ([pscustomobject]@{ tested = $tested })
+        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_runtime' }) -Evidence ([pscustomobject]@{ tested = $tested })
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
         try { { Load-Profiles -Path $tmp } | Should -Throw $expected }
         finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It 'stop_service_process 只由 service exact service_name 实际 matcher 授权' -TestCases @(
-        @{ matcher = 'exact'; field = 'service_name'; expectedAction = 'stop_service_process'; expectedClass = 'manual_impact' }
+    It 'stop_service_runtime 只由 service exact service_name 实际 matcher 授权' -TestCases @(
+        @{ matcher = 'exact'; field = 'service_name'; expectedAction = 'stop_service_runtime'; expectedClass = 'manual_impact' }
         @{ matcher = 'exact'; field = 'service_display_name'; expectedAction = 'investigate'; expectedClass = 'observation' }
         @{ matcher = 'exact'; field = $null; expectedAction = 'investigate'; expectedClass = 'observation' }
         @{ matcher = 'path'; field = 'service_name'; expectedAction = 'investigate'; expectedClass = 'observation' }
@@ -239,7 +239,7 @@ Describe 'Profile 加载' {
         @{ matcher = 'regex'; field = 'service_name'; expectedAction = 'investigate'; expectedClass = 'observation' }
     ) {
         param($matcher, $field, $expectedAction, $expectedClass)
-        $profile = & $script:NewDecisionTestProfile -Safe $false -Action 'none' -ManualAction 'stop_service_process' -CleanupPolicy ([pscustomobject]@{
+        $profile = & $script:NewDecisionTestProfile -Safe $false -Action 'none' -ManualAction 'stop_service_runtime' -CleanupPolicy ([pscustomobject]@{
             execution_class = 'manual_impact'; necessity = 'optional'
             default_selected = $false; requires_confirmation = $true
             impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
@@ -253,13 +253,13 @@ Describe 'Profile 加载' {
         $decision.ExecutionClass | Should -BeExactly $expectedClass
     }
 
-    It 'stop_service_process 即使 exact 命中也不授权非 service hitType' {
+    It 'stop_service_runtime 即使 exact 命中也不授权非 service hitType' {
         $profile = & $script:NewDecisionTestProfile -Safe $false -Action 'none' -CleanupPolicy ([pscustomobject]@{
             execution_class = 'manual_impact'; necessity = 'optional'
             default_selected = $false; requires_confirmation = $true
             impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
         })
-        $profile | Add-Member -NotePropertyName manual_actions -NotePropertyValue ([pscustomobject]@{ process = 'stop_service_process' })
+        $profile | Add-Member -NotePropertyName manual_actions -NotePropertyValue ([pscustomobject]@{ process = 'stop_service_runtime' })
 
         $decision = Get-HitExecutionDecision $profile 'process' ([pscustomobject]@{ matched_type = 'exact' })
 
@@ -267,7 +267,7 @@ Describe 'Profile 加载' {
         $decision.ExecutionClass | Should -BeExactly 'observation'
     }
 
-    It 'trusted v2 完整身份和两次稳定服务快照生成 stop_service_process 五字段且不查询 Win32_Process' {
+    It 'trusted v2 完整身份和两次稳定服务快照生成 stop_service_runtime 五字段且不查询 Win32_Process' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $binary = Join-Path $TestDrive 'wsctrl11.exe'
         $expectedStartTimeUtc = '2026-08-24T01:02:03.4567890Z'
@@ -276,7 +276,7 @@ Describe 'Profile 加载' {
             execution_class = 'manual_impact'; necessity = 'optional'
             default_selected = $false; requires_confirmation = $true
             impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
-        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_process' })
+        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_runtime' })
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
         $script:ProfileFile = $tmp
         Mock Get-CimInstance {
@@ -287,7 +287,7 @@ Describe 'Profile 加载' {
             $hits = @(Match-Profiles -Services @($service) -AutoStarts @() -Tasks @() -TopProcs @())
 
             $hits.Count | Should -Be 1
-            $hits[0].action | Should -BeExactly 'stop_service_process'
+            $hits[0].action | Should -BeExactly 'stop_service_runtime'
             $hits[0].service_binary_path | Should -BeExactly $binary
             $hits[0].process_id | Should -Be 4321
             $hits[0].process_name | Should -BeExactly 'wsctrl11.exe'
@@ -338,7 +338,7 @@ Describe 'Profile 加载' {
             execution_class = 'manual_impact'; necessity = 'optional'
             default_selected = $false; requires_confirmation = $true
             impact_cn = '只结束当前实例'; cleanup_reason_cn = '减少当前后台'
-        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_process' })
+        }) -ManualActions ([pscustomobject]@{ service = 'stop_service_runtime' })
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
         $script:ProfileFile = $tmp
         $service = & $script:NewTrustedService -BinaryPath $binary
@@ -397,14 +397,14 @@ Describe 'Profile 加载' {
         $service.ProcessIdentitySource | Should -BeExactly 'trusted_inventory_v2'
     }
 
-    It 'local limited 服务记录没有 trusted marker 且不能生成 stop_service_process' {
+    It 'local limited 服务记录没有 trusted marker 且不能生成 stop_service_runtime' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $binary = Join-Path $TestDrive 'wsctrl11.exe'
         [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
         $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
             execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
             impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
-        }) -ManualActions ([pscustomobject]@{ service='stop_service_process' })
+        }) -ManualActions ([pscustomobject]@{ service='stop_service_runtime' })
         & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
         $script:ProfileFile = $tmp
         Mock Get-CimInstance { [pscustomobject]@{
@@ -775,12 +775,12 @@ Describe 'Profile 加载' {
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It 'stop_service_process 混合 exact 与 contains 规则仅命中 contains 时保持 observation' {
+    It 'stop_service_runtime 混合 exact 与 contains 规则仅命中 contains 时保持 observation' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
             execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
             impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
-        }) -ManualActions ([pscustomobject]@{ service='stop_service_process' })
+        }) -ManualActions ([pscustomobject]@{ service='stop_service_runtime' })
         $profile.detect.services = @(
             [pscustomobject]@{ match='ExactOnlyService'; type='exact' }
             [pscustomobject]@{ match='HRW'; type='contains' }

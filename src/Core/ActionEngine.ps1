@@ -43,7 +43,7 @@ function Test-ActionMatchesHitType($Action, $HitType) {
         return @('service','process','autostart','task') -ccontains $HitType
     }
     switch -CaseSensitive ($HitType) {
-        'service'   { return @('disable_service','stop_service_process') -ccontains $Action }
+        'service'   { return @('disable_service','stop_service_runtime') -ccontains $Action }
         'autostart' { return $Action -ceq 'remove_autostart' }
         'task'      { return $Action -ceq 'disable_task' }
         default     { return $false }
@@ -513,7 +513,7 @@ function Test-PendingSchemaSupported($Pending) {
 
 function Test-ServiceProcessActionShape($Action) {
     if ($null -eq $Action -or
-        (Get-StrictNonBlankStringProperty $Action 'action') -cne 'stop_service_process' -or
+        (Get-StrictNonBlankStringProperty $Action 'action') -cne 'stop_service_runtime' -or
         (Get-StrictNonBlankStringProperty $Action 'hit_type') -cne 'service' -or
         (Get-StrictNonBlankStringProperty $Action 'matched_type') -cne 'exact' -or
         (Get-StrictNonBlankStringProperty $Action 'matched_field') -cne 'service_name' -or
@@ -1056,7 +1056,7 @@ function Get-PendingIdentityKey($Item) {
         matched_type         = $Item.matched_type
         matched_field        = $Item.matched_field
     }
-    if ($Item.action -ceq 'stop_service_process') {
+    if ($Item.action -ceq 'stop_service_runtime') {
         $identity | Add-Member NoteProperty service_binary_path $Item.service_binary_path
         $identity | Add-Member NoteProperty process_start_time_utc $Item.process_start_time_utc
     }
@@ -1084,7 +1084,7 @@ function Test-ManualImpactDigestActionShape($Action) {
         -not (Test-ActionMatchesHitType $Action.action $Action.hit_type)) { return $false }
     switch -CaseSensitive ($Action.hit_type) {
         'service' {
-            if ($Action.action -ceq 'stop_service_process') { return Test-ServiceProcessActionShape $Action }
+            if ($Action.action -ceq 'stop_service_runtime') { return Test-ServiceProcessActionShape $Action }
             return $null -ne (Get-StrictNonBlankStringProperty $Action 'service_name')
         }
         'autostart' {
@@ -1168,7 +1168,7 @@ function Get-PendingExecutableTargetIdentityKey($Item) {
     switch -CaseSensitive ($hitType) {
         'SERVICE' {
             $identity.service_name = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'service_name')
-            if ((Get-PendingHitProperty $Item 'action') -ceq 'stop_service_process') {
+            if ((Get-PendingHitProperty $Item 'action') -ceq 'stop_service_runtime') {
                 $identity.service_binary_path = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'service_binary_path')
                 $identity.process_id = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_id')
                 $identity.process_name = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_name')
@@ -1359,7 +1359,7 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             $actionHitTypeAllowed -and
             ($null -ne $displayPolicy) -and
             $categoryComplete
-        if ($executable -and $h.action -ceq 'stop_service_process') {
+        if ($executable -and $h.action -ceq 'stop_service_runtime') {
             $executable = Test-ServiceProcessActionShape $h
         }
 
@@ -1469,7 +1469,7 @@ function Test-PendingActionEligible($p, $profiles) {
     if ($p.status -cnotin @('pending','failed')) { return $false }
     if ($p.action -cnotin $script:DangerousActions) { return $false }
     if (-not (Test-HitMatcherEvidenceShape $p)) { return $false }
-    if ($p.action -ceq 'stop_service_process' -and -not (Test-ServiceProcessActionShape $p)) { return $false }
+    if ($p.action -ceq 'stop_service_runtime' -and -not (Test-ServiceProcessActionShape $p)) { return $false }
 
     if ($profiles.PSObject.Properties.Name -notcontains 'profiles') { return $false }
     $rules = @($profiles.profiles | Where-Object {
@@ -2454,6 +2454,223 @@ function Start-ServiceProcessVerificationDelay([int]$Milliseconds) {
     Start-Sleep -Milliseconds $Milliseconds
 }
 
+function Initialize-NativeExactServiceRuntimeStopApi {
+    if ($null -ne ('ShushuCleaner.ExactServiceRuntimeStopNativeV1' -as [type])) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+namespace ShushuCleaner
+{
+    public sealed class ExactServiceRuntimeStopResultV1
+    {
+        public string Status { get; set; }
+        public bool StopSent { get; set; }
+        public int ErrorCode { get; set; }
+        public uint ProcessId { get; set; }
+    }
+
+    public static class ExactServiceRuntimeStopNativeV1
+    {
+        private const uint SC_MANAGER_CONNECT = 0x0001;
+        private const uint SERVICE_QUERY_CONFIG = 0x0001;
+        private const uint SERVICE_QUERY_STATUS = 0x0004;
+        private const uint SERVICE_STOP = 0x0020;
+        private const uint SERVICE_CONTROL_STOP = 0x00000001;
+        private const int SC_STATUS_PROCESS_INFO = 0;
+        private const uint SERVICE_STOPPED = 0x00000001;
+        private const uint SERVICE_RUNNING = 0x00000004;
+        private const int ERROR_INSUFFICIENT_BUFFER = 122;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SERVICE_STATUS
+        {
+            public uint dwServiceType;
+            public uint dwCurrentState;
+            public uint dwControlsAccepted;
+            public uint dwWin32ExitCode;
+            public uint dwServiceSpecificExitCode;
+            public uint dwCheckPoint;
+            public uint dwWaitHint;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SERVICE_STATUS_PROCESS
+        {
+            public uint dwServiceType;
+            public uint dwCurrentState;
+            public uint dwControlsAccepted;
+            public uint dwWin32ExitCode;
+            public uint dwServiceSpecificExitCode;
+            public uint dwCheckPoint;
+            public uint dwWaitHint;
+            public uint dwProcessId;
+            public uint dwServiceFlags;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct QUERY_SERVICE_CONFIG
+        {
+            public uint dwServiceType;
+            public uint dwStartType;
+            public uint dwErrorControl;
+            public IntPtr lpBinaryPathName;
+            public IntPtr lpLoadOrderGroup;
+            public uint dwTagId;
+            public IntPtr lpDependencies;
+            public IntPtr lpServiceStartName;
+            public IntPtr lpDisplayName;
+        }
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenSCManagerW(string machineName, string databaseName, uint desiredAccess);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenServiceW(IntPtr serviceControlManager, string serviceName, uint desiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseServiceHandle(IntPtr handle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceStatusEx(IntPtr service, int infoLevel, IntPtr buffer, int bufferSize, out int bytesNeeded);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceConfigW(IntPtr service, IntPtr config, int configSize, out int bytesNeeded);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ControlService(IntPtr service, uint control, out SERVICE_STATUS status);
+
+        private static ExactServiceRuntimeStopResultV1 Result(string status, bool stopSent, int errorCode, uint processId)
+        {
+            return new ExactServiceRuntimeStopResultV1 { Status = status, StopSent = stopSent, ErrorCode = errorCode, ProcessId = processId };
+        }
+
+        private static bool TryQueryStatus(IntPtr service, out SERVICE_STATUS_PROCESS status, out int errorCode)
+        {
+            int size = Marshal.SizeOf(typeof(SERVICE_STATUS_PROCESS));
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                int needed;
+                if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, buffer, size, out needed))
+                {
+                    errorCode = Marshal.GetLastWin32Error();
+                    status = new SERVICE_STATUS_PROCESS();
+                    return false;
+                }
+                status = (SERVICE_STATUS_PROCESS)Marshal.PtrToStructure(buffer, typeof(SERVICE_STATUS_PROCESS));
+                errorCode = 0;
+                return true;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+
+        private static bool TryQueryBinaryPath(IntPtr service, out string binaryPath, out int errorCode)
+        {
+            int needed;
+            QueryServiceConfigW(service, IntPtr.Zero, 0, out needed);
+            errorCode = Marshal.GetLastWin32Error();
+            if (needed <= 0 || errorCode != ERROR_INSUFFICIENT_BUFFER)
+            {
+                binaryPath = null;
+                return false;
+            }
+            IntPtr buffer = Marshal.AllocHGlobal(needed);
+            try
+            {
+                if (!QueryServiceConfigW(service, buffer, needed, out needed))
+                {
+                    errorCode = Marshal.GetLastWin32Error();
+                    binaryPath = null;
+                    return false;
+                }
+                QUERY_SERVICE_CONFIG config = (QUERY_SERVICE_CONFIG)Marshal.PtrToStructure(buffer, typeof(QUERY_SERVICE_CONFIG));
+                binaryPath = Marshal.PtrToStringUni(config.lpBinaryPathName);
+                errorCode = 0;
+                return binaryPath != null;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+
+        public static ExactServiceRuntimeStopResultV1 StopExact(string serviceName, uint expectedProcessId, string expectedPathName, int timeoutMilliseconds)
+        {
+            if (String.IsNullOrWhiteSpace(serviceName) || serviceName != serviceName.Trim() || expectedProcessId == 0 ||
+                String.IsNullOrWhiteSpace(expectedPathName) || expectedPathName != expectedPathName.Trim() || timeoutMilliseconds < 1)
+                return Result("invalid", false, 0, 0);
+
+            IntPtr manager = IntPtr.Zero;
+            IntPtr service = IntPtr.Zero;
+            try
+            {
+                manager = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+                if (manager == IntPtr.Zero) return Result("open_failed", false, Marshal.GetLastWin32Error(), 0);
+                service = OpenServiceW(manager, serviceName, SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_STOP);
+                if (service == IntPtr.Zero) return Result("open_failed", false, Marshal.GetLastWin32Error(), 0);
+
+                string currentPathName;
+                int errorCode;
+                if (!TryQueryBinaryPath(service, out currentPathName, out errorCode))
+                    return Result("query_failed", false, errorCode, 0);
+                if (!String.Equals(currentPathName, expectedPathName, StringComparison.Ordinal))
+                    return Result("identity_changed", false, 0, 0);
+
+                SERVICE_STATUS_PROCESS current;
+                if (!TryQueryStatus(service, out current, out errorCode))
+                    return Result("query_failed", false, errorCode, 0);
+                if (current.dwCurrentState != SERVICE_RUNNING || current.dwProcessId != expectedProcessId)
+                    return Result("identity_changed", false, 0, current.dwProcessId);
+
+                SERVICE_STATUS controlStatus;
+                if (!ControlService(service, SERVICE_CONTROL_STOP, out controlStatus))
+                    return Result("control_rejected", false, Marshal.GetLastWin32Error(), current.dwProcessId);
+
+                Stopwatch stopwatch = Stopwatch.StartNew();
+                while (stopwatch.ElapsedMilliseconds < timeoutMilliseconds)
+                {
+                    SERVICE_STATUS_PROCESS observed;
+                    if (!TryQueryStatus(service, out observed, out errorCode))
+                        return Result("verification_unknown", true, errorCode, current.dwProcessId);
+                    if (observed.dwCurrentState == SERVICE_STOPPED && observed.dwProcessId == 0)
+                        return Result("stopped", true, 0, 0);
+                    Thread.Sleep(50);
+                }
+                return Result("timeout", true, 0, current.dwProcessId);
+            }
+            finally
+            {
+                if (service != IntPtr.Zero) CloseServiceHandle(service);
+                if (manager != IntPtr.Zero) CloseServiceHandle(manager);
+            }
+        }
+    }
+}
+'@ -Language CSharp -ErrorAction Stop
+}
+
+function Stop-ExactServiceRuntime {
+    param(
+        [Parameter(Mandatory=$true)][string]$ServiceName,
+        [Parameter(Mandatory=$true)]$ExpectedProcessId,
+        [Parameter(Mandatory=$true)][string]$ExpectedPathName,
+        [int]$TimeoutMilliseconds = 5000
+    )
+    $strictProcessId = Get-StrictServiceProcessId $ExpectedProcessId
+    if ($null -eq $strictProcessId -or [string]::IsNullOrWhiteSpace($ServiceName) -or $ServiceName -cne $ServiceName.Trim() -or
+        [string]::IsNullOrWhiteSpace($ExpectedPathName) -or $ExpectedPathName -cne $ExpectedPathName.Trim() -or $TimeoutMilliseconds -lt 1) {
+        return [pscustomobject]@{ Status='invalid'; StopSent=$false; ErrorCode=0; ProcessId=0 }
+    }
+    Initialize-NativeExactServiceRuntimeStopApi
+    return [ShushuCleaner.ExactServiceRuntimeStopNativeV1]::StopExact(
+        $ServiceName, [uint32]$strictProcessId, $ExpectedPathName, $TimeoutMilliseconds
+    )
+}
+
 function Invoke-ServiceProcessStopAction {
     param($Pending, [int]$VerificationTimeoutMilliseconds = 5000, [int]$PollIntervalMilliseconds = 100)
     if (-not (Test-ServiceProcessActionShape $Pending)) {
@@ -2491,10 +2708,29 @@ function Invoke-ServiceProcessStopAction {
             return New-ServiceProcessStopResult 'skipped' 'service binding changed before mutation; rescan required'
         }
 
-        try { $exited = Stop-BoundProcessTarget -Target $boundTarget -TimeoutMilliseconds 1000 } catch {
-            $denied = $_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.Message -match '(?i)access.+denied|拒绝访问|权限'
-            $mutationReason = if ($denied) { "access denied while terminating recorded PID $targetPid" } else { "could not terminate the recorded process instance PID $targetPid" }
-            return New-ServiceProcessStopResult 'failed' $mutationReason 'mutation'
+        try {
+            $serviceStop = Stop-ExactServiceRuntime -ServiceName $Pending.service_name -ExpectedProcessId $targetPid `
+                -ExpectedPathName $boundService.PathName -TimeoutMilliseconds 5000
+        } catch {
+            return New-ServiceProcessStopResult 'failed' "exact service runtime stop could not be started for reviewed PID $targetPid" 'mutation'
+        }
+        if ($null -eq $serviceStop -or $serviceStop.Status -isnot [string] -or $serviceStop.StopSent -isnot [bool]) {
+            return New-ServiceProcessStopResult 'failed' "exact service runtime stop returned an invalid result for reviewed PID $targetPid" 'mutation'
+        }
+        if ($serviceStop.Status -cne 'stopped') {
+            if (-not $serviceStop.StopSent -and $serviceStop.Status -ceq 'identity_changed') {
+                return New-ServiceProcessStopResult 'skipped' 'service runtime identity changed before mutation; rescan required'
+            }
+            $stage = if ($serviceStop.StopSent) { 'verification' } else { 'mutation' }
+            $reason = if ($serviceStop.StopSent) {
+                "service STOP was sent but final state is $($serviceStop.Status) for reviewed PID $targetPid"
+            } else {
+                "exact service runtime stop was rejected before mutation for reviewed PID $targetPid"
+            }
+            return New-ServiceProcessStopResult 'failed' $reason $stage
+        }
+        try { $exited = $boundTarget.Process.WaitForExit(5000) } catch {
+            return New-ServiceProcessStopResult 'failed' "could not verify reviewed PID $targetPid after exact service runtime stop" 'verification'
         }
         if (-not $exited) { return New-ServiceProcessStopResult 'failed' "recorded process PID $targetPid did not exit within the bounded wait" 'verification' }
 
@@ -2514,9 +2750,9 @@ function Invoke-ServiceProcessStopAction {
             if (Test-PositiveScalarProcessId $services[0].ProcessId) {
                 $replacementPid = [int]$services[0].ProcessId
                 $replacementReason = if ([string]::Equals([string]$services[0].State,'Running',[System.StringComparison]::OrdinalIgnoreCase)) {
-                    "current instance ended but service restarted with replacement PID $replacementPid"
+                    "exact service runtime restarted with PID $replacementPid"
                 } else {
-                    "current instance ended but service reports replacement PID $replacementPid"
+                    "exact service runtime reports PID $replacementPid after STOP"
                 }
                 return New-ServiceProcessStopResult 'failed' $replacementReason 'verification'
             }
@@ -2526,7 +2762,7 @@ function Invoke-ServiceProcessStopAction {
             if ((Get-ServiceProcessVerificationTimeMilliseconds) -ge $verificationDeadline) { break }
             Start-ServiceProcessVerificationDelay -Milliseconds $PollIntervalMilliseconds
         }
-        return New-ServiceProcessStopResult 'success' "ended current service process PID $targetPid; no replacement PID is bound"
+        return New-ServiceProcessStopResult 'success' "stopped exact service runtime $($Pending.service_name); reviewed PID $targetPid exited and no service PID is bound"
     } finally {
         try { $boundTarget.Process.Dispose() } catch {}
     }
@@ -2763,8 +2999,8 @@ function Invoke-Clean {
     if ($pending.actions) { $actions = @($pending.actions | Where-Object { $_ -and $_.status -in @('pending','failed') }) }
     $suspicious = @()
     if ($pending.suspicious) { $suspicious = @($pending.suspicious) }
-    if (-not $pendingSha256Verified -and @($actions | Where-Object { $_.action -ceq 'stop_service_process' }).Count -gt 0) {
-        Write-Host '错误: stop_service_process 要求本次 clean 已验证 pending 文件 SHA-256 绑定，未执行且未改写清单。' -ForegroundColor Red
+    if (-not $pendingSha256Verified -and @($actions | Where-Object { $_.action -ceq 'stop_service_runtime' }).Count -gt 0) {
+        Write-Host '错误: stop_service_runtime 要求本次 clean 已验证 pending 文件 SHA-256 绑定，未执行且未改写清单。' -ForegroundColor Red
         $pendingValidated = $false
         return [int]1
     }
@@ -2863,9 +3099,9 @@ function Invoke-Clean {
             # 用户作出最终选择后，在任何备份或系统变更前完整重读并重放保存的 matcher。
             if (-not (Test-SelectedPendingActionAuthorized $p $profiles $impactConfirmation)) { continue }
 
-            # stop_service_process 是不生成恢复包的一次性当前实例动作。它仍在最终授权后执行，
+            # stop_service_runtime 是不生成恢复包的一次性 exact 服务运行态动作。它仍在最终授权后执行，
             # 但必须先于持久化动作的备份目录初始化分流，避免留下空备份包。
-            if ($p.action -ceq 'stop_service_process') {
+            if ($p.action -ceq 'stop_service_runtime') {
                 $stopResult = Invoke-ServiceProcessStopAction -Pending $p
                 Set-PendingTransactionResult -Pending $p -Result $stopResult
                 if ($stopResult.status -ceq 'success') { Write-Host "  验证通过: $($stopResult.result_reason)" -ForegroundColor Green }

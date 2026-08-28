@@ -172,7 +172,7 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         $script:servicePathName = '"' + $script:binary + '" -service'
         $script:pendingStop = [pscustomobject]@{
             id='lenovo-hrwscctrl'; name_cn='HRWSCCtrl'; detail='HRWSCCtrl'; reason_cn='manual'
-            hit_type='service'; action='stop_service_process'; status='pending'; service_name='HRWSCCtrl'
+            hit_type='service'; action='stop_service_runtime'; status='pending'; service_name='HRWSCCtrl'
             service_binary_path=$script:binary; process_id=[int]4321; process_name='wsctrl11.exe'
             process_path=$script:binary; process_start_time_utc='2026-08-24T01:02:03.0000000Z'
             matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
@@ -217,6 +217,9 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         Mock Get-CimInstance {
             [pscustomobject]@{ Name='HRWSCCtrl'; State='Stopped'; ProcessId=[int]0; PathName=$script:servicePathName }
         } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+        Mock Stop-ExactServiceRuntime {
+            [pscustomobject]@{ Status='stopped'; StopSent=$true; ErrorCode=0; ProcessId=0 }
+        }
     }
 
     It 'rejects exact display-name provenance before CIM binding or mutation' {
@@ -344,18 +347,62 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         $json | Should -Not -Match 'ProcessIdentitySource|trusted_inventory_v2'
     }
 
-    It 'records a sanitized mutation failure when Stop-Process is denied' {
-        $denied = New-HRWSCTestProcess
-        $denied.PSObject.Members.Remove('Kill')
-        $denied | Add-Member ScriptMethod Kill { throw 'Access denied for C:\secret\command line --token=abc' }
-        Mock Get-Process { $denied }
+    It 'stops the exact reviewed service runtime and never calls process Kill' {
+        $reviewed = New-HRWSCTestProcess -Token 'reviewed-service-instance'
+        Mock Get-Process { $reviewed } -ParameterFilter { $Id -eq 4321 }
+        Mock Stop-ExactServiceRuntime {
+            [pscustomobject]@{ Status='stopped'; StopSent=$true; ErrorCode=0; ProcessId=0 }
+        } -ParameterFilter {
+            $ServiceName -ceq 'HRWSCCtrl' -and $ExpectedProcessId -eq 4321 -and
+            $ExpectedPathName -ceq $script:servicePathName -and $TimeoutMilliseconds -eq 5000
+        }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'success' -Because $result.result_reason
+        $result.result_reason | Should -Match 'stopped exact service runtime HRWSCCtrl'
+        $script:boundKillToken | Should -BeNullOrEmpty
+        $script:boundWaitToken | Should -BeExactly 'reviewed-service-instance'
+        Should -Invoke Stop-ExactServiceRuntime -Times 1 -Exactly -ParameterFilter {
+            $ServiceName -ceq 'HRWSCCtrl' -and $ExpectedProcessId -eq 4321 -and
+            $ExpectedPathName -ceq $script:servicePathName -and $TimeoutMilliseconds -eq 5000
+        }
+        Should -Invoke Get-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4321 }
+    }
+
+    It 'reports an SCM timeout after STOP was sent as a verification failure' {
+        Mock Stop-ExactServiceRuntime { [pscustomobject]@{ Status='timeout'; StopSent=$true; ErrorCode=0; ProcessId=4321 } }
 
         $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
 
         $result.status | Should -BeExactly 'failed'
-        $result.result_reason | Should -Match 'denied|权限|拒绝'
-        $result.result_reason | Should -Not -Match 'token=abc'
-        $result.failure_stage | Should -BeExactly 'mutation'
+        $result.result_reason | Should -Match 'sent.*timeout|timeout.*sent'
+        $result.failure_stage | Should -BeExactly 'verification'
+    }
+
+    It 'skips an SCM identity change before STOP without a failure stage' {
+        Mock Stop-ExactServiceRuntime { [pscustomobject]@{ Status='identity_changed'; StopSent=$false; ErrorCode=0; ProcessId=9876 } }
+
+        $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
+
+        $result.status | Should -BeExactly 'skipped'
+        $result.result_reason | Should -Match 'identity changed.*rescan'
+        $result.failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Stop-ExactServiceRuntime -Times 1 -Exactly
+    }
+
+    It 'uses one native SCM service handle and direct ControlService without dependent-service cascading' {
+        $source = Get-Content (Join-Path $projectRoot 'src\Core\ActionEngine.ps1') -Raw -Encoding UTF8
+        $helperStart = $source.IndexOf('function Initialize-NativeExactServiceRuntimeStopApi')
+        $helperEnd = $source.IndexOf('function Invoke-ServiceProcessStopAction', $helperStart)
+        $helper = $source.Substring($helperStart, $helperEnd - $helperStart)
+
+        $helper | Should -Match 'OpenServiceW'
+        $helper | Should -Match 'QueryServiceConfigW'
+        $helper | Should -Match 'QueryServiceStatusEx'
+        $helper | Should -Match 'ControlService'
+        $helper | Should -Match 'finally[\s\S]*CloseServiceHandle\(service\)[\s\S]*CloseServiceHandle\(manager\)'
+        $helper | Should -Not -Match 'ServiceController|\.Stop\('
     }
 
     It 'terminates and waits through the exact handle-bound Process object without a reusable PID lookup' {
@@ -371,7 +418,7 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
 
         $result.status | Should -BeExactly 'success' -Because $result.result_reason
-        $script:boundKillToken | Should -BeExactly 'handle-bound-original'
+        $script:boundKillToken | Should -BeNullOrEmpty
         $script:boundWaitToken | Should -BeExactly 'handle-bound-original'
         Should -Invoke Get-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4321 }
         Should -Invoke Stop-Process -Times 0 -Exactly
@@ -398,7 +445,7 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
 
         $result.status | Should -BeExactly 'success' -Because $result.result_reason
-        $script:boundKillToken | Should -BeExactly 'protected-handle-bound'
+        $script:boundKillToken | Should -BeNullOrEmpty
         $script:boundWaitToken | Should -BeExactly 'protected-handle-bound'
         Should -Invoke Get-NativeProcessIdentity -Times 2 -Exactly -ParameterFilter { $ProcessId -eq 4321 }
         Should -Invoke Get-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4321 }
@@ -453,7 +500,7 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         $result = Invoke-ServiceProcessStopAction -Pending $script:pendingStop
 
         $result.status | Should -BeExactly 'success' -Because $result.result_reason
-        $script:boundKillToken | Should -BeExactly 'extensionless-canonicalized'
+        $script:boundKillToken | Should -BeNullOrEmpty
         $script:boundWaitToken | Should -BeExactly 'extensionless-canonicalized'
         Should -Invoke Get-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 4321 }
         Should -Invoke Stop-Process -Times 0 -Exactly
@@ -659,7 +706,7 @@ Describe 'identity-bound HRWSCCtrl service process stop' {
         $result.status | Should -BeExactly 'success'
         [string]::IsNullOrWhiteSpace([string]$result.result_reason) | Should -BeFalse
         $result.failure_stage | Should -BeNullOrEmpty
-        $script:boundKillToken | Should -BeExactly 'original'
+        $script:boundKillToken | Should -BeNullOrEmpty
         $script:boundWaitToken | Should -BeExactly 'original'
         Should -Invoke Stop-Process -Times 0 -Exactly
     }
