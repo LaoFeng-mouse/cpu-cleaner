@@ -382,6 +382,30 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
     return $profiles
 }
 
+function Copy-ProfileEvidenceValue($Value) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [System.Array]) {
+        $copy = $Value.Clone()
+        for ($i = 0; $i -lt $Value.Length; $i++) {
+            $copy.SetValue((Copy-ProfileEvidenceValue $Value.GetValue($i)), $i)
+        }
+        return ,$copy
+    }
+    if ($Value -is [pscustomobject]) {
+        $copy = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $copy[$property.Name] = Copy-ProfileEvidenceValue $property.Value
+        }
+        return [pscustomobject]$copy
+    }
+    return $Value
+}
+
+function Copy-ProfileEvidence($Evidence) {
+    if ($null -eq $Evidence) { return $null }
+    return Copy-ProfileEvidenceValue $Evidence
+}
+
 # 构造一条命中记录 (结构化字段)
 function New-Hit {
     param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $decision, $matchEvidence,
@@ -398,7 +422,7 @@ function New-Hit {
     $hit = [ordered]@{
         id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
         risk = $p.risk; action = $decision.Action; safe = $p.safe; reason_cn = $p.reason_cn
-        evidence = $p.evidence
+        evidence = Copy-ProfileEvidence $p.evidence
         hit_type = $hitType
         detail = $detail
         service_name = $srvName
