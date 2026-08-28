@@ -96,6 +96,13 @@ Describe 'strict official uninstall string parsing' {
         @{ Label = 'quoted trailing whitespace'; Command = '"C:\Lenovo\uninst.exe" ' }
         @{ Label = 'rooted command processor'; Command = 'C:\Windows\System32\cmd.exe' }
         @{ Label = 'UNC executable'; Command = '\\server\share\uninst.exe' }
+        @{ Label = 'wildcard asterisk'; Command = 'C:\Lenovo\*.exe' }
+        @{ Label = 'wildcard question mark'; Command = 'C:\Lenovo\u?.exe' }
+        @{ Label = 'bracket metacharacters'; Command = 'C:\Lenovo\u[1].exe' }
+        @{ Label = 'Unicode control character'; Command = ("C:\Lenovo\u{0}.exe" -f [char]0x85) }
+        @{ Label = 'alternate data stream'; Command = 'C:\Lenovo\base.txt:payload.exe' }
+        @{ Label = 'NT object-manager path'; Command = '\??\C:\Lenovo\uninst.exe' }
+        @{ Label = 'forward slash path'; Command = 'C:/Lenovo/uninst.exe' }
     ) {
         param($Label, $Command)
 

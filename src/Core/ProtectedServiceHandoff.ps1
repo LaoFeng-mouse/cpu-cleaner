@@ -138,20 +138,16 @@ function Get-ServiceLaunchProtectedState {
     }
 }
 
-# 在 PS5.1 缺少 IsPathFullyQualified 时按盘符或 UNC 语法判断绝对路径。
-function Test-StrictOfficialUninstallPathFullyQualified {
+# 只允许普通本地盘符路径；拒绝设备路径、ADS、通配符和跨版本歧义字符。
+function Test-StrictOfficialUninstallLocalDrivePath {
     param([string]$Path)
 
-    try {
-        $method = [System.IO.Path].GetMethod('IsPathFullyQualified', [type[]]@([string]))
-        if ($null -ne $method) {
-            return [bool]$method.Invoke($null, @($Path))
-        }
-    }
-    catch {
+    if ($Path -cnotmatch '^[A-Za-z]:\\' -or
+        $Path -cmatch '[/\*\?\[\]\p{Cc}]' -or
+        $Path.Substring(2).Contains(':')) {
         return $false
     }
-    return $Path -cmatch '^(?:[A-Za-z]:\\|\\\\[^\\]+\\[^\\]+(?:\\|$))'
+    return $true
 }
 
 # 只接受无参数、本地绝对路径的官方 EXE 命令，并返回规范化路径。
@@ -162,15 +158,12 @@ function ConvertFrom-StrictOfficialUninstallString {
     elseif ($Command -cmatch '^([^"\r\n]+\.exe)$') { $Matches[1] }
     else { return $null }
 
-    if (-not (Test-StrictOfficialUninstallPathFullyQualified -Path $candidate) -or
-        $candidate -cmatch '^\\\\') {
-        return $null
-    }
+    if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $candidate)) { return $null }
 
     try { $canonicalPath = [System.IO.Path]::GetFullPath($candidate) }
     catch { return $null }
 
-    if ($canonicalPath -cmatch '^\\\\') { return $null }
+    if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $canonicalPath)) { return $null }
     $fileName = [System.IO.Path]::GetFileName($canonicalPath).ToLowerInvariant()
     if (@('cmd.exe','powershell.exe','pwsh.exe','msiexec.exe','wscript.exe','cscript.exe') -ccontains $fileName) {
         return $null
