@@ -100,6 +100,9 @@ Describe 'strict official uninstall string parsing' {
         @{ Label = 'wildcard question mark'; Command = 'C:\Lenovo\u?.exe' }
         @{ Label = 'bracket metacharacters'; Command = 'C:\Lenovo\u[1].exe' }
         @{ Label = 'Unicode control character'; Command = ("C:\Lenovo\u{0}.exe" -f [char]0x85) }
+        @{ Label = 'less-than character'; Command = 'C:\Lenovo\a<b.exe' }
+        @{ Label = 'greater-than character'; Command = 'C:\Lenovo\a>b.exe' }
+        @{ Label = 'pipe character'; Command = 'C:\Lenovo\a|b.exe' }
         @{ Label = 'alternate data stream'; Command = 'C:\Lenovo\base.txt:payload.exe' }
         @{ Label = 'NT object-manager path'; Command = '\??\C:\Lenovo\uninst.exe' }
         @{ Label = 'forward slash path'; Command = 'C:/Lenovo/uninst.exe' }

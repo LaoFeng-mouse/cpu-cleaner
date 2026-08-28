@@ -143,7 +143,7 @@ function Test-StrictOfficialUninstallLocalDrivePath {
     param([string]$Path)
 
     if ($Path -cnotmatch '^[A-Za-z]:\\' -or
-        $Path -cmatch '[/\*\?\[\]\p{Cc}]' -or
+        $Path -cmatch '[/\*\?\[\]<>\|\p{Cc}]' -or
         $Path.Substring(2).Contains(':')) {
         return $false
     }
