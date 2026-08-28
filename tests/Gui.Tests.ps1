@@ -1090,7 +1090,10 @@ Describe '勾选视图 (v1.5.5)' {
             $action = [pscustomobject][ordered]@{
                 id='lenovo-hrwscctrl'; vendor='Lenovo'; name_cn='联想安全中心组件 HRWSCCtrl'
                 hit_type='service'; action='open_official_uninstaller'; status='pending'; detail='HRWSCCtrl'; reason_cn='官方卸载 handoff'
-                service_name='HRWSCCtrl'; matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+                service_name='HRWSCCtrl'; service_display_name='Lenovo Security Controller'
+                autostart_source=''; autostart_name=''; autostart_value=''; task_name=''; task_path=''
+                process_name=''; process_id=$null; process_path=''
+                matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
                 execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
                 impact_cn='可能移除联想电脑管家的安全、防护、通知和相关后台组件'
                 cleanup_reason_cn='Windows 受保护服务阻止普通管理员实时停止；不需要联想电脑管家时可按需打开联想官方卸载程序'
@@ -1105,6 +1108,40 @@ Describe '勾选视图 (v1.5.5)' {
                 pending_schema_version=[int64]3; generated='trusted inventory handoff'
                 actions=[object[]]@($action); resolved=[object[]]@(); observations=[object[]]@(); suspicious=[object[]]@()
             }
+        }
+
+        function Get-GuiOfficialUninstallerIdentityFieldCases {
+            return @(
+                @{ Field='id'; MutatedValue='lenovo-hrwscctrl-changed' }, @{ Field='hit_type'; MutatedValue='process' },
+                @{ Field='action'; MutatedValue='disable_service' }, @{ Field='service_name'; MutatedValue='HRWSCCtrlChanged' },
+                @{ Field='service_display_name'; MutatedValue='Lenovo Security Controller Changed' },
+                @{ Field='matched_pattern'; MutatedValue='HRWSCCtrlChanged' }, @{ Field='matched_type'; MutatedValue='contains' },
+                @{ Field='matched_field'; MutatedValue='service_display_name' }, @{ Field='launch_protected_status'; MutatedValue='incomplete' },
+                @{ Field='launch_protected_level'; MutatedValue=[int]2 }, @{ Field='uninstall_evidence_status'; MutatedValue='incomplete' },
+                @{ Field='uninstall_registry_path'; MutatedValue='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManagerChanged' },
+                @{ Field='uninstall_display_name'; MutatedValue='联想电脑管家 Changed' }, @{ Field='uninstall_publisher'; MutatedValue='Changed Publisher' },
+                @{ Field='uninstall_display_version'; MutatedValue='5.1.1' }, @{ Field='uninstall_install_location'; MutatedValue='C:\Program Files\Lenovo\Changed' },
+                @{ Field='uninstall_string'; MutatedValue='"C:\Program Files\Lenovo\PCManager\uninst.exe" /S' },
+                @{ Field='uninstall_executable_path'; MutatedValue='C:\Program Files\Lenovo\PCManager\changed.exe' }
+            )
+        }
+
+        function Copy-GuiOfficialIdentityTamper($Action, [string]$Field, [string]$Operation, $MutatedValue) {
+            $copy = $Action.PSObject.Copy()
+            switch ($Operation) {
+                'mutation' { $copy.$Field = $MutatedValue }
+                'deletion' { $copy.PSObject.Properties.Remove($Field) }
+                'case-renamed' {
+                    $value = $copy.$Field
+                    $copy.PSObject.Properties.Remove($Field)
+                    $copy | Add-Member -NotePropertyName $Field.ToUpperInvariant() -NotePropertyValue $value
+                }
+                'array-wrapped' {
+                    $value = $copy.$Field
+                    $copy.PSObject.Properties[$Field].Value = [object[]]@($value)
+                }
+            }
+            return $copy
         }
 
         function New-GuiFourGroupPendingFixture {
@@ -2188,6 +2225,28 @@ Describe '勾选视图 (v1.5.5)' {
 
         { Assert-GuiPendingPresentationShape -Pending $pending } | Should -Throw -Because $Label
         { Get-GuiValidatedActionIdentityKeys -Pending $pending } | Should -Throw -Because $Label
+    }
+
+    It 'official-uninstaller reviewed selection rejects every identity-field tamper and exact duplicates' {
+        $pending = New-GuiOfficialUninstallerPendingFixture
+        $fixture = Set-GuiReviewedPendingFixture -Pending $pending
+        $reviewed = $pending.actions[0]
+        $reviewedKey = Get-PendingIdentityKey $reviewed
+
+        foreach ($case in Get-GuiOfficialUninstallerIdentityFieldCases) {
+            foreach ($operation in @('mutation','deletion','case-renamed','array-wrapped')) {
+                $tampered = Copy-GuiOfficialIdentityTamper $reviewed $case.Field $operation $case.MutatedValue
+                $selected = [pscustomobject]@{
+                    IsChecked=$true; _raw=$tampered; reviewed_identity_key=$reviewedKey
+                }
+                $list = [pscustomobject]@{ Items=@($selected) }
+                { Resolve-GuiReviewedActions -List $list } | Should -Throw -Because "$($case.Field) $operation cannot select or reach subset creation"
+            }
+        }
+
+        $duplicatePending = New-GuiOfficialUninstallerPendingFixture
+        $duplicatePending.actions = @($duplicatePending.actions[0], $duplicatePending.actions[0].PSObject.Copy())
+        { Get-GuiValidatedActionIdentityKeys -Pending $duplicatePending } | Should -Throw '*duplicate action identity*'
     }
 
     It 'uses the core identity key for the manual-impact confirmation digest' {

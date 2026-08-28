@@ -95,6 +95,48 @@ Describe '待办清单规则' {
                 uninstall_executable_path='C:\Program Files\Lenovo\PCManager\uninst.exe'
             }
         }
+
+        function Get-OfficialUninstallerIdentityFieldCases {
+            return @(
+                @{ Field='id'; MutatedValue='lenovo-hrwscctrl-changed' }
+                @{ Field='hit_type'; MutatedValue='process' }
+                @{ Field='action'; MutatedValue='disable_service' }
+                @{ Field='service_name'; MutatedValue='HRWSCCtrlChanged' }
+                @{ Field='service_display_name'; MutatedValue='Lenovo Security Controller Changed' }
+                @{ Field='matched_pattern'; MutatedValue='HRWSCCtrlChanged' }
+                @{ Field='matched_type'; MutatedValue='contains' }
+                @{ Field='matched_field'; MutatedValue='service_display_name' }
+                @{ Field='launch_protected_status'; MutatedValue='incomplete' }
+                @{ Field='launch_protected_level'; MutatedValue=[int]2 }
+                @{ Field='uninstall_evidence_status'; MutatedValue='incomplete' }
+                @{ Field='uninstall_registry_path'; MutatedValue='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManagerChanged' }
+                @{ Field='uninstall_display_name'; MutatedValue='联想电脑管家 Changed' }
+                @{ Field='uninstall_publisher'; MutatedValue='Changed Publisher' }
+                @{ Field='uninstall_display_version'; MutatedValue='5.1.1' }
+                @{ Field='uninstall_install_location'; MutatedValue='C:\Program Files\Lenovo\Changed' }
+                @{ Field='uninstall_string'; MutatedValue='"C:\Program Files\Lenovo\PCManager\uninst.exe" /S' }
+                @{ Field='uninstall_executable_path'; MutatedValue='C:\Program Files\Lenovo\PCManager\changed.exe' }
+            )
+        }
+
+        function Copy-OfficialUninstallerIdentityTamper($Action, [string]$Field, [string]$Operation, $MutatedValue) {
+            $copy = $Action.PSObject.Copy()
+            switch ($Operation) {
+                'mutation' { $copy.$Field = $MutatedValue }
+                'deletion' { $copy.PSObject.Properties.Remove($Field) }
+                'case-renamed' {
+                    $value = $copy.$Field
+                    $copy.PSObject.Properties.Remove($Field)
+                    $copy | Add-Member -NotePropertyName $Field.ToUpperInvariant() -NotePropertyValue $value
+                }
+                'array-wrapped' {
+                    $value = $copy.$Field
+                    $copy.PSObject.Properties[$Field].Value = [object[]]@($value)
+                }
+                default { throw "unknown official identity tamper operation: $Operation" }
+            }
+            return $copy
+        }
     }
 
     It '空数组以 schema v3 和 UTF-8 BOM 原子保存' {
@@ -891,11 +933,15 @@ Invoke-Clean
         $pendingJson | Should -Not -Match 'ProcessIdentitySource|trusted_inventory_v3'
     }
 
-    It 'binds every official-uninstaller evidence field into strict shape identity and manual digest' {
-        $boundFields = @(
+    It 'exhaustively binds every official-uninstaller identity field against mutation deletion case rename and array wrapping' {
+        $officialShapeFields = @(
+            'action','hit_type','matched_pattern','matched_type','matched_field','service_name',
             'launch_protected_status','launch_protected_level','uninstall_evidence_status','uninstall_registry_path',
             'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
             'uninstall_string','uninstall_executable_path'
+        )
+        $semanticallyMutableFields = @(
+            'id','service_display_name','uninstall_registry_path','uninstall_display_name','uninstall_display_version'
         )
         $valid = New-OfficialUninstallerPendingAction
         Test-OfficialUninstallerActionShape $valid | Should -BeTrue
@@ -903,30 +949,40 @@ Invoke-Clean
         $identity = Get-PendingIdentityKey $valid
         $digest = Get-ManualImpactDigest @($valid)
         $digest | Should -Match '^[0-9a-f]{64}$'
+        $mutationKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        $mutationKeys.Add($identity) | Should -BeTrue
 
-        foreach ($field in $boundFields) {
-            $mutated = $valid.PSObject.Copy()
-            if ($field -ceq 'launch_protected_level') { $mutated.$field = [int]2 }
-            else { $mutated.$field = ([string]$mutated.$field + '-changed') }
-            Get-PendingIdentityKey $mutated | Should -Not -BeExactly $identity -Because "$field mutation must change identity"
-            if (Test-OfficialUninstallerActionShape $mutated) {
-                Get-ManualImpactDigest @($mutated) | Should -Not -BeExactly $digest -Because "$field mutation must change digest"
+        foreach ($case in Get-OfficialUninstallerIdentityFieldCases) {
+            $field = [string]$case.Field
+            foreach ($operation in @('mutation','deletion','case-renamed','array-wrapped')) {
+                $tampered = Copy-OfficialUninstallerIdentityTamper $valid $field $operation $case.MutatedValue
+                $shapeValid = Test-OfficialUninstallerActionShape $tampered
+                if ($officialShapeFields -ccontains $field -and
+                    ($operation -cne 'mutation' -or $semanticallyMutableFields -cnotcontains $field)) {
+                    $shapeValid | Should -BeFalse -Because "$field $operation is semantically invalid"
+                }
+
+                $tamperedIdentity = Get-PendingIdentityKey $tampered
+                $tamperedIdentity | Should -Not -BeExactly $identity -Because "$field $operation must change or invalidate identity"
+                if (Test-ManualImpactDigestActionShape $tampered) {
+                    Get-ManualImpactDigest @($tampered) | Should -Not -BeExactly $digest -Because "$field $operation must mismatch the reviewed digest"
+                } else {
+                    { Get-ManualImpactDigest @($tampered) } | Should -Throw -Because "$field $operation must be rejected by manual digest shape"
+                }
+
+                $duplicate = $tampered.PSObject.Copy()
+                Get-PendingIdentityKey $duplicate | Should -BeExactly $tamperedIdentity -Because "$field $operation exact duplicates must collide"
             }
 
-            $missing = $valid.PSObject.Copy()
-            $missing.PSObject.Properties.Remove($field)
-            Test-OfficialUninstallerActionShape $missing | Should -BeFalse -Because "$field deletion must fail shape"
-
-            $arrayWrapped = $valid.PSObject.Copy()
-            $arrayWrapped.$field = @($arrayWrapped.$field)
-            Test-OfficialUninstallerActionShape $arrayWrapped | Should -BeFalse -Because "$field array wrapping must fail shape"
-
-            $caseRenamed = $valid.PSObject.Copy()
-            $value = $caseRenamed.$field
-            $caseRenamed.PSObject.Properties.Remove($field)
-            $caseRenamed | Add-Member -NotePropertyName $field.ToUpperInvariant() -NotePropertyValue $value
-            Test-OfficialUninstallerActionShape $caseRenamed | Should -BeFalse -Because "$field case rename must fail shape"
+            $mutated = Copy-OfficialUninstallerIdentityTamper $valid $field 'mutation' $case.MutatedValue
+            $mutationKey = Get-PendingIdentityKey $mutated
+            $mutationKeys.Add($mutationKey) | Should -BeTrue -Because "$field mutation must be pairwise unique"
         }
+        $mutationKeys.Count | Should -Be ((Get-OfficialUninstallerIdentityFieldCases).Count + 1)
+
+        $exactDuplicate = $valid.PSObject.Copy()
+        Get-PendingIdentityKey $exactDuplicate | Should -BeExactly $identity
+        Get-ManualImpactDigest @($valid,$exactDuplicate) | Should -BeExactly $digest
     }
 
     It 'authorizes only the exact current profile matcher and exact reviewed official-uninstaller evidence' {

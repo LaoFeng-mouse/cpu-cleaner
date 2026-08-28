@@ -534,6 +534,41 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
                 uninstall_executable_path='C:\Program Files\Lenovo\PCManager\uninst.exe'
             }
         }
+        function New-OfficialUninstallerProfiles {
+            $action = New-OfficialUninstallerCleanAction
+            return [pscustomobject]@{ profiles=@([pscustomobject]@{
+                id='lenovo-hrwscctrl'; safe=$false; evidence=[pscustomobject]@{tested=$true}
+                actions=[pscustomobject]@{service='none'}
+                manual_actions=[pscustomobject]@{service='open_official_uninstaller'}
+                cleanup_policy=[pscustomobject]@{
+                    execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                    impact_cn=$action.impact_cn; cleanup_reason_cn=$action.cleanup_reason_cn
+                }
+                detect=[pscustomobject]@{
+                    services=@([pscustomobject]@{match='HRWSCCtrl';type='exact'}); autostarts=@(); tasks=@(); processes=@()
+                }
+            }) }
+        }
+        function Set-OfficialUninstallerAuthorizationDrift($Action, $Profiles, [string]$Drift) {
+            $profile = @($Profiles.profiles) | Select-Object -First 1
+            switch ($Drift) {
+                'profile-removed' { $Profiles.profiles = @() }
+                'manual-action-removed' { $profile.manual_actions.PSObject.Properties.Remove('service') }
+                'manual-action-changed' { $profile.manual_actions.service = 'stop_service_runtime' }
+                'cleanup-policy-drift' { $profile.cleanup_policy.impact_cn = 'changed cleanup policy' }
+                'matcher-removed' { $profile.detect.services = @() }
+                'matcher-contains' { $profile.detect.services = @([pscustomobject]@{match='HRWSCCtrl';type='contains'}) }
+                'matcher-display' {
+                    $Action.matched_field = 'service_display_name'
+                    $Action.matched_pattern = 'Lenovo Security Controller'
+                }
+                'protection-drift' { $Action.launch_protected_status = 'incomplete' }
+                'evidence-drift' { $Action.uninstall_evidence_status = 'incomplete' }
+                'service-missing' { $script:OfficialServiceState = 'missing' }
+                'service-name-mismatch' { $script:OfficialServiceState = 'mismatch' }
+                default { throw "unknown official authorization drift: $Drift" }
+            }
+        }
         function Write-CleanExitPending([string]$Name, $Actions) {
             $path = Join-Path $TestDrive $Name
             $payload = [pscustomobject]@{pending_schema_version=3;generated='scan';actions=@($Actions);resolved=@();observations=@();suspicious=@()}
@@ -825,6 +860,108 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         $saved.actions[0].result_reason | Should -Match 'GUI|界面'
         $saved.actions[0].result_reason | Should -Match '确认|打开'
         $saved.actions[0].result_reason | Should -Not -Match 'C:\\|token|secret|Start-Process'
+        Should -Invoke Start-Process -Times 0 -Exactly
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceProcessStopAction -Times 0 -Exactly
+    }
+
+    It 'official handoff initial reauthorization fails closed for profile policy matcher service protection and evidence drift' -TestCases @(
+        @{ Drift='profile-removed' }, @{ Drift='manual-action-removed' }, @{ Drift='manual-action-changed' },
+        @{ Drift='cleanup-policy-drift' }, @{ Drift='matcher-removed' }, @{ Drift='matcher-contains' },
+        @{ Drift='matcher-display' }, @{ Drift='service-missing' }, @{ Drift='service-name-mismatch' },
+        @{ Drift='protection-drift' }, @{ Drift='evidence-drift' }
+    ) {
+        param($Drift)
+        $action = New-OfficialUninstallerCleanAction
+        $profiles = New-OfficialUninstallerProfiles
+        $reviewedDigest = Get-ManualImpactDigest @($action)
+        $script:OfficialServiceState = 'valid'
+        Set-OfficialUninstallerAuthorizationDrift $action $profiles $Drift
+        $path = Write-CleanExitPending ("official-initial-$Drift.json") @($action)
+        $oldPendingFile = $script:PendingFile
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $script:ConfirmedImpactSha256 = $reviewedDigest
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { $profiles }
+        Mock Get-Service {
+            if ($script:OfficialServiceState -ceq 'missing') { return $null }
+            if ($script:OfficialServiceState -ceq 'mismatch') { return [pscustomobject]@{Name='OtherService';DisplayName='Other Service'} }
+            return [pscustomobject]@{Name='HRWSCCtrl';DisplayName='Lenovo Security Controller'}
+        } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+        Mock Start-Process { throw 'rejected official handoff must not launch' }
+        Mock Initialize-ProtectedBackupDirectory { throw 'rejected official handoff must not back up' }
+        Mock Invoke-ServiceDisableAction { throw 'rejected official handoff must not mutate' }
+        Mock Invoke-ServiceProcessStopAction { throw 'rejected official handoff must not stop runtime' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        [string]::IsNullOrWhiteSpace([string]$saved.actions[0].result_reason) | Should -BeFalse
+        $saved.actions[0].result_reason | Should -Match '授权|确认|变化|重新扫描'
+        $saved.actions[0].result_reason | Should -Not -Match 'C:\\|token|secret|Start-Process|uninst\.exe'
+        Should -Invoke Start-Process -Times 0 -Exactly
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceProcessStopAction -Times 0 -Exactly
+    }
+
+    It 'official handoff final reauthorization catches real profile matcher and live service drift after initial success' -TestCases @(
+        @{ Drift='profile-removed' }, @{ Drift='manual-action-removed' }, @{ Drift='manual-action-changed' },
+        @{ Drift='cleanup-policy-drift' }, @{ Drift='matcher-removed' }, @{ Drift='matcher-contains' },
+        @{ Drift='service-missing' }, @{ Drift='service-name-mismatch' }
+    ) {
+        param($Drift)
+        $action = New-OfficialUninstallerCleanAction
+        $profiles = New-OfficialUninstallerProfiles
+        $path = Write-CleanExitPending ("official-final-$Drift.json") @($action)
+        $oldPendingFile = $script:PendingFile
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $script:ConfirmedImpactSha256 = Get-ManualImpactDigest @($action)
+        $script:OfficialServiceState = 'valid'
+        $YesToAll = $false
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { $profiles }
+        Mock Get-Service {
+            if ($script:OfficialServiceState -ceq 'missing') { return $null }
+            if ($script:OfficialServiceState -ceq 'mismatch') { return [pscustomobject]@{Name='OtherService';DisplayName='Other Service'} }
+            return [pscustomobject]@{Name='HRWSCCtrl';DisplayName='Lenovo Security Controller'}
+        } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+        Mock Read-Host {
+            Set-OfficialUninstallerAuthorizationDrift $action $profiles $Drift
+            return 'all'
+        }
+        Mock Start-Process { throw 'drifted official handoff must not launch' }
+        Mock Initialize-ProtectedBackupDirectory { throw 'drifted official handoff must not back up' }
+        Mock Invoke-ServiceDisableAction { throw 'drifted official handoff must not mutate' }
+        Mock Invoke-ServiceProcessStopAction { throw 'drifted official handoff must not stop runtime' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        [string]::IsNullOrWhiteSpace([string]$saved.actions[0].result_reason) | Should -BeFalse
+        $saved.actions[0].result_reason | Should -Match '授权|确认|变化|重新扫描'
+        $saved.actions[0].result_reason | Should -Not -Match 'C:\\|token|secret|Start-Process|uninst\.exe'
+        Should -Invoke Read-Host -Times 1 -Exactly
         Should -Invoke Start-Process -Times 0 -Exactly
         Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
         Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly

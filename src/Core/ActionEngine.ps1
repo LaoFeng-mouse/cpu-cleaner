@@ -1137,24 +1137,31 @@ function Get-CurrentPendingMatchValue($Pending) {
     }
 }
 
+function Get-ExactPendingIdentityValue($Item, [string]$Name) {
+    $property = Get-ExactPendingProperty $Item $Name
+    if ($null -eq $property) { return $null }
+    if ($property.Value -is [System.Array]) { return ,$property.Value }
+    return $property.Value
+}
+
 function Get-PendingIdentityKey($Item) {
     $identity = [pscustomobject][ordered]@{
-        id                   = $Item.id
-        hit_type             = $Item.hit_type
-        action               = $Item.action
-        service_name         = $Item.service_name
-        service_display_name = $Item.service_display_name
-        autostart_source     = $Item.autostart_source
-        autostart_name       = $Item.autostart_name
-        autostart_value      = $Item.autostart_value
-        task_name            = $Item.task_name
-        task_path            = $Item.task_path
-        process_name         = $Item.process_name
-        process_id           = $Item.process_id
-        process_path         = $Item.process_path
-        matched_pattern      = $Item.matched_pattern
-        matched_type         = $Item.matched_type
-        matched_field        = $Item.matched_field
+        id                   = (Get-ExactPendingIdentityValue $Item 'id')
+        hit_type             = (Get-ExactPendingIdentityValue $Item 'hit_type')
+        action               = (Get-ExactPendingIdentityValue $Item 'action')
+        service_name         = (Get-ExactPendingIdentityValue $Item 'service_name')
+        service_display_name = (Get-ExactPendingIdentityValue $Item 'service_display_name')
+        autostart_source     = (Get-ExactPendingIdentityValue $Item 'autostart_source')
+        autostart_name       = (Get-ExactPendingIdentityValue $Item 'autostart_name')
+        autostart_value      = (Get-ExactPendingIdentityValue $Item 'autostart_value')
+        task_name            = (Get-ExactPendingIdentityValue $Item 'task_name')
+        task_path            = (Get-ExactPendingIdentityValue $Item 'task_path')
+        process_name         = (Get-ExactPendingIdentityValue $Item 'process_name')
+        process_id           = (Get-ExactPendingIdentityValue $Item 'process_id')
+        process_path         = (Get-ExactPendingIdentityValue $Item 'process_path')
+        matched_pattern      = (Get-ExactPendingIdentityValue $Item 'matched_pattern')
+        matched_type         = (Get-ExactPendingIdentityValue $Item 'matched_type')
+        matched_field        = (Get-ExactPendingIdentityValue $Item 'matched_field')
     }
     if ($Item.action -ceq 'stop_service_runtime') {
         $identity | Add-Member NoteProperty service_binary_path $Item.service_binary_path
@@ -1166,8 +1173,7 @@ function Get-PendingIdentityKey($Item) {
             'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
             'uninstall_string','uninstall_executable_path'
         )) {
-            $property = Get-ExactPendingProperty $Item $name
-            $identity | Add-Member NoteProperty $name $(if ($null -eq $property) { $null } else { $property.Value })
+            $identity | Add-Member NoteProperty $name (Get-ExactPendingIdentityValue $Item $name)
         }
     }
     return ConvertTo-Json -InputObject $identity -Compress -Depth 4
