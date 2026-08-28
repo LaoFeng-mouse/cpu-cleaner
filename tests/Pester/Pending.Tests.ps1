@@ -807,7 +807,7 @@ Invoke-Clean
         $profiles = Load-Profiles -Path $script:ProfileFile
         $profile = @($profiles.profiles | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
         $services = @([pscustomobject]@{
-            Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=''; ProcessId=[int]0
+            Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Stopped'; StartMode='Manual'; PathName=''; ProcessId=[int]0
             ProcessIdentitySource='trusted_inventory_v3'; ProcessIdentityStatus='not_running'; ProcessName=''; ProcessPath=''; ProcessStartTimeUtc=''
             LaunchProtectedStatus='complete'; LaunchProtectedLevel=[int]3
             UninstallEvidenceStatus='complete'
@@ -821,12 +821,15 @@ Invoke-Clean
 
         $profile.safe | Should -BeFalse
         $profile.evidence.tested | Should -BeTrue
+        $profile.execution.allow_auto | Should -BeFalse
+        $profile.execution.review_note | Should -BeExactly '仅允许用户确认后的官方卸载入口；不属于自动安全清理'
         Get-ManualActionFor $profile 'service' | Should -BeExactly 'open_official_uninstaller'
         $hit.safe | Should -BeFalse
         $hit.evidence.tested | Should -BeTrue
         $hit.matched_type | Should -BeExactly 'exact'
         $hit.execution_class | Should -BeExactly 'manual_impact'
         $hit.action | Should -BeExactly 'open_official_uninstaller'
+        ($hit.launch_protected_level -is [int]) | Should -BeTrue
         $hit.launch_protected_level | Should -Be 3
         $hit.uninstall_evidence_status | Should -BeExactly 'complete'
         $hit.PSObject.Properties.Name | Should -Not -Contain 'process_id'

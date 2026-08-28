@@ -77,8 +77,10 @@ Describe 'Profile 加载' {
                 [string]$ProcessStartTimeUtc = '2026-08-24T01:02:03.4567890Z'
             )
             if ([string]::IsNullOrEmpty($PathName)) { $PathName = '"' + $BinaryPath + '" -service' }
-            if ([string]::IsNullOrEmpty($ProcessName)) { $ProcessName = [System.IO.Path]::GetFileName($BinaryPath) }
-            if ([string]::IsNullOrEmpty($ProcessPath)) { $ProcessPath = $BinaryPath }
+            if ($IdentityStatus -ceq 'complete') {
+                if ([string]::IsNullOrEmpty($ProcessName)) { $ProcessName = [System.IO.Path]::GetFileName($BinaryPath) }
+                if ([string]::IsNullOrEmpty($ProcessPath)) { $ProcessPath = $BinaryPath }
+            }
             [pscustomobject]@{
                 Name = $Name; DisplayName = 'Lenovo Security Center'; State = $State; StartMode = 'Manual'
                 PathName = $PathName; ProcessId = $ProcessId
@@ -462,6 +464,68 @@ Describe 'Profile 加载' {
             $hit.process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.4567890Z'
             $hit.PSObject.Properties.Name | Should -Not -Contain 'launch_protected_status'
             Assert-MockCalled Get-CimInstance -Times 2 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It '同批 handoff level0 investigate 和后续 profile hit 之间不共享决策或卸载证据' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $binary = Join-Path $TestDrive 'wsctrl11-isolation.exe'
+        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
+        $hrws = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='可能移除安全组件'; cleanup_reason_cn='按需打开官方卸载程序'
+        }) -ManualActions ([pscustomobject]@{ service='open_official_uninstaller' })
+        $other = [pscustomobject]@{
+            id='other-profile'; vendor='Other'; name_cn='其他服务'; risk='low'; safe=$true; reason_cn='其他服务'
+            evidence=[pscustomobject]@{ tested=$true }
+            detect=[pscustomobject]@{ services=@([pscustomobject]@{ match='OtherSvc'; type='exact' }); processes=@(); autostarts=@(); tasks=@() }
+            actions=[pscustomobject]@{ service='disable_service' }
+            cleanup_policy=[pscustomobject]@{
+                execution_class='automatic_safe'; necessity='optional'; default_selected=$true; requires_confirmation=$false
+                impact_cn='其他影响'; cleanup_reason_cn='其他原因'
+            }
+        }
+        $library = [pscustomobject]@{ schema_version=3; profiles=@($hrws,$other) }
+        [System.IO.File]::WriteAllText($tmp, ($library | ConvertTo-Json -Depth 10), (New-Object System.Text.UTF8Encoding($false)))
+        $script:ProfileFile = $tmp
+
+        $ppl = & $script:NewTrustedService -BinaryPath 'C:\Program Files\Lenovo\PCManager\wsctrl11.exe' -State 'Stopped' -ProcessId ([int]0) -IdentityStatus 'not_running'
+        $ppl.DisplayName = 'PPL handoff'
+        $ppl.LaunchProtectedLevel = [int]3
+        & $script:SetOfficialUninstallEvidence $ppl
+        $level0 = & $script:NewTrustedService -BinaryPath $binary
+        $level0.DisplayName = 'Level0 runtime'
+        $invalid = & $script:NewTrustedService -BinaryPath 'C:\Program Files\Lenovo\PCManager\wsctrl11.exe' -State 'Stopped' -ProcessId ([int]0) -IdentityStatus 'not_running'
+        $invalid.DisplayName = 'Invalid protection'
+        $invalid.LaunchProtectedLevel = [int]4
+        $otherService = [pscustomobject]@{ Name='OtherSvc'; DisplayName='Other'; State='Running'; StartMode='Automatic' }
+        Mock Get-ServiceProcessExecutionIdentity {
+            [pscustomobject]@{
+                service_binary_path=$binary; process_id=[int]4321; process_name='wsctrl11-isolation.exe'
+                process_path=$binary; process_start_time_utc='2026-08-24T01:02:03.4567890Z'
+            }
+        }
+        try {
+            $hits = @(Match-Profiles -Services @($ppl,$level0,$invalid,$otherService) -AutoStarts @() -Tasks @() -TopProcs @())
+            $handoff = @($hits | Where-Object { $_.detail -match 'PPL handoff' })[0]
+            $runtime = @($hits | Where-Object { $_.detail -match 'Level0 runtime' })[0]
+            $observation = @($hits | Where-Object { $_.detail -match 'Invalid protection' })[0]
+            $otherHit = @($hits | Where-Object { $_.id -ceq 'other-profile' })[0]
+
+            $handoff.action | Should -BeExactly 'open_official_uninstaller'
+            $handoff.launch_protected_level | Should -Be 3
+            $handoff.uninstall_display_name | Should -BeExactly '联想电脑管家'
+            $runtime.action | Should -BeExactly 'stop_service_runtime'
+            $runtime.process_id | Should -Be 4321
+            $runtime.PSObject.Properties.Name | Should -Not -Contain 'uninstall_display_name'
+            $observation.action | Should -BeExactly 'investigate'
+            $observation.execution_class | Should -BeExactly 'observation'
+            $observation.PSObject.Properties.Name | Should -Not -Contain 'uninstall_display_name'
+            $otherHit.action | Should -BeExactly 'disable_service'
+            $otherHit.execution_class | Should -BeExactly 'automatic_safe'
+            $otherHit.PSObject.Properties.Name | Should -Not -Contain 'uninstall_display_name'
+            $handoff.action | Should -BeExactly 'open_official_uninstaller'
+            $handoff.execution_class | Should -BeExactly 'manual_impact'
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 

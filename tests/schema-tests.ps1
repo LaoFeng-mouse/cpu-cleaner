@@ -215,6 +215,9 @@ Assert-Equal 'HRWSCCtrl manual service=open_official_uninstaller' $hrwscctrl.man
 Assert-Equal 'HRWSCCtrl manual_impact' $hrwscctrl.cleanup_policy.execution_class 'manual_impact'
 Assert-Equal 'HRWSCCtrl default_selected=false' $hrwscctrl.cleanup_policy.default_selected $false
 Assert-Equal 'HRWSCCtrl requires_confirmation=true' $hrwscctrl.cleanup_policy.requires_confirmation $true
+Assert-Equal 'HRWSCCtrl execution.allow_auto=false' $hrwscctrl.execution.allow_auto $false
+Assert-Equal 'HRWSCCtrl execution.allow_auto 为 Boolean' ($hrwscctrl.execution.allow_auto -is [bool]) $true
+Assert-Equal 'HRWSCCtrl manual-only review_note' $hrwscctrl.execution.review_note '仅允许用户确认后的官方卸载入口；不属于自动安全清理'
 Assert-Equal 'HRWSCCtrl exact matcher first' @($hrwscctrl.detect.services)[0].type 'exact'
 Assert-Equal 'HRWSCCtrl contains fallback second' @($hrwscctrl.detect.services)[1].type 'contains'
 
