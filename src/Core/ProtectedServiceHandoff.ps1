@@ -201,26 +201,68 @@ function New-UnavailableLenovoOfficialUninstallEvidence {
     }
 }
 
-# 将注册表提供程序路径转换为可审阅的 HKLM 路径，并保留原始值类型供严格校验。
+# 显式读取 64/32 位 HKLM 视图，避免注册表提供程序随进程位数重映射。
 function Read-LenovoOfficialUninstallRegistryItems {
-    param([Parameter(Mandatory=$true)][string[]]$Paths)
+    param([scriptblock]$OpenBaseKey)
 
-    $providerPrefix = 'Microsoft.PowerShell.Core\Registry::HKEY_LOCAL_MACHINE\'
-    foreach ($path in $Paths) {
-        foreach ($item in @(Get-ItemProperty -Path $path -ErrorAction Stop)) {
-            $registryPath = ''
-            if ($item.PSPath -is [string] -and
-                $item.PSPath.StartsWith($providerPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-                $registryPath = 'HKLM:\' + $item.PSPath.Substring($providerPrefix.Length)
+    if ($null -eq $OpenBaseKey) {
+        $OpenBaseKey = {
+            param($View)
+            [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                [Microsoft.Win32.RegistryHive]::LocalMachine,
+                $View)
+        }
+    }
+
+    $relativePath = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    $valueOptions = [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+    $viewSpecs = @(
+        [pscustomobject]@{
+            View = [Microsoft.Win32.RegistryView]::Registry64
+            SourceRoot = $script:LenovoOfficialUninstallRegistryRoots[0]
+        },
+        [pscustomobject]@{
+            View = [Microsoft.Win32.RegistryView]::Registry32
+            SourceRoot = $script:LenovoOfficialUninstallRegistryRoots[1]
+        }
+    )
+
+    foreach ($viewSpec in $viewSpecs) {
+        $baseKey = $null
+        $uninstallKey = $null
+        try {
+            $baseKey = & $OpenBaseKey $viewSpec.View
+            if ($null -eq $baseKey) { throw 'Registry base key is unavailable.' }
+
+            $uninstallKey = $baseKey.OpenSubKey($relativePath, $false)
+            if ($null -eq $uninstallKey) { continue }
+
+            foreach ($subKeyName in @($uninstallKey.GetSubKeyNames())) {
+                $childKey = $null
+                try {
+                    $childKey = $uninstallKey.OpenSubKey($subKeyName, $false)
+                    if ($null -eq $childKey) { continue }
+
+                    [pscustomobject]@{
+                        RegistryPath = $viewSpec.SourceRoot + '\' + $subKeyName
+                        DisplayName = $childKey.GetValue('DisplayName', $null, $valueOptions)
+                        Publisher = $childKey.GetValue('Publisher', $null, $valueOptions)
+                        DisplayVersion = $childKey.GetValue('DisplayVersion', $null, $valueOptions)
+                        InstallLocation = $childKey.GetValue('InstallLocation', $null, $valueOptions)
+                        UninstallString = $childKey.GetValue('UninstallString', $null, $valueOptions)
+                    }
+                }
+                finally {
+                    if ($null -ne $childKey) { $childKey.Dispose() }
+                }
             }
-
-            [pscustomobject]@{
-                RegistryPath = $registryPath
-                DisplayName = $item.DisplayName
-                Publisher = $item.Publisher
-                DisplayVersion = $item.DisplayVersion
-                InstallLocation = $item.InstallLocation
-                UninstallString = $item.UninstallString
+        }
+        finally {
+            try {
+                if ($null -ne $uninstallKey) { $uninstallKey.Dispose() }
+            }
+            finally {
+                if ($null -ne $baseKey) { $baseKey.Dispose() }
             }
         }
     }
@@ -248,7 +290,7 @@ function Get-LenovoOfficialUninstallEvidence {
     $unavailable = New-UnavailableLenovoOfficialUninstallEvidence
     try {
         if ($null -eq $RegistryReader) {
-            $RegistryReader = { param($Paths) Read-LenovoOfficialUninstallRegistryItems -Paths $Paths }
+            $RegistryReader = { param($Paths) Read-LenovoOfficialUninstallRegistryItems }
         }
 
         $registryItems = @(& $RegistryReader $script:LenovoOfficialUninstallRegistryQueryPaths)
@@ -285,6 +327,8 @@ function Get-LenovoOfficialUninstallEvidence {
                     -not $item.InstallLocation.Equals($installLocation, [StringComparison]::OrdinalIgnoreCase)) {
                     continue
                 }
+                $installRootPath = [System.IO.Path]::GetPathRoot($installLocation)
+                if ($installLocation.Equals($installRootPath, [StringComparison]::OrdinalIgnoreCase)) { continue }
 
                 $executablePath = ConvertFrom-StrictOfficialUninstallString -Command $item.UninstallString
                 if ($executablePath -isnot [string] -or $executablePath.Length -eq 0) { continue }

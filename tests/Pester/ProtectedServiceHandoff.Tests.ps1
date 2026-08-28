@@ -54,6 +54,43 @@
         $Result.UninstallEvidenceStatus | Should -BeExactly 'unavailable'
         @($Result.PSObject.Properties.Value)[1..7] | Should -Be @('', '', '', '', '', '', '')
     }
+
+    function New-TestRegistryKey {
+        param(
+            [string[]]$SubKeyNames = @(),
+            [hashtable]$SubKeys = @{},
+            [hashtable]$Values = @{},
+            [string]$ThrowOnValueName = ''
+        )
+
+        $key = [pscustomobject]@{
+            SubKeyNames = @($SubKeyNames)
+            SubKeys = $SubKeys
+            Values = $Values
+            ThrowOnValueName = $ThrowOnValueName
+            GetSubKeyNamesCallCount = 0
+            DisposeCallCount = 0
+        }
+        $key | Add-Member -MemberType ScriptMethod -Name GetSubKeyNames -Value {
+            [void]($this.GetSubKeyNamesCallCount++)
+            return @($this.SubKeyNames)
+        }
+        $key | Add-Member -MemberType ScriptMethod -Name OpenSubKey -Value {
+            param($Name, $Writable)
+            if ($this.SubKeys.ContainsKey($Name)) { return $this.SubKeys[$Name] }
+            return $null
+        }
+        $key | Add-Member -MemberType ScriptMethod -Name GetValue -Value {
+            param($Name, $DefaultValue, $Options)
+            if ($this.ThrowOnValueName -ceq $Name) { throw "failed to read $Name" }
+            if ($this.Values.ContainsKey($Name)) { return $this.Values[$Name] }
+            return $DefaultValue
+        }
+        $key | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+            [void]($this.DisposeCallCount++)
+        }
+        return $key
+    }
 }
 
 Describe 'service LaunchProtected state normalization' {
@@ -198,19 +235,96 @@ Describe 'strict Lenovo official uninstall registry discovery' {
         Assert-UnavailableLenovoUninstallEvidence -Result $result
     }
 
-    It 'uses only the two exact HKLM uninstall wildcard paths in the production reader' {
-        Mock Get-ItemProperty { @() }
-
-        $result = Get-LenovoOfficialUninstallEvidence
-
-        Assert-MockCalled Get-ItemProperty -Times 2 -Exactly -Scope It
-        Assert-MockCalled Get-ItemProperty -Times 1 -Exactly -Scope It -ParameterFilter {
-            $Path -ceq 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    It 'maps Registry64 and Registry32 values to the two approved source path forms exactly once' {
+        $values64 = @{
+            DisplayName = '联想电脑管家 6.0'
+            Publisher = 'Lenovo (Beijing) Limited'
+            DisplayVersion = '6.0.1'
+            InstallLocation = 'C:\Program Files\Lenovo\PCManager\6.0'
+            UninstallString = '"C:\Program Files\Lenovo\PCManager\6.0\uninst.exe"'
         }
-        Assert-MockCalled Get-ItemProperty -Times 1 -Exactly -Scope It -ParameterFilter {
-            $Path -ceq 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+        $values32 = @{
+            DisplayName = '联想电脑管家 5.1'
+            Publisher = '联想（北京）有限公司'
+            DisplayVersion = '5.1.0'
+            InstallLocation = 'C:\Program Files (x86)\Lenovo\PCManager\5.1'
+            UninstallString = 'C:\Program Files (x86)\Lenovo\PCManager\5.1\uninst.exe'
         }
-        Assert-UnavailableLenovoUninstallEvidence -Result $result
+        $child64 = New-TestRegistryKey -Values $values64
+        $child32 = New-TestRegistryKey -Values $values32
+        $uninstall64 = New-TestRegistryKey -SubKeyNames @('Lenovo64') -SubKeys @{ Lenovo64 = $child64 }
+        $uninstall32 = New-TestRegistryKey -SubKeyNames @('Lenovo32') -SubKeys @{ Lenovo32 = $child32 }
+        $relativePath = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+        $base64 = New-TestRegistryKey -SubKeys @{ $relativePath = $uninstall64 }
+        $base32 = New-TestRegistryKey -SubKeys @{ $relativePath = $uninstall32 }
+        $openedViews = [System.Collections.ArrayList]::new()
+        $openBaseKey = {
+            param($View)
+            [void]$openedViews.Add($View.ToString())
+            if ($View -eq [Microsoft.Win32.RegistryView]::Registry64) { return $base64 }
+            if ($View -eq [Microsoft.Win32.RegistryView]::Registry32) { return $base32 }
+            throw "unexpected registry view $View"
+        }.GetNewClosure()
+
+        $items = @(Read-LenovoOfficialUninstallRegistryItems -OpenBaseKey $openBaseKey)
+
+        @($openedViews) | Should -Be @(
+            'Registry64',
+            'Registry32'
+        )
+        $items.Count | Should -Be 2
+        $items[0].RegistryPath | Should -BeExactly 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Lenovo64'
+        $items[0].DisplayName | Should -BeExactly $values64.DisplayName
+        $items[0].Publisher | Should -BeExactly $values64.Publisher
+        $items[0].DisplayVersion | Should -BeExactly $values64.DisplayVersion
+        $items[0].InstallLocation | Should -BeExactly $values64.InstallLocation
+        $items[0].UninstallString | Should -BeExactly $values64.UninstallString
+        $items[1].RegistryPath | Should -BeExactly 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Lenovo32'
+        $items[1].DisplayName | Should -BeExactly $values32.DisplayName
+        $uninstall64.GetSubKeyNamesCallCount | Should -Be 1
+        $uninstall32.GetSubKeyNamesCallCount | Should -Be 1
+        foreach ($key in @($child64, $child32, $uninstall64, $uninstall32, $base64, $base32)) {
+            $key.DisposeCallCount | Should -Be 1
+        }
+    }
+
+    It 'preserves registry value arrays for strict scalar rejection' {
+        $arrayValue = @('5.1.0', '5.2.0')
+        $child = New-TestRegistryKey -Values @{
+            DisplayName = '联想电脑管家'
+            Publisher = '联想(北京)有限公司'
+            DisplayVersion = $arrayValue
+            InstallLocation = 'C:\Lenovo'
+            UninstallString = 'C:\Lenovo\uninst.exe'
+        }
+        $uninstall = New-TestRegistryKey -SubKeyNames @('Lenovo') -SubKeys @{ Lenovo = $child }
+        $relativePath = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+        $base64 = New-TestRegistryKey -SubKeys @{ $relativePath = $uninstall }
+        $empty32 = New-TestRegistryKey
+        $openBaseKey = {
+            param($View)
+            if ($View -eq [Microsoft.Win32.RegistryView]::Registry64) { return $base64 }
+            return $empty32
+        }.GetNewClosure()
+
+        $items = @(Read-LenovoOfficialUninstallRegistryItems -OpenBaseKey $openBaseKey)
+
+        @($items[0].DisplayVersion) | Should -Be $arrayValue
+    }
+
+    It 'throws after disposing opened keys when registry value reading fails' {
+        $child = New-TestRegistryKey -Values @{ DisplayName = '联想电脑管家' } -ThrowOnValueName 'Publisher'
+        $uninstall = New-TestRegistryKey -SubKeyNames @('Lenovo') -SubKeys @{ Lenovo = $child }
+        $relativePath = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+        $base64 = New-TestRegistryKey -SubKeys @{ $relativePath = $uninstall }
+        $openBaseKey = { param($View) return $base64 }.GetNewClosure()
+
+        { Read-LenovoOfficialUninstallRegistryItems -OpenBaseKey $openBaseKey } |
+            Should -Throw '*failed to read Publisher*'
+
+        $child.DisposeCallCount | Should -Be 1
+        $uninstall.DisposeCallCount | Should -Be 1
+        $base64.DisposeCallCount | Should -Be 1
     }
 
     It 'returns unavailable for malformed registry item <Label>' -TestCases @(
@@ -219,12 +333,16 @@ Describe 'strict Lenovo official uninstall registry discovery' {
         @{ Label = 'empty source key'; Changes = @{ RegistryPath = '' } }
         @{ Label = 'array source key'; Changes = @{ RegistryPath = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\A', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\B') } }
         @{ Label = 'wrong display name'; Changes = @{ DisplayName = 'Lenovo PC Manager' } }
+        @{ Label = 'array display name'; Changes = @{ DisplayName = @('联想电脑管家', '联想电脑管家 5.1') } }
         @{ Label = 'non-Lenovo publisher'; Changes = @{ Publisher = 'Lenovo Group Limited' } }
         @{ Label = 'publisher case drift'; Changes = @{ Publisher = 'lenovo (Beijing) Limited' } }
+        @{ Label = 'array publisher'; Changes = @{ Publisher = @('联想（北京）有限公司', '联想(北京)有限公司') } }
         @{ Label = 'missing install location'; Changes = @{ InstallLocation = '' } }
         @{ Label = 'rootless install location'; Changes = @{ InstallLocation = 'Lenovo\PCManager\5.1' } }
         @{ Label = 'non-canonical install location'; Changes = @{ InstallLocation = 'C:\Program Files (x86)\Lenovo\PCManager\5.0\..\5.1' } }
+        @{ Label = 'array install location'; Changes = @{ InstallLocation = @('C:\Lenovo', 'D:\Lenovo') } }
         @{ Label = 'array display version'; Changes = @{ DisplayVersion = @('5.1', '5.2') } }
+        @{ Label = 'array uninstall string'; Changes = @{ UninstallString = @('C:\Lenovo\uninst.exe', 'D:\Lenovo\uninst.exe') } }
         @{ Label = 'executable outside install location'; Changes = @{ UninstallString = 'C:\Temp\uninst.exe' } }
         @{ Label = 'textual prefix without separator boundary'; Changes = @{ UninstallString = 'C:\Program Files (x86)\Lenovo\PCManager\5.10\uninst.exe' } }
         @{ Label = 'command arguments'; Changes = @{ UninstallString = 'C:\Program Files (x86)\Lenovo\PCManager\5.1\uninst.exe /S' } }
@@ -235,6 +353,35 @@ Describe 'strict Lenovo official uninstall registry discovery' {
         foreach ($key in $Changes.Keys) { $parameters[$key] = $Changes[$key] }
         $item = New-LenovoUninstallRegistryItem @parameters
         $registryReader = { param($Paths) $item }.GetNewClosure()
+
+        $result = Get-LenovoOfficialUninstallEvidence -RegistryReader $registryReader
+
+        Assert-UnavailableLenovoUninstallEvidence -Result $result
+    }
+
+    It 'returns unavailable when install location is volume root <InstallLocation>' -TestCases @(
+        @{ InstallLocation = 'C:\'; UninstallString = 'C:\uninst.exe' }
+        @{ InstallLocation = 'D:\'; UninstallString = 'D:\uninst.exe' }
+    ) {
+        param($InstallLocation, $UninstallString)
+        $item = New-LenovoUninstallRegistryItem `
+            -InstallLocation $InstallLocation `
+            -UninstallString $UninstallString
+        $registryReader = { param($Paths) $item }.GetNewClosure()
+
+        $result = Get-LenovoOfficialUninstallEvidence -RegistryReader $registryReader
+
+        Assert-UnavailableLenovoUninstallEvidence -Result $result
+    }
+
+    It 'returns unavailable for malformed reader output <Label>' -TestCases @(
+        @{ Label = 'null'; Output = $null }
+        @{ Label = 'string'; Output = 'not a registry item' }
+        @{ Label = 'integer'; Output = 42 }
+        @{ Label = 'boolean'; Output = $true }
+    ) {
+        param($Label, $Output)
+        $registryReader = { param($Paths) $Output }.GetNewClosure()
 
         $result = Get-LenovoOfficialUninstallEvidence -RegistryReader $registryReader
 
