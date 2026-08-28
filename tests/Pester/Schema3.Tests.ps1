@@ -666,27 +666,25 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
         $policy.cleanup_reason_cn.Trim().Length | Should -BeGreaterThan 0
     }
 
-    It 'HRWSCCtrl exact 身份优先于 broad 回退并锁定 manual_impact 策略' {
+    It 'HRWSCCtrl exact PPL3 身份优先于 broad 回退并生成官方卸载交接' {
+        . (Join-Path $script:Root 'src\Core\ProtectedServiceHandoff.ps1')
         . (Join-Path $script:Root 'src\Core\InventoryManager.ps1')
         $profile = @((Load-Profiles -Path $script:ProfileFile).profiles | Where-Object { $_.id -eq 'lenovo-hrwscctrl' }) | Select-Object -First 1
         $services = @($profile.detect.services)
-        $binaryDir = Join-Path $TestDrive 'Program Files\Lenovo Security Center'
-        [System.IO.Directory]::CreateDirectory($binaryDir) | Out-Null
-        $binary = Join-Path $binaryDir 'wsctrl11.exe'
-        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
-        $pathName = '"' + $binary + '" -service'
-        Mock Get-CimInstance {
-            return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=$pathName }
-        } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
         $hit = @(Match-Profiles -Services @([pscustomobject]@{
-            Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=$pathName; ProcessId=[int]4321
-            ProcessIdentitySource='trusted_inventory_v3'; ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'
-            ProcessPath=$binary; ProcessStartTimeUtc='2026-08-24T01:02:03.0000000Z'
+            Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=''; ProcessId=[int]0
+            ProcessIdentitySource='trusted_inventory_v3'; ProcessIdentityStatus='not_running'; ProcessName=''; ProcessPath=''; ProcessStartTimeUtc=''
+            LaunchProtectedStatus='complete'; LaunchProtectedLevel=[int]3; UninstallEvidenceStatus='complete'
+            UninstallRegistryPath='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+            UninstallDisplayName='联想电脑管家'; UninstallPublisher='联想（北京）有限公司'; UninstallDisplayVersion='5.1.0'
+            UninstallInstallLocation='C:\Program Files\Lenovo\PCManager'
+            UninstallString='"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+            UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\uninst.exe'
         }) -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
 
         $profile | Should -Not -BeNullOrEmpty
         $profile.safe | Should -BeFalse
-        $profile.reason_cn | Should -BeExactly '联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需停止 HRWSCCtrl 服务当前运行态'
+        $profile.reason_cn | Should -BeExactly '联想电脑管家安全组件可能受 Windows 保护；仅在可信扫描确认后提供官方卸载交接或普通运行态停止，不属于自动安全清理项'
         $services.Count | Should -Be 2
         $services[0].match | Should -BeExactly 'HRWSCCtrl'
         $services[0].type | Should -BeExactly 'exact'
@@ -694,27 +692,25 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
         $services[1].type | Should -BeExactly 'contains'
         Get-ActionFor $profile.actions 'service' | Should -BeExactly 'none'
         Get-ActionFor $profile.actions 'process' | Should -BeExactly 'none'
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_runtime'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'open_official_uninstaller'
 
         $policy = Get-CleanupPolicy $profile
         $policy.execution_class | Should -BeExactly 'manual_impact'
         $policy.necessity | Should -BeExactly 'optional'
         $policy.default_selected | Should -BeFalse
         $policy.requires_confirmation | Should -BeTrue
-        $policy.impact_cn | Should -BeExactly '停止 exact HRWSCCtrl 服务当前运行态；不修改启动方式；不可通过恢复撤销；服务可能被其他组件重新启动'
-        $policy.cleanup_reason_cn | Should -BeExactly '不使用联想电脑管家时可停止当前安全中心服务运行态，减少本次会话后台占用'
+        $policy.impact_cn | Should -BeExactly '可能移除联想电脑管家的安全、防护、通知和相关后台组件'
+        $policy.cleanup_reason_cn | Should -BeExactly 'Windows 受保护服务阻止普通管理员实时停止；不需要联想电脑管家时可按需打开联想官方卸载程序'
 
-        $hit.action | Should -BeExactly 'stop_service_runtime'
+        $hit.action | Should -BeExactly 'open_official_uninstaller'
         $hit.execution_class | Should -BeExactly 'manual_impact'
         $hit.matched_type | Should -BeExactly 'exact'
         $hit.matched_field | Should -BeExactly 'service_name'
-        $hit.service_binary_path | Should -BeExactly $binary
-        $hit.process_id | Should -Be 4321
-        $hit.process_name | Should -BeExactly 'wsctrl11.exe'
-        $hit.process_path | Should -BeExactly $binary
-        $hit.process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.0000000Z'
-        Assert-MockCalled Get-CimInstance -Times 2 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Service' }
-        Assert-MockCalled Get-CimInstance -Times 0 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Process' }
+        $hit.launch_protected_status | Should -BeExactly 'complete'
+        $hit.launch_protected_level | Should -Be 3
+        $hit.uninstall_evidence_status | Should -BeExactly 'complete'
+        $hit.uninstall_executable_path | Should -BeExactly 'C:\Program Files\Lenovo\PCManager\uninst.exe'
+        $hit.PSObject.Properties.Name | Should -Not -Contain 'process_id'
     }
 
     It '七个已验证 Lenovo 清理规则使用 exact 内部服务名且 evidence.tested=true' {

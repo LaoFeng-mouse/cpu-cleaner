@@ -1,9 +1,9 @@
 ﻿# 特征库引擎 (v1.7.0 拆分): Schema 校验/迁移/匹配分发/Match-Profiles
 # ---------- v1.3: 特征库加载与校验 (Schema 2.0) ----------
 $script:ValidRisks   = @('high','medium','low')
-$script:ValidActions = @('disable_service','stop_service_runtime','remove_autostart','disable_task','uninstall','investigate','none')
+$script:ValidActions = @('disable_service','stop_service_runtime','open_official_uninstaller','remove_autostart','disable_task','uninstall','investigate','none')
 $script:PersistentDangerousActions = @('disable_service','remove_autostart','disable_task','uninstall')
-$script:ManualImpactActions = @('disable_service','stop_service_runtime','remove_autostart','disable_task','uninstall')
+$script:ManualImpactActions = @('disable_service','stop_service_runtime','open_official_uninstaller','remove_autostart','disable_task','uninstall')
 # Pending/执行器兼容: 所有可执行动作仍视为危险动作；profile 授权另行区分持久化自动动作。
 $script:DangerousActions = $script:ManualImpactActions
 $script:ValidCleanupExecutionClasses = @('automatic_safe','manual_impact')
@@ -261,8 +261,8 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                 foreach ($ak in Get-ActionKeys $p.actions) {
                     $av = Get-ActionFor $p.actions $ak
                     if ($av -isnot [string] -or $script:ValidActions -cnotcontains $av) { $errors += "id=$($p.id) actions.$ak 非法: $av" }
-                    if ($av -ceq 'stop_service_runtime') {
-                        $errors += "id=$($p.id) stop_service_runtime 只允许 manual_actions.service"
+                    if ($av -cin @('stop_service_runtime','open_official_uninstaller')) {
+                        $errors += "id=$($p.id) $av 只允许 manual_actions.service"
                     }
                 }
                 # safe=false 只能配 none/investigate
@@ -304,8 +304,8 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                         if ($av -isnot [string] -or $script:ValidActions -cnotcontains $av) {
                             $errors += "id=$($p.id) manual_actions.$ak 非法: $av"
                         }
-                        if ($av -ceq 'stop_service_runtime' -and $ak -cne 'service') {
-                            $errors += "id=$($p.id) stop_service_runtime 只允许 manual_actions.service"
+                        if ($av -cin @('stop_service_runtime','open_official_uninstaller') -and $ak -cne 'service') {
+                            $errors += "id=$($p.id) $av 只允许 manual_actions.service"
                         }
                         if ($script:ManualImpactActions -ccontains $av) {
                             $hasDangerousManualAction = $true
@@ -367,6 +367,11 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
                     $errors += "id=$($p.id) manual_impact 要求 requires_confirmation=true"
                 }
             }
+            if ($hasManualActions -and (Test-ObjectContainer $manualActions) -and
+                (Get-ActionFor $manualActions 'service') -ceq 'open_official_uninstaller' -and
+                ($null -eq $policy -or $policy.necessity -cne 'optional')) {
+                $errors += "id=$($p.id) open_official_uninstaller 要求 cleanup_policy.necessity=optional"
+            }
         }
     }
 
@@ -380,7 +385,8 @@ function Load-Profiles([string]$Path = $script:ProfileFile) {
 # 构造一条命中记录 (结构化字段)
 function New-Hit {
     param($p, $hitType, $detail, $srvName, $autostartSource, $autostartName, $taskPath, $procName, $decision, $matchEvidence,
-        $processId = 0, $processPath = '', $autostartValue = '', $serviceBinaryPath = '', $processStartTimeUtc = '', $obsReason = '')
+        $processId = 0, $processPath = '', $autostartValue = '', $serviceBinaryPath = '', $processStartTimeUtc = '', $obsReason = '',
+        $officialUninstallEvidence = $null)
     $matchedPattern = ''
     $matchedType = ''
     $matchedField = ''
@@ -389,16 +395,15 @@ function New-Hit {
         $matchedType = [string]$matchEvidence.matched_type
         $matchedField = [string]$matchEvidence.matched_field
     }
-    return [pscustomobject]@{
+    $hit = [ordered]@{
         id = $p.id; vendor = $p.vendor; name = $p.name; name_cn = $p.name_cn
         risk = $p.risk; action = $decision.Action; safe = $p.safe; reason_cn = $p.reason_cn
         evidence = $p.evidence
         hit_type = $hitType
         detail = $detail
         service_name = $srvName
-        service_binary_path = $serviceBinaryPath
         autostart_source = $autostartSource; autostart_name = $autostartName; autostart_value = $autostartValue
-        task_path = $taskPath; process_name = $procName
+        task_path = $taskPath
         matched_pattern = $matchedPattern; matched_type = $matchedType; matched_field = $matchedField
         execution_class = $decision.ExecutionClass
         necessity = $decision.Necessity
@@ -406,9 +411,27 @@ function New-Hit {
         requires_confirmation = $decision.RequiresConfirmation
         impact_cn = $decision.ImpactCn
         cleanup_reason_cn = $decision.CleanupReasonCn
-        process_id = $processId; process_path = $processPath; process_start_time_utc = $processStartTimeUtc
         obs_reason = $obsReason
     }
+    if ($decision.Action -ceq 'open_official_uninstaller' -and $null -ne $officialUninstallEvidence) {
+        $hit.launch_protected_status = $officialUninstallEvidence.LaunchProtectedStatus
+        $hit.launch_protected_level = $officialUninstallEvidence.LaunchProtectedLevel
+        $hit.uninstall_evidence_status = $officialUninstallEvidence.UninstallEvidenceStatus
+        $hit.uninstall_registry_path = $officialUninstallEvidence.UninstallRegistryPath
+        $hit.uninstall_display_name = $officialUninstallEvidence.UninstallDisplayName
+        $hit.uninstall_publisher = $officialUninstallEvidence.UninstallPublisher
+        $hit.uninstall_display_version = $officialUninstallEvidence.UninstallDisplayVersion
+        $hit.uninstall_install_location = $officialUninstallEvidence.UninstallInstallLocation
+        $hit.uninstall_string = $officialUninstallEvidence.UninstallString
+        $hit.uninstall_executable_path = $officialUninstallEvidence.UninstallExecutablePath
+    } else {
+        $hit.service_binary_path = $serviceBinaryPath
+        $hit.process_id = $processId
+        $hit.process_name = $procName
+        $hit.process_path = $processPath
+        $hit.process_start_time_utc = $processStartTimeUtc
+    }
+    return [pscustomobject]$hit
 }
 
 # 统一读取 actions 的键列表 (兼容 hashtable 与 PSCustomObject; v1 转换产物是 hashtable)
@@ -500,7 +523,7 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
         ($script:PersistentDangerousActions -cnotcontains $declaredAction) -and
         ($script:ManualImpactActions -ccontains $manualAction) -and
         $isTested -and
-        $(if ($manualAction -ceq 'stop_service_runtime') {
+        $(if ($manualAction -cin @('stop_service_runtime','open_official_uninstaller')) {
             $hitType -ceq 'service' -and $matchedType -ceq 'exact' -and $matchedField -ceq 'service_name'
         } else {
             $hasNarrowEvidence
@@ -510,6 +533,7 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
         $policy.default_selected -is [bool] -and $policy.default_selected -eq $false -and
         $policy.requires_confirmation -is [bool] -and $policy.requires_confirmation -eq $true -and
         $policy.necessity -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.necessity) -and
+        $(if ($manualAction -ceq 'open_official_uninstaller') { $policy.necessity -ceq 'optional' } else { $true }) -and
         $policy.impact_cn -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.impact_cn) -and
         $policy.cleanup_reason_cn -is [string] -and -not [string]::IsNullOrWhiteSpace($policy.cleanup_reason_cn)
     )
@@ -538,6 +562,49 @@ function Get-HitExecutionDecision($profile, [string]$hitType, $evidence) {
 
 function Get-EffectiveHitAction($profile, $hitType, $evidence) {
     return (Get-HitExecutionDecision $profile $hitType $evidence).Action
+}
+
+$script:HrwsSafeObservationReason = '当前 HRWSCCtrl 的受保护状态、官方卸载证据或运行身份不足，暂不提供处理操作；请重新扫描后再试。'
+
+function Test-ProfileStrictInteger($Value) {
+    return ($Value -is [byte] -or $Value -is [uint16] -or $Value -is [uint32] -or
+        $Value -is [int16] -or $Value -is [int32] -or $Value -is [int64])
+}
+
+function Test-TrustedV3ExactHrwsService($Service) {
+    return ($null -ne $Service -and $Service.Name -is [string] -and $Service.Name -ceq 'HRWSCCtrl' -and
+        $Service.ProcessIdentitySource -is [string] -and $Service.ProcessIdentitySource -ceq 'trusted_inventory_v3')
+}
+
+function Test-TrustedV3PplOfficialUninstallServiceShape($Service) {
+    if (-not (Test-TrustedV3ExactHrwsService $Service) -or
+        $Service.LaunchProtectedStatus -isnot [string] -or $Service.LaunchProtectedStatus -cne 'complete' -or
+        -not (Test-ProfileStrictInteger $Service.LaunchProtectedLevel) -or [int64]$Service.LaunchProtectedLevel -ne 3 -or
+        $Service.UninstallEvidenceStatus -isnot [string] -or $Service.UninstallEvidenceStatus -cne 'complete') {
+        return $false
+    }
+    try {
+        Assert-InventoryLaunchProtectedShape $Service
+        Assert-InventoryUninstallEvidenceShape $Service
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-TrustedV3ExactNonProtectedHrwsServiceShape($Service) {
+    return ((Test-TrustedV3ExactHrwsService $Service) -and
+        $Service.LaunchProtectedStatus -is [string] -and $Service.LaunchProtectedStatus -ceq 'complete' -and
+        (Test-ProfileStrictInteger $Service.LaunchProtectedLevel) -and [int64]$Service.LaunchProtectedLevel -eq 0 -and
+        $Service.ProcessIdentityStatus -is [string] -and $Service.ProcessIdentityStatus -ceq 'complete')
+}
+
+function Set-HitDecisionToHrwsObservation($Decision) {
+    $Decision.Action = 'investigate'
+    $Decision.ExecutionClass = 'observation'
+    $Decision.Necessity = 'informational'
+    $Decision.DefaultSelected = $false
+    $Decision.RequiresConfirmation = $false
 }
 
 # v1.5.1 P1: 进程名标准化 (mcpman.exe / MCPMAN.EXE / mcpman / C:\x\mcpman.exe → mcpman)
@@ -569,6 +636,20 @@ function Match-Profiles {
                     $processPath = ''
                     $processStartTimeUtc = ''
                     $obsReason = ''
+                    $officialUninstallEvidence = $null
+                    $manualServiceAction = Get-ManualActionFor $p 'service'
+                    if ($manualServiceAction -ceq 'open_official_uninstaller') {
+                        if ($decision.Action -ceq 'open_official_uninstaller' -and
+                            (Test-TrustedV3PplOfficialUninstallServiceShape $s)) {
+                            $officialUninstallEvidence = $s
+                        } elseif ($decision.Action -ceq 'open_official_uninstaller' -and
+                            (Test-TrustedV3ExactNonProtectedHrwsServiceShape $s)) {
+                            $decision.Action = 'stop_service_runtime'
+                        } else {
+                            Set-HitDecisionToHrwsObservation $decision
+                            $obsReason = $script:HrwsSafeObservationReason
+                        }
+                    }
                     if ($decision.Action -ceq 'stop_service_runtime') {
                         $identityReason = ''
                         $identity = Get-ServiceProcessExecutionIdentity -Service $s -FailureReason ([ref]$identityReason)
@@ -579,14 +660,11 @@ function Match-Profiles {
                             $processPath = $identity.process_path
                             $processStartTimeUtc = $identity.process_start_time_utc
                         } else {
-                            $decision.Action = 'investigate'
-                            $decision.ExecutionClass = 'observation'
-                            $decision.DefaultSelected = $false
-                            $decision.RequiresConfirmation = $false
-                            $obsReason = $identityReason
+                            Set-HitDecisionToHrwsObservation $decision
+                            $obsReason = if ($manualServiceAction -ceq 'open_official_uninstaller') { $script:HrwsSafeObservationReason } else { $identityReason }
                         }
                     }
-                    $hits += New-Hit -p $p -hitType 'service' -detail "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)" -srvName $s.Name -autostartSource '' -autostartName '' -taskPath '' -procName $processName -decision $decision -matchEvidence $matchEvidence -serviceBinaryPath $serviceBinaryPath -processId $processId -processPath $processPath -processStartTimeUtc $processStartTimeUtc -obsReason $obsReason
+                    $hits += New-Hit -p $p -hitType 'service' -detail "$($s.Name) | $($s.DisplayName) | $($s.State)/$($s.StartMode)" -srvName $s.Name -autostartSource '' -autostartName '' -taskPath '' -procName $processName -decision $decision -matchEvidence $matchEvidence -serviceBinaryPath $serviceBinaryPath -processId $processId -processPath $processPath -processStartTimeUtc $processStartTimeUtc -obsReason $obsReason -officialUninstallEvidence $officialUninstallEvidence
                 }
             }
         }

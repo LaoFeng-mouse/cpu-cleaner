@@ -803,39 +803,33 @@ Invoke-Clean
         $p.resolved[0].task_path | Should -BeExactly '\Lenovo\LenovoMachineFixUser_OOBE_AUTO_Notification'
     }
 
-    It 'promotes a complete running HRWSCCtrl exact identity to a one-time action' {
+    It 'keeps a PPL3 official-uninstall HRWS hit as observation until Task5 adds pending execution shape' {
         $profiles = Load-Profiles -Path $script:ProfileFile
         $profile = @($profiles.profiles | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
-        $binaryDir = Join-Path $TestDrive 'Program Files\Lenovo Security Center'
-        [System.IO.Directory]::CreateDirectory($binaryDir) | Out-Null
-        $binary = Join-Path $binaryDir 'wsctrl11.exe'
-        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
-        $pathName = '"' + $binary + '" -service'
         $services = @([pscustomobject]@{
-            Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=$pathName; ProcessId=[int]4321
-            ProcessIdentitySource='trusted_inventory_v3'; ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'
-            ProcessPath=$binary; ProcessStartTimeUtc='2026-08-24T01:02:03.0000000Z'
+            Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=''; ProcessId=[int]0
+            ProcessIdentitySource='trusted_inventory_v3'; ProcessIdentityStatus='not_running'; ProcessName=''; ProcessPath=''; ProcessStartTimeUtc=''
+            LaunchProtectedStatus='complete'; LaunchProtectedLevel=[int]3
+            UninstallEvidenceStatus='complete'
+            UninstallRegistryPath='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+            UninstallDisplayName='联想电脑管家'; UninstallPublisher='联想（北京）有限公司'; UninstallDisplayVersion='5.1.0'
+            UninstallInstallLocation='C:\Program Files\Lenovo\PCManager'
+            UninstallString='"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+            UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\uninst.exe'
         })
-        Mock Get-CimInstance {
-            return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=$pathName }
-        } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
         $hit = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
 
         $profile.safe | Should -BeFalse
         $profile.evidence.tested | Should -BeTrue
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_runtime'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'open_official_uninstaller'
         $hit.safe | Should -BeFalse
         $hit.evidence.tested | Should -BeTrue
         $hit.matched_type | Should -BeExactly 'exact'
         $hit.execution_class | Should -BeExactly 'manual_impact'
-        $hit.action | Should -BeExactly 'stop_service_runtime'
-        $hit.service_binary_path | Should -BeExactly $binary
-        $hit.process_id | Should -Be 4321
-        $hit.process_name | Should -BeExactly 'wsctrl11.exe'
-        $hit.process_path | Should -BeExactly $binary
-        $hit.process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.0000000Z'
-        Assert-MockCalled Get-CimInstance -Times 2 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Service' }
-        Assert-MockCalled Get-CimInstance -Times 0 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Process' }
+        $hit.action | Should -BeExactly 'open_official_uninstaller'
+        $hit.launch_protected_level | Should -Be 3
+        $hit.uninstall_evidence_status | Should -BeExactly 'complete'
+        $hit.PSObject.Properties.Name | Should -Not -Contain 'process_id'
 
         Save-PendingActions -Hits @($hit) -Suspicious @()
         $pendingJson = Get-Content $script:PendingFile -Raw -Encoding UTF8
@@ -845,20 +839,15 @@ Invoke-Clean
             $pendingJson | ConvertFrom-Json
         }
 
-        @($p.actions).Count | Should -Be 1
+        @($p.actions).Count | Should -Be 0
         @($p.resolved).Count | Should -Be 0
-        @($p.observations).Count | Should -Be 0
-        $p.actions[0].execution_class | Should -BeExactly 'manual_impact'
-        $p.actions[0].action | Should -BeExactly 'stop_service_runtime'
-        $p.actions[0].service_name | Should -BeExactly 'HRWSCCtrl'
-        $p.actions[0].service_binary_path | Should -BeExactly $binary
-        $p.actions[0].process_id | Should -Be 4321
-        $p.actions[0].process_name | Should -BeExactly 'wsctrl11.exe'
-        $p.actions[0].process_path | Should -BeExactly $binary
-        $p.actions[0].process_start_time_utc | Should -BeOfType [string]
-        $p.actions[0].process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.0000000Z'
-        $p.actions[0].default_selected | Should -BeFalse
-        $p.actions[0].requires_confirmation | Should -BeTrue
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].execution_class | Should -BeExactly 'observation'
+        $p.observations[0].action | Should -BeExactly 'open_official_uninstaller'
+        $p.observations[0].service_name | Should -BeExactly 'HRWSCCtrl'
+        $p.observations[0].default_selected | Should -BeFalse
+        $p.observations[0].requires_confirmation | Should -BeFalse
+        $p.observations[0].obs_reason | Should -BeExactly '动作与命中类型不匹配，禁止自动处理'
     }
 
     It 'accepts stop_service_runtime only for service hits with exact provenance' {
@@ -876,7 +865,7 @@ Invoke-Clean
 
         $profile.safe | Should -BeFalse
         $profile.evidence.tested | Should -BeTrue
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_runtime'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'open_official_uninstaller'
         $hit.safe | Should -BeFalse
         $hit.evidence.tested | Should -BeTrue
         $hit.matched_type | Should -BeExactly 'exact'
@@ -923,7 +912,7 @@ Invoke-Clean
 
         $profile.safe | Should -BeFalse
         $profile.evidence.tested | Should -BeTrue
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'stop_service_runtime'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'open_official_uninstaller'
         $hit.safe | Should -BeFalse
         $hit.evidence.tested | Should -BeTrue
         $hit.matched_type | Should -BeExactly 'contains'

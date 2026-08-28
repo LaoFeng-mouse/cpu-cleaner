@@ -352,7 +352,7 @@
                          "name_cn":  "联想安全中心组件",
                          "risk":  "low",
                          "safe":  false,
-                         "reason_cn":  "联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需停止 HRWSCCtrl 服务当前运行态",
+                         "reason_cn":  "联想电脑管家安全组件可能受 Windows 保护；仅在可信扫描确认后提供官方卸载交接或普通运行态停止，不属于自动安全清理项",
                          "detect":  {
                                         "services":  [
                                                          {
@@ -382,15 +382,15 @@
                                          "process":  "none"
                                      },
                          "manual_actions":  {
-                                                "service":  "stop_service_runtime"
+                                                "service":  "open_official_uninstaller"
                                             },
                          "cleanup_policy":  {
                                                 "execution_class":  "manual_impact",
                                                 "necessity":  "optional",
                                                 "default_selected":  false,
                                                 "requires_confirmation":  true,
-                                                "impact_cn":  "停止 exact HRWSCCtrl 服务当前运行态；不修改启动方式；不可通过恢复撤销；服务可能被其他组件重新启动",
-                                                "cleanup_reason_cn":  "不使用联想电脑管家时可停止当前安全中心服务运行态，减少本次会话后台占用"
+                                                "impact_cn":  "可能移除联想电脑管家的安全、防护、通知和相关后台组件",
+                                                "cleanup_reason_cn":  "Windows 受保护服务阻止普通管理员实时停止；不需要联想电脑管家时可按需打开联想官方卸载程序"
                                             },
                          "evidence":  {
                                           "tested":  true,

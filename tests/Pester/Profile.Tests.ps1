@@ -84,7 +84,22 @@ Describe 'Profile 加载' {
                 PathName = $PathName; ProcessId = $ProcessId
                 ProcessIdentitySource = $IdentitySource; ProcessIdentityStatus = $IdentityStatus
                 ProcessName = $ProcessName; ProcessPath = $ProcessPath; ProcessStartTimeUtc = $ProcessStartTimeUtc
+                LaunchProtectedStatus = 'complete'; LaunchProtectedLevel = [int]0
+                UninstallEvidenceStatus = 'unavailable'; UninstallRegistryPath = ''; UninstallDisplayName = ''
+                UninstallPublisher = ''; UninstallDisplayVersion = ''; UninstallInstallLocation = ''
+                UninstallString = ''; UninstallExecutablePath = ''
             }
+        }
+        $script:SetOfficialUninstallEvidence = {
+            param($Service)
+            $Service.UninstallEvidenceStatus = 'complete'
+            $Service.UninstallRegistryPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+            $Service.UninstallDisplayName = '联想电脑管家'
+            $Service.UninstallPublisher = '联想（北京）有限公司'
+            $Service.UninstallDisplayVersion = '5.1.0'
+            $Service.UninstallInstallLocation = 'C:\Program Files\Lenovo\PCManager'
+            $Service.UninstallString = '"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+            $Service.UninstallExecutablePath = 'C:\Program Files\Lenovo\PCManager\uninst.exe'
         }
     }
 
@@ -267,6 +282,189 @@ Describe 'Profile 加载' {
         $decision.ExecutionClass | Should -BeExactly 'observation'
     }
 
+    It 'open_official_uninstaller 仅以 tested optional manual_impact service 意图加载并由 exact service_name 授权' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='可能移除安全组件'; cleanup_reason_cn='按需打开官方卸载程序'
+        }) -ManualActions ([pscustomobject]@{ service='open_official_uninstaller' })
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        try {
+            $loaded = (Load-Profiles -Path $tmp).profiles[0]
+            $decision = Get-HitExecutionDecision $loaded 'service' ([pscustomobject]@{
+                matched_type='exact'; matched_field='service_name'
+            })
+
+            $script:ValidActions | Should -Contain 'open_official_uninstaller'
+            $script:ManualImpactActions | Should -Contain 'open_official_uninstaller'
+            $script:DangerousActions | Should -Contain 'open_official_uninstaller'
+            $script:PersistentDangerousActions | Should -Not -Contain 'open_official_uninstaller'
+            $decision.Action | Should -BeExactly 'open_official_uninstaller'
+            $decision.ExecutionClass | Should -BeExactly 'manual_impact'
+            $decision.DefaultSelected | Should -BeFalse
+            $decision.RequiresConfirmation | Should -BeTrue
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'open_official_uninstaller 拒绝非法声明或策略形状: <label>' -TestCases @(
+        @{ label='actions-service'; normalKey='service'; manualKey=''; executionClass='manual_impact'; necessity='optional'; tested=$true; defaultSelected=$false; confirmation=$true }
+        @{ label='actions-process'; normalKey='process'; manualKey=''; executionClass='manual_impact'; necessity='optional'; tested=$true; defaultSelected=$false; confirmation=$true }
+        @{ label='actions-task'; normalKey='task'; manualKey=''; executionClass='manual_impact'; necessity='optional'; tested=$true; defaultSelected=$false; confirmation=$true }
+        @{ label='actions-autostart'; normalKey='autostart'; manualKey=''; executionClass='manual_impact'; necessity='optional'; tested=$true; defaultSelected=$false; confirmation=$true }
+        @{ label='manual-process'; normalKey=''; manualKey='process'; executionClass='manual_impact'; necessity='optional'; tested=$true; defaultSelected=$false; confirmation=$true }
+        @{ label='manual-task'; normalKey=''; manualKey='task'; executionClass='manual_impact'; necessity='optional'; tested=$true; defaultSelected=$false; confirmation=$true }
+        @{ label='manual-autostart'; normalKey=''; manualKey='autostart'; executionClass='manual_impact'; necessity='optional'; tested=$true; defaultSelected=$false; confirmation=$true }
+        @{ label='automatic-safe'; normalKey=''; manualKey='service'; executionClass='automatic_safe'; necessity='optional'; tested=$true; defaultSelected=$false; confirmation=$true }
+        @{ label='required'; normalKey=''; manualKey='service'; executionClass='manual_impact'; necessity='required'; tested=$true; defaultSelected=$false; confirmation=$true }
+        @{ label='untested'; normalKey=''; manualKey='service'; executionClass='manual_impact'; necessity='optional'; tested=$false; defaultSelected=$false; confirmation=$true }
+        @{ label='selected'; normalKey=''; manualKey='service'; executionClass='manual_impact'; necessity='optional'; tested=$true; defaultSelected=$true; confirmation=$true }
+        @{ label='no-confirmation'; normalKey=''; manualKey='service'; executionClass='manual_impact'; necessity='optional'; tested=$true; defaultSelected=$false; confirmation=$false }
+    ) {
+        param($label, $normalKey, $manualKey, $executionClass, $necessity, $tested, $defaultSelected, $confirmation)
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $manual = [pscustomobject]@{}
+        if ($manualKey) { $manual | Add-Member -NotePropertyName $manualKey -NotePropertyValue 'open_official_uninstaller' }
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class=$executionClass; necessity=$necessity; default_selected=$defaultSelected; requires_confirmation=$confirmation
+            impact_cn='影响'; cleanup_reason_cn='原因'
+        }) -ManualActions $manual -Evidence ([pscustomobject]@{ tested=$tested })
+        if ($normalKey) {
+            $profile.actions | Add-Member -NotePropertyName $normalKey -NotePropertyValue 'open_official_uninstaller' -Force
+        }
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        try { { Load-Profiles -Path $tmp } | Should -Throw }
+        finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'open_official_uninstaller 不授权 broad matcher 或非 service hit' -TestCases @(
+        @{ hitType='service'; matcher='contains'; field='service_name' }
+        @{ hitType='service'; matcher='exact'; field='service_display_name' }
+        @{ hitType='process'; matcher='exact'; field='process_name' }
+        @{ hitType='task'; matcher='exact'; field='task_name' }
+        @{ hitType='autostart'; matcher='exact'; field='autostart_name' }
+    ) {
+        param($hitType, $matcher, $field)
+        $profile = & $script:NewDecisionTestProfile -Safe $false -Action 'none' -ManualAction 'open_official_uninstaller' -CleanupPolicy ([pscustomobject]@{
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='影响'; cleanup_reason_cn='原因'
+        })
+        if ($hitType -cne 'service') {
+            $profile.manual_actions.PSObject.Properties.Remove('service')
+            $profile.manual_actions | Add-Member -NotePropertyName $hitType -NotePropertyValue 'open_official_uninstaller'
+        }
+        $decision = Get-HitExecutionDecision $profile $hitType ([pscustomobject]@{ matched_type=$matcher; matched_field=$field })
+        $decision.Action | Should -BeExactly 'investigate'
+        $decision.ExecutionClass | Should -BeExactly 'observation'
+    }
+
+    It 'open_official_uninstaller 决策层不依赖 schema 也拒绝非 optional policy' {
+        $profile = & $script:NewDecisionTestProfile -Safe $false -Action 'none' -ManualAction 'open_official_uninstaller' -CleanupPolicy ([pscustomobject]@{
+            execution_class='manual_impact'; necessity='required'; default_selected=$false; requires_confirmation=$true
+            impact_cn='影响'; cleanup_reason_cn='原因'
+        })
+        $decision = Get-HitExecutionDecision $profile 'service' ([pscustomobject]@{
+            matched_type='exact'; matched_field='service_name'
+        })
+        $decision.Action | Should -BeExactly 'investigate'
+        $decision.ExecutionClass | Should -BeExactly 'observation'
+    }
+
+    It 'PPL3 trusted v3 exact HRWS 只生成十个官方卸载证据字段且不携带进程停止身份' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='可能移除安全组件'; cleanup_reason_cn='按需打开官方卸载程序'
+        }) -ManualActions ([pscustomobject]@{ service='open_official_uninstaller' })
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        $script:ProfileFile = $tmp
+        $service = & $script:NewTrustedService -BinaryPath 'C:\Program Files\Lenovo\PCManager\wsctrl11.exe'
+        $service.LaunchProtectedLevel = [int]3
+        & $script:SetOfficialUninstallEvidence $service
+        try {
+            $hit = @(Match-Profiles -Services @($service) -AutoStarts @() -Tasks @() -TopProcs @())[0]
+
+            $hit.action | Should -BeExactly 'open_official_uninstaller'
+            $hit.execution_class | Should -BeExactly 'manual_impact'
+            $hit.default_selected | Should -BeFalse
+            $hit.requires_confirmation | Should -BeTrue
+            $expected = @(
+                'launch_protected_status','launch_protected_level','uninstall_evidence_status','uninstall_registry_path',
+                'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
+                'uninstall_string','uninstall_executable_path'
+            )
+            foreach ($field in $expected) { $hit.PSObject.Properties.Name | Should -Contain $field }
+            $hit.launch_protected_status | Should -BeExactly 'complete'
+            $hit.launch_protected_level | Should -Be 3
+            $hit.uninstall_executable_path | Should -BeExactly 'C:\Program Files\Lenovo\PCManager\uninst.exe'
+            foreach ($field in @('service_binary_path','process_id','process_name','process_path','process_start_time_utc')) {
+                $hit.PSObject.Properties.Name | Should -Not -Contain $field
+            }
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'HRWS protected/uninstall/trust/matcher 负矩阵全部降级为固定安全 observation: <label>' -TestCases @(
+        @{ label='ppl-uninstall-unavailable'; mutation={ param($s) $s.LaunchProtectedLevel=[int]3 } }
+        @{ label='ppl-uninstall-invalid-publisher'; mutation={ param($s) $s.LaunchProtectedLevel=[int]3; & $script:SetOfficialUninstallEvidence $s; $s.UninstallPublisher='Untrusted Publisher' } }
+        @{ label='protection-unavailable'; mutation={ param($s) $s.LaunchProtectedStatus='unavailable'; $s.LaunchProtectedLevel=[int]-1 } }
+        @{ label='missing-status'; mutation={ param($s) $s.PSObject.Properties.Remove('LaunchProtectedStatus') } }
+        @{ label='malformed-status'; mutation={ param($s) $s.LaunchProtectedStatus='unknown' } }
+        @{ label='string-level'; mutation={ param($s) $s.LaunchProtectedLevel='3'; & $script:SetOfficialUninstallEvidence $s } }
+        @{ label='array-level'; mutation={ param($s) $s.LaunchProtectedLevel=@([int]3); & $script:SetOfficialUninstallEvidence $s } }
+        @{ label='level-four'; mutation={ param($s) $s.LaunchProtectedLevel=[int]4; & $script:SetOfficialUninstallEvidence $s } }
+        @{ label='v2'; mutation={ param($s) $s.ProcessIdentitySource='trusted_inventory_v2'; $s.LaunchProtectedLevel=[int]3; & $script:SetOfficialUninstallEvidence $s } }
+        @{ label='missing-trust'; mutation={ param($s) $s.PSObject.Properties.Remove('ProcessIdentitySource'); $s.LaunchProtectedLevel=[int]3; & $script:SetOfficialUninstallEvidence $s } }
+        @{ label='contains-name'; mutation={ param($s) $s.Name='HRWSCCtrlHelper'; $s.LaunchProtectedLevel=[int]3; & $script:SetOfficialUninstallEvidence $s } }
+        @{ label='display-name'; mutation={ param($s) $s.Name='UnrelatedService'; $s.DisplayName='HRWSCCtrl'; $s.LaunchProtectedLevel=[int]3; & $script:SetOfficialUninstallEvidence $s } }
+    ) {
+        param($label, $mutation)
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='可能移除安全组件'; cleanup_reason_cn='按需打开官方卸载程序'
+        }) -ManualActions ([pscustomobject]@{ service='open_official_uninstaller' })
+        $profile.detect.services = @(
+            [pscustomobject]@{ match='HRWSCCtrl'; type='exact' },
+            [pscustomobject]@{ match='HRWSCCtrl'; type='contains' }
+        )
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        $script:ProfileFile = $tmp
+        $service = & $script:NewTrustedService -BinaryPath 'C:\Program Files\Lenovo\PCManager\wsctrl11.exe'
+        & $mutation $service
+        try {
+            $hit = @(Match-Profiles -Services @($service) -AutoStarts @() -Tasks @() -TopProcs @())[0]
+            $hit.action | Should -BeExactly 'investigate'
+            $hit.execution_class | Should -BeExactly 'observation'
+            $hit.default_selected | Should -BeFalse
+            $hit.requires_confirmation | Should -BeFalse
+            $hit.obs_reason | Should -BeExactly '当前 HRWSCCtrl 的受保护状态、官方卸载证据或运行身份不足，暂不提供处理操作；请重新扫描后再试。'
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'Level0 trusted v3 exact HRWS 保留 stop_service_runtime 稳定五字段行为' {
+        $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
+        $binary = Join-Path $TestDrive 'wsctrl11-level0.exe'
+        [System.IO.File]::WriteAllBytes($binary, [byte[]](1))
+        $profile = & $script:NewPolicyTestProfile -CleanupPolicy ([pscustomobject]@{
+            execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+            impact_cn='可能移除安全组件'; cleanup_reason_cn='按需打开官方卸载程序'
+        }) -ManualActions ([pscustomobject]@{ service='open_official_uninstaller' })
+        & $script:WritePolicyTestLibrary -Path $tmp -Profile $profile
+        $script:ProfileFile = $tmp
+        $service = & $script:NewTrustedService -BinaryPath $binary
+        Mock Get-CimInstance { [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=('"' + $binary + '" -service') } } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+        try {
+            $hit = @(Match-Profiles -Services @($service) -AutoStarts @() -Tasks @() -TopProcs @())[0]
+            $hit.action | Should -BeExactly 'stop_service_runtime'
+            $hit.service_binary_path | Should -BeExactly $binary
+            $hit.process_id | Should -Be 4321
+            $hit.process_name | Should -BeExactly 'wsctrl11-level0.exe'
+            $hit.process_path | Should -BeExactly $binary
+            $hit.process_start_time_utc | Should -BeExactly '2026-08-24T01:02:03.4567890Z'
+            $hit.PSObject.Properties.Name | Should -Not -Contain 'launch_protected_status'
+            Assert-MockCalled Get-CimInstance -Times 2 -Exactly -ParameterFilter { $ClassName -ceq 'Win32_Service' }
+        } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+    }
+
     It 'Scanner 投影的 trusted v3 完整身份和两次稳定服务快照生成 stop_service_runtime 五字段' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $binary = Join-Path $TestDrive 'wsctrl11.exe'
@@ -290,7 +488,7 @@ Describe 'Profile 加载' {
                 UninstallEvidenceStatus='unavailable'; UninstallRegistryPath=''; UninstallDisplayName=''; UninstallPublisher=''
                 UninstallDisplayVersion=''; UninstallInstallLocation=''; UninstallString=''; UninstallExecutablePath=''
             }).GetEnumerator()) {
-                $inventoryService | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+                $inventoryService | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value -Force
             }
             Mock Read-TrustedInventoryPackage {
                 [pscustomobject]@{ Package=[pscustomobject]@{

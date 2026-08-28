@@ -204,14 +204,14 @@ Assert-Equal 'v1 转换: schema_version=3' $converted.schema_version 3
 Assert-Equal 'v1 转换: detect.services[0].match=OldService' @($converted.profiles[0].detect.services)[0].match 'OldService'
 Assert-Equal 'v1 转换: actions.service=investigate(降级)' $converted.profiles[0].actions.service 'investigate'
 
-# 11. 生产 HRWSCCtrl 规则必须使用一次性、仅手动的服务进程停止合同
+# 11. 生产 HRWSCCtrl 规则声明官方卸载意图，并由 ProfileEngine 按可信 PPL 证据分流
 $productionProfiles = Load-Profiles -Path (Join-Path $projectRoot 'bloatware-profiles.json')
 $hrwscctrl = @($productionProfiles.profiles | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
 Assert-Equal 'HRWSCCtrl 规则存在' ($null -ne $hrwscctrl) $true
 Assert-Equal 'HRWSCCtrl safe=false' $hrwscctrl.safe $false
 Assert-Equal 'HRWSCCtrl actions.service=none' $hrwscctrl.actions.service 'none'
 Assert-Equal 'HRWSCCtrl actions.process=none' $hrwscctrl.actions.process 'none'
-Assert-Equal 'HRWSCCtrl manual service=stop_service_runtime' $hrwscctrl.manual_actions.service 'stop_service_runtime'
+Assert-Equal 'HRWSCCtrl manual service=open_official_uninstaller' $hrwscctrl.manual_actions.service 'open_official_uninstaller'
 Assert-Equal 'HRWSCCtrl manual_impact' $hrwscctrl.cleanup_policy.execution_class 'manual_impact'
 Assert-Equal 'HRWSCCtrl default_selected=false' $hrwscctrl.cleanup_policy.default_selected $false
 Assert-Equal 'HRWSCCtrl requires_confirmation=true' $hrwscctrl.cleanup_policy.requires_confirmation $true
@@ -231,6 +231,14 @@ Test-Load 'stop_service_runtime 拒绝 automatic_safe' ('{"schema_version":3,"pr
 Test-Load 'stop_service_runtime 拒绝 tested=false' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"tested":true', '"tested":false') + ']}') $false
 Test-Load 'stop_service_runtime 拒绝 default_selected=true' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"default_selected":false', '"default_selected":true') + ']}') $false
 Test-Load 'stop_service_runtime 拒绝 requires_confirmation=false' ('{"schema_version":3,"profiles":[' + ($manualStopRule -replace '"requires_confirmation":true', '"requires_confirmation":false') + ']}') $false
+
+$officialRule = $manualStopRule -replace 'stop_service_runtime', 'open_official_uninstaller'
+Test-Load '合法 open_official_uninstaller 手动合同' ('{"schema_version":3,"profiles":[' + $officialRule + ']}') $true
+Test-Load 'open_official_uninstaller 拒绝 actions.service' ('{"schema_version":3,"profiles":[' + ($officialRule -replace '"service":"none"},"manual_actions":\{"service":"open_official_uninstaller"\}', '"service":"open_official_uninstaller"},"manual_actions":{"service":"none"}') + ']}') $false
+Test-Load 'open_official_uninstaller 拒绝 automatic_safe' ('{"schema_version":3,"profiles":[' + ($officialRule -replace '"execution_class":"manual_impact"', '"execution_class":"automatic_safe"') + ']}') $false
+Test-Load 'open_official_uninstaller 拒绝 tested=false' ('{"schema_version":3,"profiles":[' + ($officialRule -replace '"tested":true', '"tested":false') + ']}') $false
+Test-Load 'open_official_uninstaller 拒绝 necessity 非 optional' ('{"schema_version":3,"profiles":[' + ($officialRule -replace '"necessity":"optional"', '"necessity":"required"') + ']}') $false
+Test-Load 'open_official_uninstaller 拒绝 process manual key' ('{"schema_version":3,"profiles":[' + ($officialRule -replace '"manual_actions":\{"service":"open_official_uninstaller"\}', '"manual_actions":{"process":"open_official_uninstaller"}') + ']}') $false
 
 # 12. v1.8.1 文档分别承担自己的用户、安全与历史契约，禁止跨文档拼接代答
 $cleanerText = Get-Content (Join-Path $projectRoot 'cpu-cleaner.ps1') -Raw -Encoding UTF8
