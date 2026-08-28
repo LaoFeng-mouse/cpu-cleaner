@@ -1572,7 +1572,7 @@ Describe '勾选视图 (v1.5.5)' {
         $resolvedView.CurrentStateLabel | Should -Be '当前状态：disabled'
         $observation.CanExecute | Should -BeFalse
         $observation.IsChecked | Should -BeFalse
-        $manualView.NecessityLabel | Should -Match 'optional'
+        $manualView.NecessityLabel | Should -BeExactly '必要性：按需处理'
         $manualView.ImpactText | Should -Match '可能影响 OEM 安全状态'
         $manualView.CleanupReasonText | Should -Match '不使用该功能时可减少后台'
 
@@ -2109,7 +2109,9 @@ Describe '勾选视图 (v1.5.5)' {
         $row.CanExecute | Should -BeTrue
         $row.IsChecked | Should -BeFalse
         $row.NeedsConfirmation | Should -BeTrue
-        $row.NecessityLabel | Should -BeExactly '必要性：optional'
+        $row.NecessityLabel | Should -BeExactly '必要性：按需处理'
+        $row.action_label | Should -BeExactly '结束当前服务进程'
+        $row.restorable_label | Should -BeExactly '仅当前实例（不可恢复）'
         $row.ImpactText | Should -BeExactly '影响：只结束当前实例，联想安全中心功能可能暂时中断'
         $row.CleanupReasonText | Should -BeExactly '清理原因：不使用该功能时减少当前后台占用'
         $row.AutomationName | Should -Match 'HRWSCCtrl'

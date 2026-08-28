@@ -627,6 +627,7 @@ function Get-ActionLabel($a) {
         'disable_service'  { return '禁用服务' }
         'remove_autostart' { return '删除自启' }
         'disable_task'     { return '禁用任务' }
+        'stop_service_process' { return '结束当前服务进程' }
         'uninstall'        { return '手动卸载' }
         'investigate'      { return '仅观察' }
         'none'             { return '不处理' }
@@ -684,7 +685,7 @@ function Get-PendingViewItems {
             risk_label        = $d.risk_label
             evidence_label    = $d.evidence_label
             action_label      = Get-ActionLabel $i.action
-            restorable_label  = '可恢复'
+            restorable_label  = if ($i.action -ceq 'stop_service_process') { '仅当前实例（不可恢复）' } else { '可恢复' }
             status            = $i.status
             reason_cn         = $i.reason_cn
             matcher_detail    = Format-GuiMatcherDetail $i

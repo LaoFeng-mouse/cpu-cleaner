@@ -122,7 +122,7 @@ Describe 'GUI presentation model' {
         $manual.IsChecked | Should -BeFalse
         $manual.NeedsConfirmation | Should -BeTrue
         $manual.AutomationName | Should -Match 'HRWSCCtrl'
-        $manual.NecessityLabel | Should -BeExactly '必要性：optional'
+        $manual.NecessityLabel | Should -BeExactly '必要性：按需处理'
         $manual.ImpactText | Should -BeExactly '影响：只结束当前实例'
         $manual.CleanupReasonText | Should -BeExactly '清理原因：减少当前后台'
 
@@ -132,6 +132,12 @@ Describe 'GUI presentation model' {
         $observation.ImpactText | Should -BeExactly ('影响：' + $safeReason)
         $observation.CleanupReasonText | Should -BeExactly ('清理原因：' + $safeReason)
         ($observation | ConvertTo-Json -Depth 4) | Should -Not -Match '成功|电脑.*干净|clean computer|success'
+    }
+
+    It 'localizes schema necessity values without changing their execution class' {
+        (Get-GuiReviewPresentation -Branch actions -Name '推荐项' -ExecutionClass automatic_safe -Necessity recommended -ImpactCn '低影响' -CleanupReasonCn '减少后台').NecessityLabel | Should -BeExactly '必要性：建议处理'
+        (Get-GuiReviewPresentation -Branch actions -Name '可选项' -ExecutionClass manual_impact -Necessity optional -ImpactCn '有影响' -CleanupReasonCn '按需处理').NecessityLabel | Should -BeExactly '必要性：按需处理'
+        (Get-GuiReviewPresentation -Branch observations -Name '观察项' -ExecutionClass observation -Necessity informational -ImpactCn '仅观察' -CleanupReasonCn '保留证据').NecessityLabel | Should -BeExactly '必要性：仅供参考'
     }
 
     It 'formats exact matcher provenance without granting authority' {
