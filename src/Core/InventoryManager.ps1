@@ -1,5 +1,5 @@
 # Trusted reader for nonce-bound privileged scan inventory packages.
-$script:InventorySchemaVersion = 2
+$script:InventorySchemaVersion = 3
 $script:MaxInventoryJsonBytes = 8MB
 $script:MaxInventoryJsonDepth = 12
 $script:MaxInventoryRecords = 20000
@@ -305,8 +305,74 @@ function Assert-InventoryServiceBaseRecord($Record) {
     }
 }
 
+function Assert-InventoryLaunchProtectedShape($Record) {
+    if ($Record.LaunchProtectedStatus -isnot [string] -or
+        $Record.LaunchProtectedStatus -cnotin @('complete','unavailable')) {
+        throw 'Inventory service LaunchProtectedStatus is invalid.'
+    }
+    if (-not (Test-InventoryInteger $Record.LaunchProtectedLevel)) {
+        throw 'Inventory service LaunchProtectedLevel is invalid.'
+    }
+    $level = [int64]$Record.LaunchProtectedLevel
+    if (($Record.LaunchProtectedStatus -ceq 'complete' -and ($level -lt 0 -or $level -gt 3)) -or
+        ($Record.LaunchProtectedStatus -ceq 'unavailable' -and $level -ne -1)) {
+        throw 'Inventory service LaunchProtected status and level are inconsistent.'
+    }
+}
+
+function Assert-InventoryUninstallEvidenceShape($Record) {
+    $stringFields = @(
+        'UninstallRegistryPath','UninstallDisplayName','UninstallPublisher','UninstallDisplayVersion',
+        'UninstallInstallLocation','UninstallString','UninstallExecutablePath'
+    )
+    if ($Record.UninstallEvidenceStatus -isnot [string] -or
+        $Record.UninstallEvidenceStatus -cnotin @('complete','unavailable')) {
+        throw 'Inventory service uninstall evidence status is invalid.'
+    }
+    foreach ($name in $stringFields) {
+        if ($Record.$name -isnot [string]) { throw "Inventory service uninstall evidence $name is invalid." }
+    }
+
+    if ($Record.UninstallEvidenceStatus -ceq 'unavailable') {
+        foreach ($name in $stringFields) {
+            if ($Record.$name -cne '') { throw 'Inventory service unavailable uninstall evidence must be completely empty.' }
+        }
+        return
+    }
+
+    foreach ($name in @('UninstallRegistryPath','UninstallDisplayName','UninstallPublisher','UninstallInstallLocation','UninstallString','UninstallExecutablePath')) {
+        if ([string]::IsNullOrEmpty($Record.$name)) { throw "Inventory service complete uninstall evidence $name is empty." }
+    }
+
+    $installLocation = $Record.UninstallInstallLocation
+    if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $installLocation)) {
+        throw 'Inventory service uninstall install location is invalid.'
+    }
+    try { $canonicalInstallLocation = [System.IO.Path]::GetFullPath($installLocation) }
+    catch { throw 'Inventory service uninstall install location is invalid.' }
+    if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $canonicalInstallLocation) -or
+        -not $installLocation.Equals($canonicalInstallLocation, [System.StringComparison]::Ordinal) -or
+        $canonicalInstallLocation.Equals([System.IO.Path]::GetPathRoot($canonicalInstallLocation), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Inventory service uninstall install location is not a canonical ordinary local directory.'
+    }
+
+    $parsedExecutablePath = ConvertFrom-StrictOfficialUninstallString -Command $Record.UninstallString
+    if ($parsedExecutablePath -isnot [string] -or
+        -not $Record.UninstallExecutablePath.Equals($parsedExecutablePath, [System.StringComparison]::Ordinal)) {
+        throw 'Inventory service uninstall command or executable path is invalid.'
+    }
+    $installBoundary = $canonicalInstallLocation.TrimEnd('\') + '\'
+    if (-not $parsedExecutablePath.StartsWith($installBoundary, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Inventory service uninstall executable is outside the install location.'
+    }
+}
+
 function Assert-InventoryServiceRecord($Record, [datetimeoffset]$GeneratedUtc) {
-    $required = @('Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
+    $required = @(
+        'Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc',
+        'LaunchProtectedStatus','LaunchProtectedLevel','UninstallEvidenceStatus','UninstallRegistryPath','UninstallDisplayName','UninstallPublisher',
+        'UninstallDisplayVersion','UninstallInstallLocation','UninstallString','UninstallExecutablePath'
+    )
     if (-not (Test-InventoryExactProperties $Record $required)) { throw 'Inventory service record fields are invalid.' }
     Assert-InventoryServiceBaseRecord $Record
     if ($Record.ProcessIdentityStatus -isnot [string] -or
@@ -316,6 +382,8 @@ function Assert-InventoryServiceRecord($Record, [datetimeoffset]$GeneratedUtc) {
     foreach ($name in @('ProcessName','ProcessPath','ProcessStartTimeUtc')) {
         if ($Record.$name -isnot [string]) { throw "Inventory service $name is invalid." }
     }
+    Assert-InventoryLaunchProtectedShape $Record
+    Assert-InventoryUninstallEvidenceShape $Record
 
     if ($Record.ProcessIdentityStatus -ceq 'complete') {
         if ($Record.State -cne 'Running' -or [int64]$Record.ProcessId -le 0 -or
@@ -949,6 +1017,29 @@ function ConvertTo-InventoryServiceRecord($Record) {
     }
     Assert-InventoryServiceBaseRecord $Record
     $identity = Get-PrivilegedServiceProcessIdentity $Record
+    try {
+        $launchState = Get-ServiceLaunchProtectedState -ServiceName $Record.Name
+        $launchEvidence = [pscustomobject][ordered]@{
+            LaunchProtectedStatus = $launchState.Status
+            LaunchProtectedLevel = $launchState.Level
+        }
+        Assert-InventoryLaunchProtectedShape $launchEvidence
+    } catch {
+        $launchEvidence = [pscustomobject][ordered]@{
+            LaunchProtectedStatus = 'unavailable'
+            LaunchProtectedLevel = [int]-1
+        }
+    }
+
+    $uninstallEvidence = New-UnavailableLenovoOfficialUninstallEvidence
+    if ([string]::Equals($Record.Name, 'HRWSCCtrl', [System.StringComparison]::OrdinalIgnoreCase)) {
+        try {
+            $uninstallEvidence = Get-LenovoOfficialUninstallEvidence
+            Assert-InventoryUninstallEvidenceShape $uninstallEvidence
+        } catch {
+            $uninstallEvidence = New-UnavailableLenovoOfficialUninstallEvidence
+        }
+    }
     return [pscustomobject][ordered]@{
         Name = $Record.Name
         DisplayName = $Record.DisplayName
@@ -960,6 +1051,16 @@ function ConvertTo-InventoryServiceRecord($Record) {
         ProcessName = $identity.ProcessName
         ProcessPath = $identity.ProcessPath
         ProcessStartTimeUtc = $identity.ProcessStartTimeUtc
+        LaunchProtectedStatus = $launchEvidence.LaunchProtectedStatus
+        LaunchProtectedLevel = $launchEvidence.LaunchProtectedLevel
+        UninstallEvidenceStatus = $uninstallEvidence.UninstallEvidenceStatus
+        UninstallRegistryPath = $uninstallEvidence.UninstallRegistryPath
+        UninstallDisplayName = $uninstallEvidence.UninstallDisplayName
+        UninstallPublisher = $uninstallEvidence.UninstallPublisher
+        UninstallDisplayVersion = $uninstallEvidence.UninstallDisplayVersion
+        UninstallInstallLocation = $uninstallEvidence.UninstallInstallLocation
+        UninstallString = $uninstallEvidence.UninstallString
+        UninstallExecutablePath = $uninstallEvidence.UninstallExecutablePath
     }
 }
 

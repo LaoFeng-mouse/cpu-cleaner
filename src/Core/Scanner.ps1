@@ -362,7 +362,7 @@ function Get-ServiceProcessExecutionIdentity {
         Set-ServiceProcessIdentityFailureReason $FailureReason '扫描服务名称缺失，无法回读当前服务。'
         return $null
     }
-    if ($Service.ProcessIdentitySource -isnot [string] -or $Service.ProcessIdentitySource -cne 'trusted_inventory_v2' -or
+    if ($Service.ProcessIdentitySource -isnot [string] -or $Service.ProcessIdentitySource -cne 'trusted_inventory_v3' -or
         $Service.ProcessIdentityStatus -isnot [string] -or $Service.ProcessIdentityStatus -cne 'complete') {
         Set-ServiceProcessIdentityFailureReason $FailureReason '扫描服务没有可信且完整的进程身份。'
         return $null
@@ -728,7 +728,17 @@ function Get-ScanServiceTaskInventory {
                 ProcessName = $_.ProcessName
                 ProcessPath = $_.ProcessPath
                 ProcessStartTimeUtc = $_.ProcessStartTimeUtc
-                ProcessIdentitySource = 'trusted_inventory_v2'
+                LaunchProtectedStatus = $_.LaunchProtectedStatus
+                LaunchProtectedLevel = $_.LaunchProtectedLevel
+                UninstallEvidenceStatus = $_.UninstallEvidenceStatus
+                UninstallRegistryPath = $_.UninstallRegistryPath
+                UninstallDisplayName = $_.UninstallDisplayName
+                UninstallPublisher = $_.UninstallPublisher
+                UninstallDisplayVersion = $_.UninstallDisplayVersion
+                UninstallInstallLocation = $_.UninstallInstallLocation
+                UninstallString = $_.UninstallString
+                UninstallExecutablePath = $_.UninstallExecutablePath
+                ProcessIdentitySource = 'trusted_inventory_v3'
                 TriggerHint = Test-ServiceTriggerHint $_
             }
         })

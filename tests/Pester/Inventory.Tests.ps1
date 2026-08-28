@@ -2,7 +2,7 @@
 BeforeAll {
     $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $script:Root = $projectRoot
-    foreach ($module in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
+    foreach ($module in @('Utils','ProtectedServiceHandoff','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
         . (Join-Path $projectRoot ('src\Core\' + $module + '.ps1'))
     }
     $inventoryModule = Join-Path $projectRoot 'src\Core\InventoryManager.ps1'
@@ -22,7 +22,7 @@ BeforeAll {
         param([datetime]$UtcNow = [datetime]::UtcNow)
         $generated = $UtcNow.ToUniversalTime().AddSeconds(-10)
         return [pscustomobject][ordered]@{
-            inventory_schema_version = 2
+            inventory_schema_version = 3
             nonce = $script:Nonce
             generated_utc = $generated.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)
             collector_sid = $script:ReaderSid
@@ -31,6 +31,9 @@ BeforeAll {
                 PathName=('"' + $script:TestServiceExecutable + '" --service'); ProcessId=123
                 ProcessIdentityStatus='complete'; ProcessName='service.exe'; ProcessPath=$script:TestServiceExecutable
                 ProcessStartTimeUtc=$generated.AddSeconds(-1).ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+                LaunchProtectedStatus='unavailable'; LaunchProtectedLevel=[int]-1
+                UninstallEvidenceStatus='unavailable'; UninstallRegistryPath=''; UninstallDisplayName=''; UninstallPublisher=''
+                UninstallDisplayVersion=''; UninstallInstallLocation=''; UninstallString=''; UninstallExecutablePath=''
             })
             tasks = @([pscustomobject][ordered]@{
                 TaskName='Example Task'; TaskPath='\Vendor\'; State='Ready'; Author='Vendor'
@@ -43,6 +46,17 @@ BeforeAll {
 
     function Copy-TestInventoryPackage($Package) {
         return ConvertFrom-StrictInventoryJson ($Package | ConvertTo-Json -Depth 12)
+    }
+
+    function Set-TestCompleteUninstallEvidence($Service) {
+        $Service.UninstallEvidenceStatus = 'complete'
+        $Service.UninstallRegistryPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+        $Service.UninstallDisplayName = 'Lenovo PC Manager'
+        $Service.UninstallPublisher = 'Lenovo'
+        $Service.UninstallDisplayVersion = ''
+        $Service.UninstallInstallLocation = 'C:\Program Files\Lenovo\PCManager'
+        $Service.UninstallString = '"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+        $Service.UninstallExecutablePath = 'C:\Program Files\Lenovo\PCManager\uninst.exe'
     }
 
     function New-TestInventoryAclDescriptor {
@@ -70,7 +84,7 @@ BeforeAll {
 
 Describe 'trusted privileged inventory nonce and paths' {
     It 'defines the bounded inventory constants' {
-        $script:InventorySchemaVersion | Should -Be 2
+        $script:InventorySchemaVersion | Should -Be 3
         $script:MaxInventoryJsonBytes | Should -Be 8MB
         $script:MaxInventoryJsonDepth | Should -Be 12
         $script:MaxInventoryRecords | Should -Be 20000
@@ -393,7 +407,7 @@ Describe 'strict privileged inventory JSON and package shape' {
     It 'uses only the exact service and task fields with strict scalar and array types' {
         $package = New-TestInventoryPackage
         (@($package.services[0].PSObject.Properties.Name) -join ',') |
-            Should -BeExactly 'Name,DisplayName,State,StartMode,PathName,ProcessId,ProcessIdentityStatus,ProcessName,ProcessPath,ProcessStartTimeUtc'
+            Should -BeExactly 'Name,DisplayName,State,StartMode,PathName,ProcessId,ProcessIdentityStatus,ProcessName,ProcessPath,ProcessStartTimeUtc,LaunchProtectedStatus,LaunchProtectedLevel,UninstallEvidenceStatus,UninstallRegistryPath,UninstallDisplayName,UninstallPublisher,UninstallDisplayVersion,UninstallInstallLocation,UninstallString,UninstallExecutablePath'
         (@($package.tasks[0].PSObject.Properties.Name) -join ',') |
             Should -BeExactly 'TaskName,TaskPath,State,Author,Description,Actions'
         foreach ($name in @('Name','DisplayName','State','StartMode','PathName')) {
@@ -459,10 +473,18 @@ Describe 'strict privileged inventory JSON and package shape' {
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
     }
 
-    It 'rejects legacy schema v1 packages' {
+    It 'rejects v2 future missing and wrong-scalar schema values: <Case>' -TestCases @(
+        @{ Case='v2'; Mutation={ param($p) $p.inventory_schema_version=2 } }
+        @{ Case='future'; Mutation={ param($p) $p.inventory_schema_version=4 } }
+        @{ Case='missing'; Mutation={ param($p) $p.PSObject.Properties.Remove('inventory_schema_version') } }
+        @{ Case='string'; Mutation={ param($p) $p.inventory_schema_version='3' } }
+        @{ Case='array'; Mutation={ param($p) $p.inventory_schema_version=@([int]3) } }
+        @{ Case='floating point'; Mutation={ param($p) $p.inventory_schema_version=[double]3 } }
+    ) {
+        param($Case, $Mutation)
         $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
-        $package.inventory_schema_version = 1
-        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*schema*'
+        & $Mutation $package
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw
     }
 
     It 'rejects stale future nonce SID and incomplete health packages' -TestCases @(
@@ -587,15 +609,88 @@ Describe 'strict privileged inventory JSON and package shape' {
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*service*'
     }
 
-    It 'rejects missing and extra service fields' -TestCases @(
-        @{ Mode='missing' }, @{ Mode='extra' }
+    It 'rejects invalid launch-protected shape: <Case>' -TestCases @(
+        @{ Case='unknown status'; Mutation={ param($s) $s.LaunchProtectedStatus='unknown' } }
+        @{ Case='status array'; Mutation={ param($s) $s.LaunchProtectedStatus=@('complete') } }
+        @{ Case='level string'; Mutation={ param($s) $s.LaunchProtectedLevel='-1' } }
+        @{ Case='level array'; Mutation={ param($s) $s.LaunchProtectedLevel=@([int]-1) } }
+        @{ Case='complete negative'; Mutation={ param($s) $s.LaunchProtectedStatus='complete'; $s.LaunchProtectedLevel=[int]-1 } }
+        @{ Case='complete above range'; Mutation={ param($s) $s.LaunchProtectedStatus='complete'; $s.LaunchProtectedLevel=[int]4 } }
+        @{ Case='unavailable complete level'; Mutation={ param($s) $s.LaunchProtectedLevel=[int]0 } }
+    ) {
+        param($Case, $Mutation)
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        & $Mutation $package.services[0]
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*LaunchProtected*'
+    }
+
+    It 'accepts complete launch protection levels from zero through three' {
+        foreach ($level in 0..3) {
+            $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+            $package.services[0].LaunchProtectedStatus = 'complete'
+            $package.services[0].LaunchProtectedLevel = [int]$level
+            { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
+        }
+    }
+
+    It 'rejects unavailable uninstall evidence with any nonempty value: <Field>' -TestCases @(
+        'UninstallRegistryPath','UninstallDisplayName','UninstallPublisher','UninstallDisplayVersion',
+        'UninstallInstallLocation','UninstallString','UninstallExecutablePath' | ForEach-Object { @{ Field=$_ } }
+    ) {
+        param($Field)
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        $package.services[0].$Field = 'unexpected'
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
+    }
+
+    It 'rejects partially empty complete uninstall evidence: <Field>' -TestCases @(
+        'UninstallRegistryPath','UninstallDisplayName','UninstallPublisher','UninstallInstallLocation',
+        'UninstallString','UninstallExecutablePath' | ForEach-Object { @{ Field=$_ } }
+    ) {
+        param($Field)
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        Set-TestCompleteUninstallEvidence $package.services[0]
+        $package.services[0].$Field = ''
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
+    }
+
+    It 'rejects invalid complete uninstall scalar and path bindings: <Case>' -TestCases @(
+        @{ Case='unknown status'; Mutation={ param($s) $s.UninstallEvidenceStatus='unknown' } }
+        @{ Case='status array'; Mutation={ param($s) $s.UninstallEvidenceStatus=@('complete') } }
+        @{ Case='display version array'; Mutation={ param($s) $s.UninstallDisplayVersion=@('1.0') } }
+        @{ Case='rootless install path'; Mutation={ param($s) $s.UninstallInstallLocation='Lenovo\PCManager' } }
+        @{ Case='noncanonical install path'; Mutation={ param($s) $s.UninstallInstallLocation='C:\Program Files\Lenovo\PCManager\..\PCManager' } }
+        @{ Case='drive root install path'; Mutation={ param($s) $s.UninstallInstallLocation='C:\' } }
+        @{ Case='rootless executable path'; Mutation={ param($s) $s.UninstallString='uninst.exe'; $s.UninstallExecutablePath='uninst.exe' } }
+        @{ Case='noncanonical executable path'; Mutation={ param($s) $s.UninstallString='"C:\Program Files\Lenovo\PCManager\bin\..\uninst.exe"'; $s.UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\bin\..\uninst.exe' } }
+        @{ Case='non-exe command'; Mutation={ param($s) $s.UninstallString='"C:\Program Files\Lenovo\PCManager\uninst.cmd"'; $s.UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\uninst.cmd' } }
+        @{ Case='executable outside install root'; Mutation={ param($s) $s.UninstallString='"C:\Program Files\Lenovo\PCManagerExtra\uninst.exe"'; $s.UninstallExecutablePath='C:\Program Files\Lenovo\PCManagerExtra\uninst.exe' } }
+    ) {
+        param($Case, $Mutation)
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        Set-TestCompleteUninstallEvidence $package.services[0]
+        & $Mutation $package.services[0]
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
+    }
+
+    It 'accepts complete uninstall evidence with an empty scalar display version' {
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        Set-TestCompleteUninstallEvidence $package.services[0]
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
+    }
+
+    It 'rejects missing extra and case-variant service fields' -TestCases @(
+        @{ Mode='missing' }, @{ Mode='extra' }, @{ Mode='case-variant' }
     ) {
         param($Mode)
         $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
         if ($Mode -ceq 'missing') {
-            $package.services[0].PSObject.Properties.Remove('ProcessStartTimeUtc')
-        } else {
+            $package.services[0].PSObject.Properties.Remove('LaunchProtectedStatus')
+        } elseif ($Mode -ceq 'extra') {
             $package.services[0] | Add-Member Unexpected $true
+        } else {
+            $package.services[0].PSObject.Properties.Remove('UninstallExecutablePath')
+            $package.services[0] | Add-Member uninstallExecutablePath ''
         }
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*service*'
     }
@@ -1182,6 +1277,8 @@ Describe 'internal scan_inventory collector' {
         }
         Mock Is-Admin { $true }
         Mock Get-NativeProcessIdentity { $null }
+        Mock Get-ServiceLaunchProtectedState { [pscustomobject][ordered]@{ Status='complete'; Level=[int]2 } }
+        Mock Get-LenovoOfficialUninstallEvidence { New-UnavailableLenovoOfficialUninstallEvidence }
         Mock Get-CurrentUserSid { $script:ReaderSid }
         Mock Get-ServicesInfo {
             [pscustomobject]@{
@@ -1300,12 +1397,16 @@ Describe 'internal scan_inventory collector' {
         Assert-MockCalled Get-TasksInfo -Times 0 -Exactly
     }
 
-    It 'captures a stable protected service process identity into the exact Task1 package shape' {
+    It 'captures a stable protected service process identity into the exact schema v3 package shape' {
         $package = Invoke-ScanInventory -Nonce $script:Nonce
 
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
         @($package.PSObject.Properties.Name) | Should -Be @('inventory_schema_version','nonce','generated_utc','collector_sid','services','tasks','health','warnings')
-        @($package.services[0].PSObject.Properties.Name) | Should -Be @('Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc')
+        @($package.services[0].PSObject.Properties.Name) | Should -Be @(
+            'Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc',
+            'LaunchProtectedStatus','LaunchProtectedLevel','UninstallEvidenceStatus','UninstallRegistryPath','UninstallDisplayName','UninstallPublisher',
+            'UninstallDisplayVersion','UninstallInstallLocation','UninstallString','UninstallExecutablePath'
+        )
         $package.services[0].ProcessIdentityStatus | Should -BeExactly 'complete'
         $package.services[0].ProcessName | Should -BeExactly 'svc.exe'
         $package.services[0].ProcessPath | Should -BeExactly $script:CollectorServiceExecutable
@@ -1318,6 +1419,60 @@ Describe 'internal scan_inventory collector' {
         $script:ProcessQueryCount | Should -Be 1
         @($package.warnings).Count | Should -Be 0
         Should -Invoke Get-NativeProcessIdentity -Times 0 -Exactly
+    }
+
+    It 'collects launch protection and uninstall snapshots for HRWSCCtrl using ordinal-ignore-case name matching' {
+        Mock Get-PrivilegedServiceProcessIdentity { New-InventoryProcessIdentityState unavailable '' '' '' }
+        Mock Get-ServiceLaunchProtectedState { [pscustomobject][ordered]@{ Status='complete'; Level=[int]3 } }
+        Mock Get-LenovoOfficialUninstallEvidence {
+            [pscustomobject][ordered]@{
+                UninstallEvidenceStatus='complete'; UninstallRegistryPath='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+                UninstallDisplayName='Lenovo PC Manager'; UninstallPublisher='Lenovo'; UninstallDisplayVersion='5.1'
+                UninstallInstallLocation='C:\Program Files\Lenovo\PCManager'; UninstallString='"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+                UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\uninst.exe'
+            }
+        }
+        $record = [pscustomobject]@{ Name='hrwscctrl';DisplayName='Lenovo';State='Stopped';StartMode='Manual';PathName='';ProcessId=0 }
+
+        $converted = ConvertTo-InventoryServiceRecord $record
+
+        $converted.Name | Should -BeExactly 'hrwscctrl'
+        $converted.LaunchProtectedStatus | Should -BeExactly 'complete'
+        $converted.LaunchProtectedLevel | Should -Be 3
+        $converted.UninstallEvidenceStatus | Should -BeExactly 'complete'
+        $converted.UninstallExecutablePath | Should -BeExactly 'C:\Program Files\Lenovo\PCManager\uninst.exe'
+        Should -Invoke Get-ServiceLaunchProtectedState -Times 1 -Exactly -ParameterFilter { $ServiceName -ceq 'hrwscctrl' }
+        Should -Invoke Get-LenovoOfficialUninstallEvidence -Times 1 -Exactly
+    }
+
+    It 'collects protection for another service without invoking uninstall discovery' {
+        Mock Get-PrivilegedServiceProcessIdentity { New-InventoryProcessIdentityState unavailable '' '' '' }
+        $record = [pscustomobject]@{ Name='OtherSvc';DisplayName='Other';State='Stopped';StartMode='Manual';PathName='';ProcessId=0 }
+
+        $converted = ConvertTo-InventoryServiceRecord $record
+
+        $converted.LaunchProtectedStatus | Should -BeExactly 'complete'
+        $converted.LaunchProtectedLevel | Should -Be 2
+        $converted.UninstallEvidenceStatus | Should -BeExactly 'unavailable'
+        @($converted.PSObject.Properties.Value)[13..19] | Should -Be @('', '', '', '', '', '', '')
+        Should -Invoke Get-ServiceLaunchProtectedState -Times 1 -Exactly -ParameterFilter { $ServiceName -ceq 'OtherSvc' }
+        Should -Invoke Get-LenovoOfficialUninstallEvidence -Times 0 -Exactly
+    }
+
+    It 'turns helper failures into unavailable evidence without changing service category health' {
+        Mock Get-PrivilegedServiceProcessIdentity { New-InventoryProcessIdentityState unavailable '' '' '' }
+        Mock Get-ServiceLaunchProtectedState { throw 'native launch query failed' }
+        Mock Get-LenovoOfficialUninstallEvidence { throw 'registry discovery failed' }
+        $script:ScanHealth.services = 'complete'
+        $record = [pscustomobject]@{ Name='HRWSCCtrl';DisplayName='Lenovo';State='Stopped';StartMode='Manual';PathName='';ProcessId=0 }
+
+        $converted = ConvertTo-InventoryServiceRecord $record
+
+        $converted.LaunchProtectedStatus | Should -BeExactly 'unavailable'
+        $converted.LaunchProtectedLevel | Should -Be -1
+        $converted.UninstallEvidenceStatus | Should -BeExactly 'unavailable'
+        @($converted.PSObject.Properties.Value)[13..19] | Should -Be @('', '', '', '', '', '', '')
+        $script:ScanHealth.services | Should -BeExactly 'complete'
     }
 
     It 'completes a protected service identity from the exact native PID when WMI path is null' {
