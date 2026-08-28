@@ -654,6 +654,45 @@ Describe 'strict privileged inventory JSON and package shape' {
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
     }
 
+    It 'rejects whitespace-only required complete uninstall evidence: <Field>' -TestCases @(
+        'UninstallRegistryPath','UninstallDisplayName','UninstallPublisher','UninstallInstallLocation',
+        'UninstallString','UninstallExecutablePath' | ForEach-Object { @{ Field=$_ } }
+    ) {
+        param($Field)
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        Set-TestCompleteUninstallEvidence $package.services[0]
+        $package.services[0].$Field = '   '
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
+    }
+
+    It 'rejects surrounding whitespace and controls in required complete uninstall evidence: <Field>' -TestCases @(
+        'UninstallRegistryPath','UninstallDisplayName','UninstallPublisher','UninstallInstallLocation',
+        'UninstallString','UninstallExecutablePath' | ForEach-Object { @{ Field=$_ } }
+    ) {
+        param($Field)
+        foreach ($mutation in @(
+            { param($value) ' ' + $value },
+            { param($value) $value + [char]0x1f }
+        )) {
+            $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+            Set-TestCompleteUninstallEvidence $package.services[0]
+            $package.services[0].$Field = & $mutation $package.services[0].$Field
+            { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
+        }
+    }
+
+    It 'allows empty DisplayVersion but rejects dirty nonempty values: <Value>' -TestCases @(
+        @{ Value='   ' }
+        @{ Value=' 1.0' }
+        @{ Value=("1.0" + [char]0x1f) }
+    ) {
+        param($Value)
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        Set-TestCompleteUninstallEvidence $package.services[0]
+        $package.services[0].UninstallDisplayVersion = $Value
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
+    }
+
     It 'rejects invalid complete uninstall scalar and path bindings: <Case>' -TestCases @(
         @{ Case='unknown status'; Mutation={ param($s) $s.UninstallEvidenceStatus='unknown' } }
         @{ Case='status array'; Mutation={ param($s) $s.UninstallEvidenceStatus=@('complete') } }
@@ -663,6 +702,7 @@ Describe 'strict privileged inventory JSON and package shape' {
         @{ Case='drive root install path'; Mutation={ param($s) $s.UninstallInstallLocation='C:\' } }
         @{ Case='rootless executable path'; Mutation={ param($s) $s.UninstallString='uninst.exe'; $s.UninstallExecutablePath='uninst.exe' } }
         @{ Case='noncanonical executable path'; Mutation={ param($s) $s.UninstallString='"C:\Program Files\Lenovo\PCManager\bin\..\uninst.exe"'; $s.UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\bin\..\uninst.exe' } }
+        @{ Case='noncanonical raw command with canonical executable field'; Mutation={ param($s) $s.UninstallString='"C:\Program Files\Lenovo\PCManager\bin\..\uninst.exe"'; $s.UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\uninst.exe' } }
         @{ Case='non-exe command'; Mutation={ param($s) $s.UninstallString='"C:\Program Files\Lenovo\PCManager\uninst.cmd"'; $s.UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\uninst.cmd' } }
         @{ Case='executable outside install root'; Mutation={ param($s) $s.UninstallString='"C:\Program Files\Lenovo\PCManagerExtra\uninst.exe"'; $s.UninstallExecutablePath='C:\Program Files\Lenovo\PCManagerExtra\uninst.exe' } }
     ) {

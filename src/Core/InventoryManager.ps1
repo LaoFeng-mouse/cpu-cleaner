@@ -341,7 +341,13 @@ function Assert-InventoryUninstallEvidenceShape($Record) {
     }
 
     foreach ($name in @('UninstallRegistryPath','UninstallDisplayName','UninstallPublisher','UninstallInstallLocation','UninstallString','UninstallExecutablePath')) {
-        if ([string]::IsNullOrEmpty($Record.$name)) { throw "Inventory service complete uninstall evidence $name is empty." }
+        if (-not (Test-InventoryBoundedCleanString $Record.$name $script:MaxInventoryProcessPathLength)) {
+            throw "Inventory service complete uninstall evidence $name is not a clean nonblank string."
+        }
+    }
+    if ($Record.UninstallDisplayVersion -cne '' -and
+        -not (Test-InventoryBoundedCleanString $Record.UninstallDisplayVersion $script:MaxInventoryProcessPathLength)) {
+        throw 'Inventory service uninstall evidence DisplayVersion is not a clean string.'
     }
 
     $installLocation = $Record.UninstallInstallLocation
@@ -354,6 +360,18 @@ function Assert-InventoryUninstallEvidenceShape($Record) {
         -not $installLocation.Equals($canonicalInstallLocation, [System.StringComparison]::Ordinal) -or
         $canonicalInstallLocation.Equals([System.IO.Path]::GetPathRoot($canonicalInstallLocation), [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'Inventory service uninstall install location is not a canonical ordinary local directory.'
+    }
+
+    $rawExecutablePath = if ($Record.UninstallString -cmatch '^"([^"\r\n]+\.exe)"$') { $matches[1] }
+        elseif ($Record.UninstallString -cmatch '^([^"\r\n]+\.exe)$') { $matches[1] }
+        else { $null }
+    if ($rawExecutablePath -isnot [string]) {
+        throw 'Inventory service uninstall command or executable path is invalid.'
+    }
+    try { $canonicalRawExecutablePath = [System.IO.Path]::GetFullPath($rawExecutablePath) }
+    catch { throw 'Inventory service uninstall command or executable path is invalid.' }
+    if (-not $rawExecutablePath.Equals($canonicalRawExecutablePath, [System.StringComparison]::Ordinal)) {
+        throw 'Inventory service raw uninstall command path is not canonical.'
     }
 
     $parsedExecutablePath = ConvertFrom-StrictOfficialUninstallString -Command $Record.UninstallString
