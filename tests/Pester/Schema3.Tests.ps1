@@ -680,7 +680,7 @@ Describe 'Schema 3.0 集成 (真实特征库 v3 + Match-Profiles + 授权)' {
         } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
         $hit = @(Match-Profiles -Services @([pscustomobject]@{
             Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=$pathName; ProcessId=[int]4321
-            ProcessIdentitySource='trusted_inventory_v2'; ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'
+            ProcessIdentitySource='trusted_inventory_v3'; ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'
             ProcessPath=$binary; ProcessStartTimeUtc='2026-08-24T01:02:03.0000000Z'
         }) -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
 

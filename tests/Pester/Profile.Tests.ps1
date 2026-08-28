@@ -70,7 +70,7 @@ Describe 'Profile 加载' {
                 [string]$State = 'Running',
                 $ProcessId = [int]4321,
                 [string]$PathName = '',
-                [string]$IdentitySource = 'trusted_inventory_v2',
+                [string]$IdentitySource = 'trusted_inventory_v3',
                 [string]$IdentityStatus = 'complete',
                 [string]$ProcessName = '',
                 [string]$ProcessPath = '',
@@ -267,7 +267,7 @@ Describe 'Profile 加载' {
         $decision.ExecutionClass | Should -BeExactly 'observation'
     }
 
-    It 'trusted v2 完整身份和两次稳定服务快照生成 stop_service_runtime 五字段且不查询 Win32_Process' {
+    It 'Scanner 投影的 trusted v3 完整身份和两次稳定服务快照生成 stop_service_runtime 五字段' {
         $tmp = Join-Path $env:TEMP ("pt_" + [guid]::NewGuid().ToString('N') + ".json")
         $binary = Join-Path $TestDrive 'wsctrl11.exe'
         $expectedStartTimeUtc = '2026-08-24T01:02:03.4567890Z'
@@ -283,7 +283,22 @@ Describe 'Profile 加载' {
             [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=('"' + $binary + '" -service') }
         } -ParameterFilter { $ClassName -ceq 'Win32_Service' }
         try {
-            $service = & $script:NewTrustedService -BinaryPath $binary -ProcessStartTimeUtc $expectedStartTimeUtc
+            $inventoryService = & $script:NewTrustedService -BinaryPath $binary -ProcessStartTimeUtc $expectedStartTimeUtc
+            $inventoryService.PSObject.Properties.Remove('ProcessIdentitySource')
+            foreach ($entry in ([ordered]@{
+                LaunchProtectedStatus='unavailable'; LaunchProtectedLevel=[int]-1
+                UninstallEvidenceStatus='unavailable'; UninstallRegistryPath=''; UninstallDisplayName=''; UninstallPublisher=''
+                UninstallDisplayVersion=''; UninstallInstallLocation=''; UninstallString=''; UninstallExecutablePath=''
+            }).GetEnumerator()) {
+                $inventoryService | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+            }
+            Mock Read-TrustedInventoryPackage {
+                [pscustomobject]@{ Package=[pscustomobject]@{
+                    services=[object[]]@($inventoryService); tasks=[object[]]@()
+                    health=[pscustomobject]@{ services='complete'; tasks='complete' }; warnings=[object[]]@()
+                }; Sha256=('a' * 64) }
+            }
+            $service = (Get-ScanServiceTaskInventory -InventoryNonce ('a' * 64)).Services[0]
             $hits = @(Match-Profiles -Services @($service) -AutoStarts @() -Tasks @() -TopProcs @())
 
             $hits.Count | Should -Be 1
@@ -304,6 +319,7 @@ Describe 'Profile 加载' {
     It 'trusted identity 失败矩阵全部降级为可重扫且已脱敏的 observation: <label>' -TestCases @(
         @{ label='missing-marker'; mode='record'; property='ProcessIdentitySource'; value=$null }
         @{ label='wrong-marker'; mode='record'; property='ProcessIdentitySource'; value='local_inventory' }
+        @{ label='v2-marker'; mode='record'; property='ProcessIdentitySource'; value='trusted_inventory_v2' }
         @{ label='unavailable'; mode='record'; property='ProcessIdentityStatus'; value='unavailable' }
         @{ label='not-running'; mode='record'; property='ProcessIdentityStatus'; value='not_running' }
         @{ label='partial-status'; mode='record'; property='ProcessIdentityStatus'; value='partial' }
@@ -373,16 +389,19 @@ Describe 'Profile 加载' {
         } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
     }
 
-    It 'trusted nonce 投影 v2 身份字段和内部来源标记' {
+    It 'trusted nonce 投影 v3 身份字段和内部来源标记' {
         Mock Test-InventoryNonce { $true }
         Mock Read-TrustedInventoryPackage {
             [pscustomobject]@{ Package = [pscustomobject]@{
-                schema_version = 2
+                inventory_schema_version = 3
                 warnings = @(); tasks = @(); services = @([pscustomobject]@{
                     Name='HRWSCCtrl'; DisplayName='Lenovo Security Center'; State='Running'; StartMode='Manual'
                     PathName='"C:\Program Files\Lenovo\wsctrl11.exe" -service'; ProcessId=[int]4321
                     ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'
                     ProcessPath='C:\Program Files\Lenovo\wsctrl11.exe'; ProcessStartTimeUtc='2026-08-24T01:02:03.4567890Z'
+                    LaunchProtectedStatus='unavailable'; LaunchProtectedLevel=[int]-1
+                    UninstallEvidenceStatus='unavailable'; UninstallRegistryPath=''; UninstallDisplayName=''; UninstallPublisher=''
+                    UninstallDisplayVersion=''; UninstallInstallLocation=''; UninstallString=''; UninstallExecutablePath=''
                 })
             } }
         }
@@ -394,7 +413,7 @@ Describe 'Profile 加载' {
         $service.ProcessName | Should -BeExactly 'wsctrl11.exe'
         $service.ProcessPath | Should -BeExactly 'C:\Program Files\Lenovo\wsctrl11.exe'
         $service.ProcessStartTimeUtc | Should -BeExactly '2026-08-24T01:02:03.4567890Z'
-        $service.ProcessIdentitySource | Should -BeExactly 'trusted_inventory_v2'
+        $service.ProcessIdentitySource | Should -BeExactly 'trusted_inventory_v3'
     }
 
     It 'local limited 服务记录没有 trusted marker 且不能生成 stop_service_runtime' {

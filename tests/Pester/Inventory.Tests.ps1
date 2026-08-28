@@ -49,10 +49,11 @@ BeforeAll {
     }
 
     function Set-TestCompleteUninstallEvidence($Service) {
+        $Service.Name = 'HRWSCCtrl'
         $Service.UninstallEvidenceStatus = 'complete'
         $Service.UninstallRegistryPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
-        $Service.UninstallDisplayName = 'Lenovo PC Manager'
-        $Service.UninstallPublisher = 'Lenovo'
+        $Service.UninstallDisplayName = $script:LenovoOfficialUninstallDisplayNamePrefixes[0]
+        $Service.UninstallPublisher = $script:LenovoOfficialUninstallPublishers[0]
         $Service.UninstallDisplayVersion = ''
         $Service.UninstallInstallLocation = 'C:\Program Files\Lenovo\PCManager'
         $Service.UninstallString = '"C:\Program Files\Lenovo\PCManager\uninst.exe"'
@@ -717,6 +718,34 @@ Describe 'strict privileged inventory JSON and package shape' {
         $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
         Set-TestCompleteUninstallEvidence $package.services[0]
         { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Not -Throw
+    }
+
+    It 'rejects complete uninstall evidence for a non-HRWSCCtrl service' {
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        Set-TestCompleteUninstallEvidence $package.services[0]
+        $package.services[0].Name = 'ExampleSvc'
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
+    }
+
+    It 'rejects complete uninstall evidence outside the Lenovo registry roots' {
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        Set-TestCompleteUninstallEvidence $package.services[0]
+        $package.services[0].UninstallRegistryPath = 'HKLM:\SOFTWARE\Vendor\Uninstall\LenovoPcManager'
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
+    }
+
+    It 'rejects complete uninstall evidence with a non-allowlisted display name' {
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        Set-TestCompleteUninstallEvidence $package.services[0]
+        $package.services[0].UninstallDisplayName = 'Lenovo PC Manager'
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
+    }
+
+    It 'rejects complete uninstall evidence with a non-allowlisted publisher' {
+        $package = Copy-TestInventoryPackage (New-TestInventoryPackage)
+        Set-TestCompleteUninstallEvidence $package.services[0]
+        $package.services[0].UninstallPublisher = 'Lenovo'
+        { Assert-InventoryPackageShape $package $script:Nonce $script:ReaderSid ([datetime]::UtcNow) } | Should -Throw '*uninstall*'
     }
 
     It 'rejects missing extra and case-variant service fields' -TestCases @(
@@ -1467,7 +1496,8 @@ Describe 'internal scan_inventory collector' {
         Mock Get-LenovoOfficialUninstallEvidence {
             [pscustomobject][ordered]@{
                 UninstallEvidenceStatus='complete'; UninstallRegistryPath='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
-                UninstallDisplayName='Lenovo PC Manager'; UninstallPublisher='Lenovo'; UninstallDisplayVersion='5.1'
+                UninstallDisplayName=$script:LenovoOfficialUninstallDisplayNamePrefixes[0]
+                UninstallPublisher=$script:LenovoOfficialUninstallPublishers[0]; UninstallDisplayVersion='5.1'
                 UninstallInstallLocation='C:\Program Files\Lenovo\PCManager'; UninstallString='"C:\Program Files\Lenovo\PCManager\uninst.exe"'
                 UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\uninst.exe'
             }

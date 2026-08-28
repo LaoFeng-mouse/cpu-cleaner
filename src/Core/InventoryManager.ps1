@@ -350,6 +350,27 @@ function Assert-InventoryUninstallEvidenceShape($Record) {
         throw 'Inventory service uninstall evidence DisplayVersion is not a clean string.'
     }
 
+    if ($Record.Name -isnot [string] -or
+        -not [string]::Equals($Record.Name, 'HRWSCCtrl', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Inventory service complete uninstall evidence is not authorized for this service.'
+    }
+    if (-not (Test-LenovoOfficialUninstallRegistryPath -RegistryPath $Record.UninstallRegistryPath)) {
+        throw 'Inventory service uninstall registry path is not an allowed Lenovo uninstall key.'
+    }
+    $displayNameAllowed = $false
+    foreach ($prefix in $script:LenovoOfficialUninstallDisplayNamePrefixes) {
+        if ($Record.UninstallDisplayName.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+            $displayNameAllowed = $true
+            break
+        }
+    }
+    if (-not $displayNameAllowed) {
+        throw 'Inventory service uninstall display name is not allowed.'
+    }
+    if (-not ($script:LenovoOfficialUninstallPublishers -ccontains $Record.UninstallPublisher)) {
+        throw 'Inventory service uninstall publisher is not allowed.'
+    }
+
     $installLocation = $Record.UninstallInstallLocation
     if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $installLocation)) {
         throw 'Inventory service uninstall install location is invalid.'
@@ -1053,7 +1074,18 @@ function ConvertTo-InventoryServiceRecord($Record) {
     if ([string]::Equals($Record.Name, 'HRWSCCtrl', [System.StringComparison]::OrdinalIgnoreCase)) {
         try {
             $uninstallEvidence = Get-LenovoOfficialUninstallEvidence
-            Assert-InventoryUninstallEvidenceShape $uninstallEvidence
+            $uninstallValidationRecord = [pscustomobject][ordered]@{
+                Name = $Record.Name
+                UninstallEvidenceStatus = $uninstallEvidence.UninstallEvidenceStatus
+                UninstallRegistryPath = $uninstallEvidence.UninstallRegistryPath
+                UninstallDisplayName = $uninstallEvidence.UninstallDisplayName
+                UninstallPublisher = $uninstallEvidence.UninstallPublisher
+                UninstallDisplayVersion = $uninstallEvidence.UninstallDisplayVersion
+                UninstallInstallLocation = $uninstallEvidence.UninstallInstallLocation
+                UninstallString = $uninstallEvidence.UninstallString
+                UninstallExecutablePath = $uninstallEvidence.UninstallExecutablePath
+            }
+            Assert-InventoryUninstallEvidenceShape $uninstallValidationRecord
         } catch {
             $uninstallEvidence = New-UnavailableLenovoOfficialUninstallEvidence
         }

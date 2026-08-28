@@ -813,7 +813,7 @@ Invoke-Clean
         $pathName = '"' + $binary + '" -service'
         $services = @([pscustomobject]@{
             Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=$pathName; ProcessId=[int]4321
-            ProcessIdentitySource='trusted_inventory_v2'; ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'
+            ProcessIdentitySource='trusted_inventory_v3'; ProcessIdentityStatus='complete'; ProcessName='wsctrl11.exe'
             ProcessPath=$binary; ProcessStartTimeUtc='2026-08-24T01:02:03.0000000Z'
         })
         Mock Get-CimInstance {

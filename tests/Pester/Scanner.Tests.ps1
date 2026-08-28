@@ -431,14 +431,14 @@ Describe '扫描器与评分' {
         $r = Get-ProcessRiskScore -proc $top[0] -ProfileHits @() -AutoStartNames @() -TopProcs $top
         ($r.Reasons -match '持续占用') | Should -Be $false
     }
-    It '有效可信 inventory 为第三方手动运行服务派生内存 TriggerHint 且不扩展包对象' {
+    It '有效可信 inventory 为 HRWSCCtrl 手动运行服务派生内存 TriggerHint 且逐值复制 v3 证据' {
         $service = [pscustomobject][ordered]@{
-            Name='TrustedSvc';DisplayName='Trusted Service';State='Running';StartMode='Manual';PathName='C:\Program Files\Vendor\trusted.exe';ProcessId=7
-            ProcessIdentityStatus='complete';ProcessName='trusted.exe';ProcessPath='C:\Program Files\Vendor\trusted.exe';ProcessStartTimeUtc='2026-08-28T00:00:00.0000000Z'
+            Name='HRWSCCtrl';DisplayName='Lenovo Security Controller';State='Running';StartMode='Manual';PathName='C:\Program Files\Lenovo\PCManager\service.exe';ProcessId=7
+            ProcessIdentityStatus='complete';ProcessName='service.exe';ProcessPath='C:\Program Files\Lenovo\PCManager\service.exe';ProcessStartTimeUtc='2026-08-28T00:00:00.0000000Z'
             LaunchProtectedStatus='complete';LaunchProtectedLevel=[int]2
-            UninstallEvidenceStatus='complete';UninstallRegistryPath='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Trusted'
-            UninstallDisplayName='Trusted App';UninstallPublisher='Vendor';UninstallDisplayVersion='1.0'
-            UninstallInstallLocation='C:\Program Files\Vendor';UninstallString='"C:\Program Files\Vendor\uninst.exe"';UninstallExecutablePath='C:\Program Files\Vendor\uninst.exe'
+            UninstallEvidenceStatus='complete';UninstallRegistryPath='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+            UninstallDisplayName=$script:LenovoOfficialUninstallDisplayNamePrefixes[0];UninstallPublisher=$script:LenovoOfficialUninstallPublishers[0];UninstallDisplayVersion='1.0'
+            UninstallInstallLocation='C:\Program Files\Lenovo\PCManager';UninstallString='"C:\Program Files\Lenovo\PCManager\uninst.exe"';UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\uninst.exe'
         }
         $task = [pscustomobject]@{ TaskName='TrustedTask';TaskPath='\Trusted\';State='Ready';Author='Vendor';Description='Trusted';Actions=[object[]]@('C:\trusted-task.exe') }
         Mock Read-TrustedInventoryPackage {
@@ -452,7 +452,7 @@ Describe '扫描器与评分' {
         $result.Services -is [System.Array] | Should -BeTrue
         $result.Tasks -is [System.Array] | Should -BeTrue
         $result.Services[0].TriggerHint | Should -BeTrue
-        $result.Services[0].Name | Should -BeExactly 'TrustedSvc'
+        $result.Services[0].Name | Should -BeExactly 'HRWSCCtrl'
         $result.Services[0].ProcessIdentitySource | Should -BeExactly 'trusted_inventory_v3'
         foreach ($field in @('LaunchProtectedStatus','LaunchProtectedLevel','UninstallEvidenceStatus','UninstallRegistryPath','UninstallDisplayName','UninstallPublisher','UninstallDisplayVersion','UninstallInstallLocation','UninstallString','UninstallExecutablePath')) {
             $result.Services[0].$field | Should -BeExactly $service.$field
