@@ -51,6 +51,24 @@ $script:ProfileSha256Url = ''
 # ---------- 工具函数 ----------
 function Write-Step($msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 
+function Show-ScanFailureGuidance([string]$FailureMessage) {
+    $suffix = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $limitedReportPath = Join-Path $env:TEMP ('mouse-cleaner-limited-{0}.html' -f $suffix)
+    $fullReportPath = Join-Path $env:TEMP ('mouse-cleaner-full-{0}.html' -f $suffix)
+    Write-Host ''
+    Write-Host '建议重试：' -ForegroundColor Yellow
+    Write-Host ('  1) 仅观察可用扫描: powershell -NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode scan -AllowLimited -ReportPath "{1}"' -f `
+        (Join-Path $script:Root 'cpu-cleaner.ps1'), $limitedReportPath) -ForegroundColor Gray
+    if (-not (Is-Admin)) {
+        Write-Host '  2) 你当前是非管理员，若需完整服务/任务采集与可执行建议，请以管理员身份重新运行：' -ForegroundColor Gray
+        Write-Host ('     powershell -NoProfile -ExecutionPolicy Bypass -File "{0}" -Mode scan -ReportPath "{1}"' -f (Join-Path $script:Root 'cpu-cleaner.ps1'), $fullReportPath) -ForegroundColor Gray
+        Write-Host '     或用 GUI：先运行 鼠鼠版-图形界面.bat 执行安全扫描（会弹 UAC）。' -ForegroundColor Gray
+    } else {
+        Write-Host '  2) 你当前是管理员，若仍失败，请附带日志并检查：' -ForegroundColor Gray
+        Write-Host '     - 以管理员身份运行 `-Mode clean` 前先确认服务/任务完整性。' -ForegroundColor Gray
+    }
+}
+
 function Is-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $p = New-Object Security.Principal.WindowsPrincipal($id)
@@ -106,6 +124,7 @@ switch ($Mode) {
             exit 0
         } catch {
             Write-Error ('scan failed: ' + $_.Exception.Message)
+            Show-ScanFailureGuidance -FailureMessage $_.Exception.Message
             exit 1
         }
     }
