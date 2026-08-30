@@ -784,7 +784,20 @@ function Get-ScanServiceTaskInventory {
     if ($collectionErrors.Count -gt 0 -or
         [string]$script:ScanHealth.services -cne 'complete' -or
         [string]$script:ScanHealth.tasks -cne 'complete') {
-        $detail = if ($collectionErrors.Count -gt 0) { ': ' + ($collectionErrors -join '; ') } else { '' }
+        $details = [System.Collections.Generic.List[string]]::new()
+        if ($collectionErrors.Count -gt 0) {
+            $details.Add(('采集报错: ' + ($collectionErrors -join '; ')))
+        }
+        if ([string]$script:ScanHealth.services -cne 'complete') {
+            $details.Add(('服务健康状态=' + $script:ScanHealth.services))
+        }
+        if ([string]$script:ScanHealth.tasks -cne 'complete') {
+            $details.Add(('任务健康状态=' + $script:ScanHealth.tasks))
+        }
+        if (-not (Is-Admin) -and -not $AllowLimited -and [string]::IsNullOrWhiteSpace($InventoryNonce)) {
+            $details.Add('当前会话非管理员；命令行完整扫描会被视为不完整。如果要做可执行清理的完整扫描，请使用管理员权限采集；若仅做观察扫描可加 -AllowLimited。')
+        }
+        $detail = if ($details.Count -gt 0) { ': ' + ($details -join '; ') } else { '' }
         throw ('系统服务或计划任务采集不完整' + $detail)
     }
     return [pscustomobject]@{
