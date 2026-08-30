@@ -1,4 +1,49 @@
-﻿BeforeAll {
+﻿function New-TestSignerCertificate {
+    param([Parameter(Mandatory=$true)][string]$Subject)
+    [pscustomobject]@{
+        SubjectName = [System.Security.Cryptography.X509Certificates.X500DistinguishedName]::new($Subject)
+    }
+}
+
+BeforeAll {
+    function New-TestRawX500OrganizationAttribute {
+        param(
+            [Parameter(Mandatory=$true)][byte]$ValueTag,
+            [Parameter(Mandatory=$true)][string]$Organization
+        )
+        $encodedValue = switch ($ValueTag) {
+            0x0C { [System.Text.UTF8Encoding]::new($false, $true).GetBytes($Organization) }
+            0x13 { [System.Text.ASCIIEncoding]::new().GetBytes($Organization) }
+            0x1E { [System.Text.UnicodeEncoding]::new($true, $false, $true).GetBytes($Organization) }
+            default { throw "Unsupported value tag 0x$($ValueTag.ToString('X2'))" }
+        }
+
+        if ($encodedValue.Length -ge 128) { throw "Encoded value too long for this test helper: $($encodedValue.Length)" }
+        $oid = [byte[]]@(
+            0x06, 0x03, 0x55, 0x04, 0x0A
+        )
+        $value = [byte[]]@(
+            $ValueTag, [byte]$encodedValue.Length
+        ) + $encodedValue
+        $attribute = [byte[]]@(
+            0x30, [byte]($oid.Length + $value.Length)
+        ) + $oid + $value
+        $set = [byte[]]@(
+            0x31, [byte]$attribute.Length
+        ) + $attribute
+        return [byte[]]([byte[]]@(
+            0x30, [byte]$set.Length
+        ) + $set
+        )
+    }
+
+    function New-TestSignerCertificate {
+        param([Parameter(Mandatory=$true)][string]$Subject)
+        [pscustomobject]@{
+            SubjectName = [System.Security.Cryptography.X509Certificates.X500DistinguishedName]::new($Subject)
+        }
+    }
+
     $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $modulePath = Join-Path $projectRoot 'src\Core\ProtectedServiceHandoff.ps1'
     if (Test-Path -LiteralPath $modulePath -PathType Leaf) {
@@ -154,7 +199,7 @@ Describe 'reviewed Lenovo official uninstaller launch-time validation' {
             param($Path)
             [pscustomobject]@{
                 Status = 'Valid'
-                SignerCertificate = [pscustomobject]@{ Subject = 'CN=Lenovo Setup, O=LENOVO (BEIJING) LIMITED, C=CN' }
+                SignerCertificate = New-TestSignerCertificate 'CN=Lenovo Setup, O=LENOVO (BEIJING) LIMITED, C=CN'
             }
         }
 
@@ -162,9 +207,54 @@ Describe 'reviewed Lenovo official uninstaller launch-time validation' {
             -RegistryReader $registryReader -FileSnapshotReader $fileSnapshotReader -SignatureReader $signatureReader
 
         @($result.PSObject.Properties.Name) | Should -Be @('Status', 'ExecutablePath', 'Code')
-        $result.Status | Should -BeExactly 'validated'
+        $result.Status | Should -BeExactly 'validated' -Because "validation code was '$($result.Code)'"
         $result.ExecutablePath | Should -BeExactly 'C:\Program Files (x86)\Lenovo\PCManager\5.1\uninst.exe'
         $result.Code | Should -BeNullOrEmpty
+    }
+
+    It 'reads only the exact reviewed Lenovo uninstall subkey once during launch revalidation <Label>' -TestCases @(
+        @{
+            Label = 'Registry64';
+            RegistryPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager';
+            ExpectedView = [Microsoft.Win32.RegistryView]::Registry64;
+            ExpectedSubKeyPath = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager';
+            ExpectedSourcePath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+        },
+        @{
+            Label = 'Registry32';
+            RegistryPath = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager';
+            ExpectedView = [Microsoft.Win32.RegistryView]::Registry32;
+            ExpectedSubKeyPath = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager';
+            ExpectedSourcePath = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+        }
+    ) {
+        param($Label, $RegistryPath, $ExpectedView, $ExpectedSubKeyPath, $ExpectedSourcePath)
+        $action = New-ReviewedLenovoUninstallerAction
+        $action.uninstall_registry_path = $RegistryPath
+        $item = New-LenovoUninstallRegistryItem
+        $item.RegistryPath = $RegistryPath
+        $snapshot = New-StableUninstallerSnapshot
+        $exactRegistryCalls = [System.Collections.ArrayList]::new()
+        $exactRegistryReader = {
+            param($View, $SubKeyPath, $SourcePath)
+            [void]$exactRegistryCalls.Add([pscustomobject]@{
+                View = $View
+                SubKeyPath = $SubKeyPath
+                SourcePath = $SourcePath
+            })
+            return $item
+        }.GetNewClosure()
+
+        $result = Test-ReviewedLenovoUninstaller -Action $action `
+            -RegistryReader $exactRegistryReader `
+            -FileSnapshotReader ({ param($Path) $snapshot }.GetNewClosure()) `
+            -SignatureReader { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate 'O=联想（北京）有限公司')} }
+
+        $result.Status | Should -BeExactly 'validated' -Because "validation code was '$($result.Code)'"
+        @($exactRegistryCalls) | Should -HaveCount 1
+        $exactRegistryCalls[0].View | Should -Be $ExpectedView
+        $exactRegistryCalls[0].SubKeyPath | Should -BeExactly $ExpectedSubKeyPath
+        $exactRegistryCalls[0].SourcePath | Should -BeExactly $ExpectedSourcePath
     }
 
     It 'rejects registry source missing or drift and every reviewed bound-field drift <Label>' -TestCases @(
@@ -186,7 +276,7 @@ Describe 'reviewed Lenovo official uninstaller launch-time validation' {
         $result = Test-ReviewedLenovoUninstaller -Action $action `
             -RegistryReader ({ param($Paths) $item }.GetNewClosure()) `
             -FileSnapshotReader ({ param($Path) $snapshot }.GetNewClosure()) `
-            -SignatureReader { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='O=联想（北京）有限公司'}} }
+            -SignatureReader { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate 'O=联想（北京）有限公司')} }
 
         if ($ExpectedValidated) { $result.Status | Should -BeExactly 'validated' }
         else { Assert-SkippedValidationResult $result }
@@ -255,18 +345,18 @@ Describe 'reviewed Lenovo official uninstaller launch-time validation' {
         $result = Test-ReviewedLenovoUninstaller -Action $action `
             -RegistryReader ({ param($Paths) $item }.GetNewClosure()) `
             -FileSnapshotReader ({ param($Path) $queue.Dequeue() }.GetNewClosure()) `
-            -SignatureReader { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='O=Lenovo (Beijing) Limited'}} }
+            -SignatureReader { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate 'O=Lenovo (Beijing) Limited')} }
 
         Assert-SkippedValidationResult $result
     }
 
     It 'rejects invalid signature status, absent certificate, and non-O Lenovo text <Label>' -TestCases @(
-        @{ Label='invalid status'; Signature=[pscustomobject]@{Status='NotSigned';SignerCertificate=[pscustomobject]@{Subject='O=Lenovo (Beijing) Limited'}} }
-        @{ Label='status case drift'; Signature=[pscustomobject]@{Status='valid';SignerCertificate=[pscustomobject]@{Subject='O=Lenovo (Beijing) Limited'}} }
+        @{ Label='invalid status'; Signature=[pscustomobject]@{Status='NotSigned';SignerCertificate=(New-TestSignerCertificate 'O=Lenovo (Beijing) Limited')} }
+        @{ Label='status case drift'; Signature=[pscustomobject]@{Status='valid';SignerCertificate=(New-TestSignerCertificate 'O=Lenovo (Beijing) Limited')} }
         @{ Label='absent certificate'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=$null} }
-        @{ Label='wrong organization'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='O=Lenovo Group Limited'}} }
-        @{ Label='Lenovo only in OU'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='OU=Lenovo (Beijing) Limited, O=Other Company'}} }
-        @{ Label='Lenovo only in CN'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='CN=LENOVO (BEIJING) LIMITED, O=Other Company'}} }
+        @{ Label='wrong organization'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate 'O=Lenovo Group Limited')} }
+        @{ Label='Lenovo only in OU'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate 'OU=Lenovo (Beijing) Limited, O=Other Company')} }
+        @{ Label='Lenovo only in CN'; Signature=[pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate 'CN=LENOVO (BEIJING) LIMITED, O=Other Company')} }
     ) {
         param($Label, $Signature)
         $action = New-ReviewedLenovoUninstallerAction
@@ -290,12 +380,74 @@ Describe 'reviewed Lenovo official uninstaller launch-time validation' {
         $action = New-ReviewedLenovoUninstallerAction
         $item = New-LenovoUninstallRegistryItem
         $snapshot = New-StableUninstallerSnapshot
-        $signature = [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject="CN=Setup, O=$Organization, C=CN"}}
+        $signature = [pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate "CN=Setup, O=$Organization, C=CN")}
         $result = Test-ReviewedLenovoUninstaller -Action $action `
             -RegistryReader ({ param($Paths) $item }.GetNewClosure()) `
             -FileSnapshotReader ({ param($Path) $snapshot }.GetNewClosure()) `
             -SignatureReader ({ param($Path) $signature }.GetNewClosure())
         $result.Status | Should -BeExactly 'validated'
+    }
+
+    It 'accepts explicit UTF8String Organization after DER extraction <Organization>' -TestCases @(
+        @{ Organization = 'Lenovo (Beijing) Limited' }
+        @{ Organization = '联想（北京）有限公司' }
+    ) {
+        param($Organization)
+        $certificate = [pscustomobject]@{
+            SubjectName = [pscustomobject]@{ RawData = New-TestRawX500OrganizationAttribute -ValueTag 0x0C -Organization $Organization }
+        }
+        Test-LenovoSignerOrganization $certificate | Should -BeTrue
+    }
+
+    It 'accepts explicit PrintableString Organization after DER extraction <Organization>' -TestCases @(
+        @{ Organization = 'LENOVO (BEIJING) LIMITED' }
+    ) {
+        param($Organization)
+        $certificate = [pscustomobject]@{
+            SubjectName = [pscustomobject]@{ RawData = New-TestRawX500OrganizationAttribute -ValueTag 0x13 -Organization $Organization }
+        }
+        Test-LenovoSignerOrganization $certificate | Should -BeTrue
+    }
+
+    It 'accepts explicit BMPString Organization after DER extraction <Organization>' -TestCases @(
+        @{ Organization = '联想（北京）有限公司' }
+    ) {
+        param($Organization)
+        $certificate = [pscustomobject]@{
+            SubjectName = [pscustomobject]@{ RawData = New-TestRawX500OrganizationAttribute -ValueTag 0x1E -Organization $Organization }
+        }
+        Test-LenovoSignerOrganization $certificate | Should -BeTrue
+    }
+
+    It 'rejects formatted subject text when encoded SubjectName evidence is absent' {
+        Test-LenovoSignerOrganization ([pscustomobject]@{
+            Subject = 'O=Lenovo (Beijing) Limited'
+        }) | Should -BeFalse
+    }
+
+    It 'rejects duplicate encoded Organization attributes' {
+        $certificate = New-TestSignerCertificate 'O=Lenovo (Beijing) Limited, O=Lenovo (Beijing) Limited'
+        Test-LenovoSignerOrganization $certificate | Should -BeFalse
+    }
+
+    It 'rejects malformed or unsupported encoded SubjectName DER <Label>' -TestCases @(
+        @{ Label='indefinite length'; Raw=[byte[]](0x30,0x80,0x00,0x00) }
+        @{ Label='truncated long length'; Raw=[byte[]](0x30,0x82,0x01) }
+        @{ Label='non-minimal long length'; Raw=[byte[]](0x30,0x81,0x01,0x00) }
+        @{ Label='unsupported Organization string type'; Raw=[byte[]](0x30,0x0C,0x31,0x0A,0x30,0x08,0x06,0x03,0x55,0x04,0x0A,0x16,0x01,0x41) }
+    ) {
+        param($Label, $Raw)
+        $certificate = [pscustomobject]@{
+            SubjectName = [pscustomobject]@{ RawData = $Raw }
+        }
+        Test-LenovoSignerOrganization $certificate | Should -BeFalse
+    }
+
+    It 'rejects oversized SubjectName raw bytes' {
+        $certificate = [pscustomobject]@{
+            SubjectName = [pscustomobject]@{ RawData = [byte[]]::new(16385) }
+        }
+        Test-LenovoSignerOrganization $certificate | Should -BeFalse
     }
 
     It 'rejects exceptions from boundary <Label>' -TestCases @(
@@ -312,7 +464,7 @@ Describe 'reviewed Lenovo official uninstaller launch-time validation' {
         if ($File -ceq 'post') {
             $calls=0; $File={ param($Path) $script:calls++; if($script:calls -eq 1){$snapshot}else{throw 'secret post snapshot'} }.GetNewClosure()
         } elseif ($null -eq $File) { $File = { param($Path) $snapshot }.GetNewClosure() }
-        if ($null -eq $Signature) { $Signature = { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='O=联想（北京）有限公司'}} } }
+        if ($null -eq $Signature) { $Signature = { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate 'O=联想（北京）有限公司')} } }
 
         $result = Test-ReviewedLenovoUninstaller -Action $action -RegistryReader $Registry -FileSnapshotReader $File -SignatureReader $Signature
 
@@ -327,7 +479,7 @@ Describe 'reviewed Lenovo official uninstaller handoff' {
         $script:handoffSnapshot = New-StableUninstallerSnapshot
         $script:handoffRegistry = { param($Paths) $script:handoffItem }
         $script:handoffFile = { param($Path) $script:handoffSnapshot }
-        $script:handoffSignature = { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=[pscustomobject]@{Subject='O=联想（北京）有限公司'}} }
+        $script:handoffSignature = { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate 'O=联想（北京）有限公司')} }
     }
 
     It 'opens only the validated canonical path after a third immediate stable snapshot' {
@@ -380,6 +532,68 @@ Describe 'reviewed Lenovo official uninstaller handoff' {
         $script:rejectedLauncherCalls | Should -Be 0
         $result.status | Should -BeExactly 'skipped'
         $result.result_reason | Should -BeExactly '启动前安全复核失败，请重新扫描后再试'
+        $result.failure_stage | Should -BeNullOrEmpty
+    }
+
+    It 'keeps launcher count zero across the complete security rejection matrix <Label>' -TestCases @(
+        @{ Label='malformed reviewed action'; Mode='action' }
+        @{ Label='registry binding drift'; Mode='registry_drift' }
+        @{ Label='invalid initial file snapshot'; Mode='snapshot_invalid' }
+        @{ Label='pre post file identity drift'; Mode='file_drift' }
+        @{ Label='invalid Authenticode status'; Mode='signature_invalid' }
+        @{ Label='missing signer certificate'; Mode='certificate_missing' }
+        @{ Label='wrong encoded signer organization'; Mode='organization_invalid' }
+        @{ Label='registry boundary exception'; Mode='registry_exception' }
+        @{ Label='file boundary exception'; Mode='file_exception' }
+        @{ Label='signature boundary exception'; Mode='signature_exception' }
+        @{ Label='final immediate snapshot mismatch'; Mode='final_mismatch' }
+        @{ Label='final immediate snapshot exception'; Mode='final_exception' }
+    ) {
+        param($Label, $Mode)
+        $action = New-ReviewedLenovoUninstallerAction
+        $script:matrixItem = New-LenovoUninstallRegistryItem
+        $script:matrixSnapshot = New-StableUninstallerSnapshot
+        $script:matrixFileCalls = 0
+        $registry = { param($View,$SubKeyPath,$SourcePath) $script:matrixItem }
+        $file = { param($Path) $script:matrixFileCalls++; $script:matrixSnapshot }
+        $signature = { param($Path) [pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate 'O=联想（北京）有限公司')} }
+
+        switch ($Mode) {
+            'action' { $action.uninstall_executable_path = @($action.uninstall_executable_path) }
+            'registry_drift' { $script:matrixItem.DisplayName = '联想电脑管家 5.2' }
+            'snapshot_invalid' { $script:matrixSnapshot.NumberOfLinks = [uint32]2 }
+            'file_drift' {
+                $changed = Copy-TestObject $script:matrixSnapshot
+                $changed.Sha256 = '1123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF'
+                $script:matrixQueue = [System.Collections.Queue]::new()
+                $script:matrixQueue.Enqueue($script:matrixSnapshot); $script:matrixQueue.Enqueue($changed)
+                $file = { param($Path) $script:matrixQueue.Dequeue() }
+            }
+            'signature_invalid' { $signature = { [pscustomobject]@{Status='NotSigned';SignerCertificate=$null} } }
+            'certificate_missing' { $signature = { [pscustomobject]@{Status='Valid';SignerCertificate=$null} } }
+            'organization_invalid' { $signature = { [pscustomobject]@{Status='Valid';SignerCertificate=(New-TestSignerCertificate 'O=Other Company')} } }
+            'registry_exception' { $registry = { throw 'registry secret' } }
+            'file_exception' { $file = { throw 'file secret' } }
+            'signature_exception' { $signature = { throw 'signature secret' } }
+            'final_mismatch' {
+                $changed = Copy-TestObject $script:matrixSnapshot
+                $changed.Length = [int64]4097
+                $script:matrixQueue = [System.Collections.Queue]::new()
+                $script:matrixQueue.Enqueue($script:matrixSnapshot); $script:matrixQueue.Enqueue($script:matrixSnapshot); $script:matrixQueue.Enqueue($changed)
+                $file = { param($Path) $script:matrixQueue.Dequeue() }
+            }
+            'final_exception' {
+                $file = { param($Path) $script:matrixFileCalls++; if ($script:matrixFileCalls -lt 3) { $script:matrixSnapshot } else { throw 'final secret' } }
+            }
+        }
+
+        $script:matrixLauncherCalls = 0
+        $result = Invoke-ReviewedLenovoUninstallerHandoff -Action $action -RegistryReader $registry `
+            -FileSnapshotReader $file -SignatureReader $signature `
+            -Launcher { param($Path) $script:matrixLauncherCalls++ }
+
+        $script:matrixLauncherCalls | Should -Be 0
+        $result.status | Should -BeExactly 'skipped'
         $result.failure_stage | Should -BeNullOrEmpty
     }
 

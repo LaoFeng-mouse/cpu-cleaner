@@ -294,6 +294,75 @@ function Test-LenovoOfficialUninstallRegistryPath {
     return $false
 }
 
+# 将已审核来源精确映射为显式注册表视图及该视图下的逻辑子键路径。
+function Resolve-LenovoOfficialUninstallExactRegistrySource {
+    param([Parameter(Mandatory=$true)][string]$RegistryPath)
+
+    $relativeRoot = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+    $specs = @(
+        [pscustomobject]@{
+            SourceRoot = $script:LenovoOfficialUninstallRegistryRoots[0]
+            View = [Microsoft.Win32.RegistryView]::Registry64
+        },
+        [pscustomobject]@{
+            SourceRoot = $script:LenovoOfficialUninstallRegistryRoots[1]
+            View = [Microsoft.Win32.RegistryView]::Registry32
+        }
+    )
+    foreach ($spec in $specs) {
+        $prefix = $spec.SourceRoot + '\'
+        if (-not $RegistryPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $subKeyName = $RegistryPath.Substring($prefix.Length)
+        if ($subKeyName.Length -eq 0 -or $subKeyName.IndexOf('\') -ge 0) { return $null }
+        return [pscustomobject][ordered]@{
+            View = $spec.View
+            SubKeyPath = $relativeRoot + '\' + $subKeyName
+            SourcePath = $spec.SourceRoot + '\' + $subKeyName
+        }
+    }
+    return $null
+}
+
+# 通过显式视图只打开已审核的一个卸载子键并读取绑定字段，不枚举卸载根。
+function Read-LenovoOfficialUninstallRegistryItemExact {
+    param(
+        [Parameter(Mandatory=$true)][Microsoft.Win32.RegistryView]$View,
+        [Parameter(Mandatory=$true)][string]$SubKeyPath,
+        [Parameter(Mandatory=$true)][string]$SourcePath,
+        [scriptblock]$OpenBaseKey
+    )
+
+    if ($null -eq $OpenBaseKey) {
+        $OpenBaseKey = {
+            param($RegistryView)
+            [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                [Microsoft.Win32.RegistryHive]::LocalMachine,
+                $RegistryView)
+        }
+    }
+    $valueOptions = [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+    $baseKey = $null
+    $exactKey = $null
+    try {
+        $baseKey = & $OpenBaseKey $View
+        if ($null -eq $baseKey) { throw 'Registry base key is unavailable.' }
+        $exactKey = $baseKey.OpenSubKey($SubKeyPath, $false)
+        if ($null -eq $exactKey) { return $null }
+        return [pscustomobject]@{
+            RegistryPath = $SourcePath
+            DisplayName = $exactKey.GetValue('DisplayName', $null, $valueOptions)
+            Publisher = $exactKey.GetValue('Publisher', $null, $valueOptions)
+            DisplayVersion = $exactKey.GetValue('DisplayVersion', $null, $valueOptions)
+            InstallLocation = $exactKey.GetValue('InstallLocation', $null, $valueOptions)
+            UninstallString = $exactKey.GetValue('UninstallString', $null, $valueOptions)
+        }
+    }
+    finally {
+        try { if ($null -ne $exactKey) { $exactKey.Dispose() } }
+        finally { if ($null -ne $baseKey) { $baseKey.Dispose() } }
+    }
+}
+
 # 从两个标准 HKLM 卸载视图中提取唯一、完整且自洽的联想官方卸载快照。
 function Get-LenovoOfficialUninstallEvidence {
     param([scriptblock]$RegistryReader)
@@ -530,56 +599,93 @@ function Get-StableLenovoUninstallerFileSnapshot {
     return [ShushuCleaner.LenovoUninstallerFileNativeV1]::Capture($Path)
 }
 
-# 按 X500 分隔与转义规则提取明确的 Organization/O 属性，拒绝借用 CN/OU 文本。
-function Get-X500OrganizationAttribute {
-    param([Parameter(Mandatory=$true)][string]$Subject)
+# 读取一个严格 DER TLV；拒绝不定长、非最短长度及越界数据。
+function Read-LenovoSignerDerElement {
+    param([byte[]]$Data, [int]$Offset, [int]$End)
 
-    $parts = [System.Collections.Generic.List[string]]::new()
-    $current = [System.Text.StringBuilder]::new()
-    $escaped = $false
-    $quoted = $false
-    foreach ($character in $Subject.ToCharArray()) {
-        if ($escaped) {
-            [void]$current.Append($character)
-            $escaped = $false
-            continue
-        }
-        if ($character -ceq '\') {
-            $escaped = $true
-            [void]$current.Append($character)
-            continue
-        }
-        if ($character -ceq '"') {
-            $quoted = -not $quoted
-            [void]$current.Append($character)
-            continue
-        }
-        if (-not $quoted -and ($character -ceq ',' -or $character -ceq ';' -or $character -ceq '+')) {
-            $parts.Add($current.ToString())
-            [void]$current.Clear()
-            continue
-        }
-        [void]$current.Append($character)
+    if ($null -eq $Data -or $Offset -lt 0 -or $End -gt $Data.Length -or $Offset + 2 -gt $End) {
+        throw 'Invalid DER element.'
     }
-    if ($escaped -or $quoted) { return @() }
-    $parts.Add($current.ToString())
-
-    $organizations = @(
-        foreach ($part in $parts) {
-            $separator = $part.IndexOf('=')
-            if ($separator -le 0) { continue }
-            $name = $part.Substring(0, $separator).Trim()
-            if (-not ($name.Equals('O', [StringComparison]::OrdinalIgnoreCase) -or
-                    $name.Equals('2.5.4.10', [StringComparison]::Ordinal))) { continue }
-            $value = $part.Substring($separator + 1).Trim()
-            if ($value.Length -ge 2 -and $value[0] -ceq '"' -and $value[$value.Length - 1] -ceq '"') {
-                $value = $value.Substring(1, $value.Length - 2)
-            }
-            $value = $value -replace '\\([,;+=<>#"\\])', '$1'
-            $value
+    $tag = [int]$Data[$Offset]
+    $cursor = $Offset + 1
+    $firstLength = [int]$Data[$cursor]
+    $cursor++
+    if (($firstLength -band 0x80) -eq 0) {
+        $length = $firstLength
+    }
+    else {
+        $lengthBytes = $firstLength -band 0x7F
+        if ($lengthBytes -eq 0 -or $lengthBytes -gt 4 -or $cursor + $lengthBytes -gt $End -or
+            $Data[$cursor] -eq 0) { throw 'Invalid DER length.' }
+        [uint64]$wideLength = 0
+        for ($i = 0; $i -lt $lengthBytes; $i++) {
+            $wideLength = ($wideLength -shl 8) -bor [uint64]$Data[$cursor + $i]
         }
-    )
-    return $organizations
+        if ($wideLength -lt 128 -or $wideLength -gt [int]::MaxValue) { throw 'Invalid DER length.' }
+        $length = [int]$wideLength
+        $cursor += $lengthBytes
+    }
+    if ($length -lt 0 -or $cursor + $length -gt $End) { throw 'Truncated DER element.' }
+    return [pscustomobject][ordered]@{
+        Tag = $tag
+        ContentOffset = $cursor
+        ContentLength = $length
+        NextOffset = $cursor + $length
+    }
+}
+
+# 从编码后的 X.500 RDNSequence 中提取唯一的 Organization OID 2.5.4.10。
+function Get-X500OrganizationAttributeFromRawData {
+    param([Parameter(Mandatory=$true)][byte[]]$RawData)
+
+    if ($RawData.Length -eq 0 -or $RawData.Length -gt 16384) { return @() }
+    try {
+        $outer = Read-LenovoSignerDerElement $RawData 0 $RawData.Length
+        if ($outer.Tag -ne 0x30 -or $outer.NextOffset -ne $RawData.Length) { return @() }
+        $organizations = [System.Collections.Generic.List[string]]::new()
+        $rdnOffset = $outer.ContentOffset
+        while ($rdnOffset -lt $outer.NextOffset) {
+            $set = Read-LenovoSignerDerElement $RawData $rdnOffset $outer.NextOffset
+            if ($set.Tag -ne 0x31) { return @() }
+            $attributeOffset = $set.ContentOffset
+            while ($attributeOffset -lt $set.NextOffset) {
+                $attribute = Read-LenovoSignerDerElement $RawData $attributeOffset $set.NextOffset
+                if ($attribute.Tag -ne 0x30) { return @() }
+                $oid = Read-LenovoSignerDerElement $RawData $attribute.ContentOffset $attribute.NextOffset
+                if ($oid.Tag -ne 0x06) { return @() }
+                $value = Read-LenovoSignerDerElement $RawData $oid.NextOffset $attribute.NextOffset
+                if ($value.NextOffset -ne $attribute.NextOffset) { return @() }
+                $isOrganization = ($oid.ContentLength -eq 3 -and
+                    $RawData[$oid.ContentOffset] -eq 0x55 -and
+                    $RawData[$oid.ContentOffset + 1] -eq 0x04 -and
+                    $RawData[$oid.ContentOffset + 2] -eq 0x0A)
+                if ($isOrganization) {
+                    $bytes = [byte[]]::new($value.ContentLength)
+                    [Array]::Copy($RawData, $value.ContentOffset, $bytes, 0, $value.ContentLength)
+                    switch ($value.Tag) {
+                        0x0C { $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes) }
+                        0x13 {
+                            foreach ($b in $bytes) { if ($b -lt 0x20 -or $b -gt 0x7E) { throw 'Invalid PrintableString.' } }
+                            $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+                        }
+                        0x1E {
+                            if (($bytes.Length % 2) -ne 0) { throw 'Invalid BMPString.' }
+                            $text = [System.Text.UnicodeEncoding]::new($true, $false, $true).GetString($bytes)
+                        }
+                        default { return @() }
+                    }
+                    $organizations.Add($text)
+                    if ($organizations.Count -gt 1) { return @() }
+                }
+                $attributeOffset = $attribute.NextOffset
+            }
+            if ($attributeOffset -ne $set.NextOffset) { return @() }
+            $rdnOffset = $set.NextOffset
+        }
+        if ($rdnOffset -ne $outer.NextOffset) { return @() }
+        return $organizations.ToArray()
+    }
+    catch { return @() }
 }
 
 # 只允许明确列出的联想北京签名组织名。
@@ -587,16 +693,20 @@ function Test-LenovoSignerOrganization {
     param([Parameter(Mandatory=$true)]$Certificate)
 
     try {
-        $subject = if ($Certificate -is [System.Security.Cryptography.X509Certificates.X509Certificate2]) {
-            $Certificate.SubjectName.Name
+        $rawData = $Certificate.SubjectName.RawData
+        if ($Certificate.PSObject.Properties.Name -cnotcontains 'SubjectName' -or
+            $null -eq $Certificate.SubjectName -or
+            $Certificate.SubjectName.PSObject.Properties.Name -cnotcontains 'RawData' -or
+            $null -eq $rawData) { return $false }
+        if ($rawData -isnot [byte[]]) {
+            if (($rawData -is [System.Collections.IEnumerable]) -and -not ($rawData -is [string])) {
+                try { $rawData = [byte[]]$rawData }
+                catch { return $false }
+            } else {
+                return $false
+            }
         }
-        elseif ($Certificate.PSObject.Properties.Name -ccontains 'Subject' -and $Certificate.Subject -is [string]) {
-            $Certificate.Subject
-        }
-        else { return $false }
-        if ($subject -isnot [string] -or $subject.Length -eq 0) { return $false }
-
-        $organizations = @(Get-X500OrganizationAttribute -Subject $subject)
+        $organizations = @(Get-X500OrganizationAttributeFromRawData -RawData $rawData)
         if ($organizations.Count -ne 1) { return $false }
         $organization = $organizations[0].Trim()
         if ($organization -ceq '联想（北京）有限公司') { return $true }
@@ -667,19 +777,16 @@ function Invoke-ReviewedLenovoUninstallerValidationCore {
             return & $skip 'reviewed_action_invalid'
         }
 
+        $exactSource = Resolve-LenovoOfficialUninstallExactRegistrySource -RegistryPath $Action.uninstall_registry_path
+        if ($null -eq $exactSource) { return & $skip 'registry_revalidation_failed' }
         if ($null -eq $RegistryReader) {
-            $RegistryReader = { param($Paths) $null = $Paths; Read-LenovoOfficialUninstallRegistryItems }
-        }
-        $registryItems = @(& $RegistryReader $script:LenovoOfficialUninstallRegistryQueryPaths)
-        $reviewedSourceItems = @(
-            foreach ($item in $registryItems) {
-                if ($null -ne $item -and $item.PSObject.Properties.Name -ccontains 'RegistryPath' -and
-                    $item.RegistryPath -is [string] -and
-                    $item.RegistryPath.Equals($Action.uninstall_registry_path, [StringComparison]::OrdinalIgnoreCase)) {
-                    $item
-                }
+            $RegistryReader = {
+                param($View, $SubKeyPath, $SourcePath)
+                Read-LenovoOfficialUninstallRegistryItemExact `
+                    -View $View -SubKeyPath $SubKeyPath -SourcePath $SourcePath
             }
-        )
+        }
+        $reviewedSourceItems = @(& $RegistryReader $exactSource.View $exactSource.SubKeyPath $exactSource.SourcePath)
         if ($reviewedSourceItems.Count -ne 1) { return & $skip 'registry_revalidation_failed' }
         $current = Get-LenovoOfficialUninstallEvidence -RegistryReader {
             param($Paths)
