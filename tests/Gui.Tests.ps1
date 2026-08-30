@@ -336,14 +336,14 @@ Describe 'GUI 壳 (无窗口)' {
         @{ Name='scanning'; Lang='zh'; Panel='ScanningPanel'; Stage=2; Title='正在看清现实'; Subtitle='只展示真实阶段，不伪造完成百分比。' }
         @{ Name='results'; Lang='zh'; Panel='ResultsPanel'; Stage=3; Title='扫描结论'; Subtitle='可处理项与观察项分开显示，目前尚未修改系统。' }
         @{ Name='review'; Lang='zh'; Panel='ReviewPanel'; Stage=3; Title='确认处理边界'; Subtitle='只有安全、已测试且窄匹配命中的项目可以选择。' }
-        @{ Name='executing'; Lang='zh'; Panel='ExecutingPanel'; Stage=3; Title='鼠鼠正在谨慎整理'; Subtitle='每项都会重新验证、备份并记录结果。' }
+        @{ Name='executing'; Lang='zh'; Panel='ExecutingPanel'; Stage=3; Title='鼠鼠正在谨慎整理'; Subtitle='每项都会重新验证；持久设置先备份，并记录结果。' }
         @{ Name='completed'; Lang='zh'; Panel='CompletedPanel'; Stage=4; Title='幻想落地'; Subtitle='结果按成功、失败和跳过逐项展示。' }
         @{ Name='error'; Lang='zh'; Panel='ErrorPanel'; Stage=1; Title='鼠鼠的幻想被打断了'; Subtitle='查看真实原因后可以安全重试。' }
         @{ Name='idle'; Lang='en'; Panel='IdlePanel'; Stage=1; Title='The fantasy begins'; Subtitle='Start with a read-only scan. No system settings will change.' }
         @{ Name='scanning'; Lang='en'; Panel='ScanningPanel'; Stage=2; Title='Looking at reality'; Subtitle='Showing real scan phases without a fabricated percentage.' }
         @{ Name='results'; Lang='en'; Panel='ResultsPanel'; Stage=3; Title='Scan result'; Subtitle='Safe actions and observations are separated. Nothing has changed yet.' }
         @{ Name='review'; Lang='en'; Panel='ReviewPanel'; Stage=3; Title='Review the safety boundary'; Subtitle='Only tested items produced by narrow matches can be selected.' }
-        @{ Name='executing'; Lang='en'; Panel='ExecutingPanel'; Stage=3; Title='Cleaning carefully'; Subtitle='Every item is revalidated, backed up, and recorded.' }
+        @{ Name='executing'; Lang='en'; Panel='ExecutingPanel'; Stage=3; Title='Cleaning carefully'; Subtitle='Every item is revalidated; persistent changes are backed up and results are recorded.' }
         @{ Name='completed'; Lang='en'; Panel='CompletedPanel'; Stage=4; Title='Fantasy delivered'; Subtitle='Success, failure, and skipped results are shown item by item.' }
         @{ Name='error'; Lang='en'; Panel='ErrorPanel'; Stage=1; Title='The fantasy was interrupted'; Subtitle='Read the real cause, then retry safely.' }
     ) {
@@ -1054,6 +1054,96 @@ Describe '勾选视图 (v1.5.5)' {
             }
         }
 
+        function New-GuiHRWSCCtrlPendingFixture {
+            param([switch]$Observation)
+            $safeReason = '受保护扫描没有提供完整服务进程身份，请重新扫描。'
+            $row = [pscustomobject]@{
+                id='lenovo-hrwscctrl'; vendor='Lenovo'; name_cn='联想安全中心组件 HRWSCCtrl'
+                hit_type='service'; action=$(if ($Observation) { 'investigate' } else { 'stop_service_runtime' })
+                status=$(if ($Observation) { '观察' } else { 'pending' }); detail='HRWSCCtrl'; reason_cn=$(if ($Observation) { $safeReason } else { '用户确认后停止 exact HRWSCCtrl 服务当前运行态' })
+                service_name='HRWSCCtrl'; matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+                execution_class=$(if ($Observation) { 'observation' } else { 'manual_impact' })
+                necessity=$(if ($Observation) { 'informational' } else { 'optional' }); default_selected=$false
+                requires_confirmation=$(if ($Observation) { $false } else { $true })
+                impact_cn=$(if ($Observation) { $safeReason } else { '停止 exact HRWSCCtrl 服务当前运行态；不修改启动方式；服务可能再次启动' })
+                cleanup_reason_cn=$(if ($Observation) { $safeReason } else { '不使用该功能时减少当前后台占用' })
+            }
+            if ($Observation) {
+                $row | Add-Member -NotePropertyName obs_reason -NotePropertyValue $safeReason
+            } else {
+                $row | Add-Member -NotePropertyName service_binary_path -NotePropertyValue 'C:\Program Files\Lenovo Security Center\wsctrl11.exe'
+                $row | Add-Member -NotePropertyName process_id -NotePropertyValue ([int]4321)
+                $row | Add-Member -NotePropertyName process_name -NotePropertyValue 'wsctrl11.exe'
+                $row | Add-Member -NotePropertyName process_path -NotePropertyValue 'C:\Program Files\Lenovo Security Center\wsctrl11.exe'
+                $row | Add-Member -NotePropertyName process_start_time_utc -NotePropertyValue '2026-08-24T01:02:03.0000000Z'
+            }
+            $actions = [object[]]@()
+            $observations = [object[]]@()
+            if ($Observation) { $observations = [object[]]@($row) } else { $actions = [object[]]@($row) }
+            return [pscustomobject]@{
+                pending_schema_version=[int64]3; generated='trusted inventory handoff'
+                actions=$actions; resolved=[object[]]@(); observations=$observations; suspicious=[object[]]@()
+            }
+        }
+
+        function New-GuiOfficialUninstallerPendingFixture {
+            $action = [pscustomobject][ordered]@{
+                id='lenovo-hrwscctrl'; vendor='Lenovo'; name_cn='联想安全中心组件 HRWSCCtrl'
+                hit_type='service'; action='open_official_uninstaller'; status='pending'; detail='HRWSCCtrl'; reason_cn='官方卸载 handoff'
+                service_name='HRWSCCtrl'; service_display_name='Lenovo Security Controller'
+                autostart_source=''; autostart_name=''; autostart_value=''; task_name=''; task_path=''
+                process_name=''; process_id=$null; process_path=''
+                matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+                execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                impact_cn='可能移除联想电脑管家的安全、防护、通知和相关后台组件'
+                cleanup_reason_cn='Windows 受保护服务阻止普通管理员实时停止；不需要联想电脑管家时可按需打开联想官方卸载程序'
+                launch_protected_status='complete'; launch_protected_level=[int]3; uninstall_evidence_status='complete'
+                uninstall_registry_path='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+                uninstall_display_name='联想电脑管家'; uninstall_publisher='联想（北京）有限公司'; uninstall_display_version='5.1.0'
+                uninstall_install_location='C:\Program Files\Lenovo\PCManager'
+                uninstall_string='"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+                uninstall_executable_path='C:\Program Files\Lenovo\PCManager\uninst.exe'
+            }
+            return [pscustomobject]@{
+                pending_schema_version=[int64]3; generated='trusted inventory handoff'
+                actions=[object[]]@($action); resolved=[object[]]@(); observations=[object[]]@(); suspicious=[object[]]@()
+            }
+        }
+
+        function Get-GuiOfficialUninstallerIdentityFieldCases {
+            return @(
+                @{ Field='id'; MutatedValue='lenovo-hrwscctrl-changed' }, @{ Field='hit_type'; MutatedValue='process' },
+                @{ Field='action'; MutatedValue='disable_service' }, @{ Field='service_name'; MutatedValue='HRWSCCtrlChanged' },
+                @{ Field='service_display_name'; MutatedValue='Lenovo Security Controller Changed' },
+                @{ Field='matched_pattern'; MutatedValue='HRWSCCtrlChanged' }, @{ Field='matched_type'; MutatedValue='contains' },
+                @{ Field='matched_field'; MutatedValue='service_display_name' }, @{ Field='launch_protected_status'; MutatedValue='incomplete' },
+                @{ Field='launch_protected_level'; MutatedValue=[int]2 }, @{ Field='uninstall_evidence_status'; MutatedValue='incomplete' },
+                @{ Field='uninstall_registry_path'; MutatedValue='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManagerChanged' },
+                @{ Field='uninstall_display_name'; MutatedValue='联想电脑管家 Changed' }, @{ Field='uninstall_publisher'; MutatedValue='Changed Publisher' },
+                @{ Field='uninstall_display_version'; MutatedValue='5.1.1' }, @{ Field='uninstall_install_location'; MutatedValue='C:\Program Files\Lenovo\Changed' },
+                @{ Field='uninstall_string'; MutatedValue='"C:\Program Files\Lenovo\PCManager\uninst.exe" /S' },
+                @{ Field='uninstall_executable_path'; MutatedValue='C:\Program Files\Lenovo\PCManager\changed.exe' }
+            )
+        }
+
+        function Copy-GuiOfficialIdentityTamper($Action, [string]$Field, [string]$Operation, $MutatedValue) {
+            $copy = $Action.PSObject.Copy()
+            switch ($Operation) {
+                'mutation' { $copy.$Field = $MutatedValue }
+                'deletion' { $copy.PSObject.Properties.Remove($Field) }
+                'case-renamed' {
+                    $value = $copy.$Field
+                    $copy.PSObject.Properties.Remove($Field)
+                    $copy | Add-Member -NotePropertyName $Field.ToUpperInvariant() -NotePropertyValue $value
+                }
+                'array-wrapped' {
+                    $value = $copy.$Field
+                    $copy.PSObject.Properties[$Field].Value = [object[]]@($value)
+                }
+            }
+            return $copy
+        }
+
         function New-GuiFourGroupPendingFixture {
             $pending = New-GuiReviewPendingFixture
             $manual = $pending.actions[0].PSObject.Copy()
@@ -1117,17 +1207,23 @@ Describe '勾选视图 (v1.5.5)' {
 
         function Set-GuiReviewedExecutionFixture {
             param([string]$ActionServiceName = 'ActionService')
-            Set-GuiState review -Force
             $pending = New-GuiReviewPendingFixture -ActionServiceName $ActionServiceName
-            $script:ReviewedPendingSnapshot = $pending
+            return Set-GuiReviewedPendingFixture -Pending $pending
+        }
+
+        function Set-GuiReviewedPendingFixture {
+            param([Parameter(Mandatory=$true)]$Pending)
+            Set-GuiState review -Force
+            $script:ReviewedPendingSnapshot = $Pending
             $keys = [System.Collections.Generic.List[string]]::new()
-            foreach ($key in @(Get-GuiValidatedActionIdentityKeys -Pending $pending)) { $keys.Add($key) }
+            foreach ($key in @(Get-GuiValidatedActionIdentityKeys -Pending $Pending)) { $keys.Add($key) }
             $script:ReviewedActionIdentityKeys = $keys.AsReadOnly()
             $list = $script:Win.FindName('PendingList')
             $list.ItemsSource = $null
             $list.Items.Clear()
-            foreach ($item in @(Get-PendingViewItems -Pending $pending)) { [void]$list.Items.Add($item) }
-            return [pscustomobject]@{ Pending=$pending; List=$list }
+            foreach ($item in @(Get-PendingViewItems -Pending $Pending)) { [void]$list.Items.Add($item) }
+            Update-GuiExecuteAvailability -List $list
+            return [pscustomobject]@{ Pending=$Pending; List=$list }
         }
 
         function Set-GuiReviewedImpactExecutionFixture {
@@ -1174,12 +1270,28 @@ Describe '勾选视图 (v1.5.5)' {
             param([Parameter(Mandatory=$true)][string]$Path)
             $pending = Read-GuiPendingFile -Path $Path
             $script:ExecutionActions = @($pending.actions)
-            $pairs = [System.Collections.Generic.List[System.Tuple[string,string]]]::new()
+            $records = [System.Collections.Generic.List[object]]::new()
             foreach ($action in @($pending.actions)) {
-                $pairs.Add([System.Tuple[string,string]]::new((Get-PendingIdentityKey $action), [string]$action.status))
+                $status = [string]$action.status
+                $reason = if ($action.PSObject.Properties['result_reason']) { [string]$action.result_reason } else { '测试终态结果' }
+                $stage = if ($status -ceq 'failed') { 'mutation' } else { '' }
+                $values = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+                $values.Add('IdentityKey', (Get-PendingIdentityKey $action))
+                $values.Add('Status', $status)
+                $values.Add('ResultReason', $reason)
+                $values.Add('FailureStage', $stage)
+                $records.Add([System.Collections.ObjectModel.ReadOnlyDictionary[string,string]]::new($values))
             }
-            $result = [pscustomobject]@{ Items=$pairs.AsReadOnly() }
+            $result = [pscustomobject]@{ Items=$records.AsReadOnly() }
             Merge-PendingStatus $result
+        }
+
+        function Set-GuiTestTerminalMetadata {
+            param([Parameter(Mandatory=$true)]$Action)
+            $Action | Add-Member -NotePropertyName result_reason -NotePropertyValue '测试终态结果' -Force
+            $stage = if ([string]$Action.status -ceq 'failed') { 'mutation' } else { '' }
+            $Action | Add-Member -NotePropertyName failure_stage -NotePropertyValue $stage -Force
+            return $Action
         }
     }
 
@@ -1518,7 +1630,7 @@ Describe '勾选视图 (v1.5.5)' {
         $resolvedView.CurrentStateLabel | Should -Be '当前状态：disabled'
         $observation.CanExecute | Should -BeFalse
         $observation.IsChecked | Should -BeFalse
-        $manualView.NecessityLabel | Should -Match 'optional'
+        $manualView.NecessityLabel | Should -BeExactly '必要性：按需处理'
         $manualView.ImpactText | Should -Match '可能影响 OEM 安全状态'
         $manualView.CleanupReasonText | Should -Match '不使用该功能时可减少后台'
 
@@ -2048,6 +2160,145 @@ Describe '勾选视图 (v1.5.5)' {
         $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
     }
 
+    It 'HRWSCCtrl review row is initially optional and enables execution through the real checkbox route' {
+        $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture)
+        $row = @($fixture.List.Items)[0]
+
+        $row.CanExecute | Should -BeTrue
+        $row.IsChecked | Should -BeFalse
+        $row.NeedsConfirmation | Should -BeTrue
+        $row.NecessityLabel | Should -BeExactly '必要性：按需处理'
+        $row.action_label | Should -BeExactly '停止服务当前运行态'
+        $row.restorable_label | Should -BeExactly '不改启动方式（无恢复包）'
+        $row.ImpactText | Should -BeExactly '影响：停止 exact HRWSCCtrl 服务当前运行态；不修改启动方式；服务可能再次启动'
+        $row.CleanupReasonText | Should -BeExactly '清理原因：不使用该功能时减少当前后台占用'
+        $row.AutomationName | Should -Match 'HRWSCCtrl'
+        $row._raw.service_name | Should -BeExactly 'HRWSCCtrl'
+        (Get-GuiExecutionTargetLabel -Item $row._raw) | Should -BeExactly 'HRWSCCtrl（扫描 PID 4321）'
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+
+        $row.IsChecked = $true
+        $fixture.List.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))
+
+        $row.IsChecked | Should -BeTrue
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeTrue
+    }
+
+    It 'official-uninstaller reviewed allowlist subset digest and selection preserve the exact unchecked handoff' {
+        $pending = New-GuiOfficialUninstallerPendingFixture
+        $fixture = Set-GuiReviewedPendingFixture -Pending $pending
+        $row = $fixture.List.Items[0]
+        $expected = $pending.actions[0]
+        $boundFields = @(
+            'launch_protected_status','launch_protected_level','uninstall_evidence_status','uninstall_registry_path',
+            'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
+            'uninstall_string','uninstall_executable_path'
+        )
+
+        $row.CanExecute | Should -BeTrue
+        $row.NeedsConfirmation | Should -BeTrue
+        $row.IsChecked | Should -BeFalse
+        $script:ReviewedActionIdentityKeys.Contains((Get-PendingIdentityKey $expected)) | Should -BeTrue
+        Set-AllChecked $fixture.List $true
+        $row.IsChecked | Should -BeFalse
+
+        $row.IsChecked = $true
+        $resolved = @(Resolve-GuiReviewedActions -List $fixture.List)
+        $resolved.Count | Should -Be 1
+        [object]::ReferenceEquals($resolved[0]._raw, $expected) | Should -BeTrue
+        $subset = New-PendingSubsetPayload -Checked $resolved -SourcePending $pending
+        Get-PendingIdentityKey $subset.actions[0] | Should -BeExactly (Get-PendingIdentityKey $expected)
+        Get-ManualImpactDigest @($subset.actions[0]) | Should -BeExactly (Get-ManualImpactDigest @($expected))
+        foreach ($field in $boundFields) {
+            $subset.actions[0].$field | Should -BeExactly $expected.$field -Because "$field must survive reviewed subset copying"
+        }
+        $subset.actions[0].PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+    }
+
+    It 'official-uninstaller malformed evidence or internal marker cannot enter the reviewed allowlist' -TestCases @(
+        @{ Label='malformed'; Mutate={ param($a) $a.uninstall_string='"C:\Program Files\Lenovo\PCManager\uninst.exe" /S' } }
+        @{ Label='marker'; Mutate={ param($a) $a | Add-Member -NotePropertyName ProcessIdentitySource -NotePropertyValue 'trusted_inventory_v3' } }
+    ) {
+        param($Label, $Mutate)
+        $pending = New-GuiOfficialUninstallerPendingFixture
+        & $Mutate $pending.actions[0]
+
+        { Assert-GuiPendingPresentationShape -Pending $pending } | Should -Throw -Because $Label
+        { Get-GuiValidatedActionIdentityKeys -Pending $pending } | Should -Throw -Because $Label
+    }
+
+    It 'official-uninstaller reviewed selection rejects every identity-field tamper and exact duplicates' {
+        $pending = New-GuiOfficialUninstallerPendingFixture
+        $fixture = Set-GuiReviewedPendingFixture -Pending $pending
+        $reviewed = $pending.actions[0]
+        $reviewedKey = Get-PendingIdentityKey $reviewed
+
+        foreach ($case in Get-GuiOfficialUninstallerIdentityFieldCases) {
+            foreach ($operation in @('mutation','deletion','case-renamed','array-wrapped')) {
+                $tampered = Copy-GuiOfficialIdentityTamper $reviewed $case.Field $operation $case.MutatedValue
+                $selected = [pscustomobject]@{
+                    IsChecked=$true; _raw=$tampered; reviewed_identity_key=$reviewedKey
+                }
+                $list = [pscustomobject]@{ Items=@($selected) }
+                { Resolve-GuiReviewedActions -List $list } | Should -Throw -Because "$($case.Field) $operation cannot select or reach subset creation"
+            }
+        }
+
+        $duplicatePending = New-GuiOfficialUninstallerPendingFixture
+        $duplicatePending.actions = @($duplicatePending.actions[0], $duplicatePending.actions[0].PSObject.Copy())
+        { Get-GuiValidatedActionIdentityKeys -Pending $duplicatePending } | Should -Throw '*duplicate action identity*'
+    }
+
+    It 'uses the core identity key for the manual-impact confirmation digest' {
+        $source = Get-Content (Join-Path $script:GuiRoot 'gui-cleaner.ps1') -Raw -Encoding UTF8
+        $source | Should -Not -Match 'function\s+Get-PendingIdentityKey'
+
+        $pending = New-GuiHRWSCCtrlPendingFixture
+        $key = Get-PendingIdentityKey $pending.actions[0]
+        $key | Should -Match '"service_binary_path":"C:\\\\Program Files\\\\Lenovo Security Center\\\\wsctrl11\.exe"'
+        $key | Should -Match '"process_start_time_utc":"2026-08-24T01:02:03\.0000000Z"'
+    }
+
+    It 'HRWSCCtrl identity fallback is a nonselectable observation with the exact rescan reason' {
+        $safeReason = '受保护扫描没有提供完整服务进程身份，请重新扫描。'
+        $repositoryDiagnostics = Join-Path $script:GuiRoot 'diagnostics'
+        $repositoryDiagnosticsExistedBefore = Test-Path -LiteralPath $repositoryDiagnostics
+        $diagnosticsBefore = if ($repositoryDiagnosticsExistedBefore) {
+            @(Get-ChildItem -LiteralPath $repositoryDiagnostics -File |
+                Where-Object { $_.Name -match '^execution_(error|result)_' } |
+                ForEach-Object { $_.FullName } |
+                Sort-Object)
+        } else { @() }
+        $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture -Observation)
+        $row = @($fixture.List.Items)[0]
+
+        $row.CanExecute | Should -BeFalse
+        $row.IsChecked | Should -BeFalse
+        $row.NeedsConfirmation | Should -BeFalse
+        $row._raw.obs_reason | Should -BeExactly $safeReason
+        $row.ImpactText | Should -BeExactly ('影响：' + $safeReason)
+        $row.CleanupReasonText | Should -BeExactly ('清理原因：' + $safeReason)
+        ($row | ConvertTo-Json -Depth 8) | Should -Not -Match '成功|电脑.*干净|clean computer|success'
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
+
+        $row.IsChecked = $true
+        $row.CanExecute = $true
+        Mock Start-Process { throw 'observation must not launch administrator clean' }
+        Mock Save-GuiExecutionErrorDiagnostic { return 'D-0123456789ABCDEF' }
+        Start-GuiExecution -List $fixture.List | Should -BeFalse
+        Assert-MockCalled Start-Process -Times 0 -Exactly
+        Assert-MockCalled Save-GuiExecutionErrorDiagnostic -Times 1 -Exactly
+        $repositoryDiagnosticsExistedAfter = Test-Path -LiteralPath $repositoryDiagnostics
+        $diagnosticsAfter = if ($repositoryDiagnosticsExistedAfter) {
+            @(Get-ChildItem -LiteralPath $repositoryDiagnostics -File |
+                Where-Object { $_.Name -match '^execution_(error|result)_' } |
+                ForEach-Object { $_.FullName } |
+                Sort-Object)
+        } else { @() }
+        $repositoryDiagnosticsExistedAfter | Should -Be $repositoryDiagnosticsExistedBefore
+        ($diagnosticsAfter -join "`n") | Should -BeExactly ($diagnosticsBefore -join "`n")
+    }
+
     It 'Get-CleanResultSummary 支持自定义路径 (-Path)' {
         $tmpRoot = Join-Path $env:TEMP ("gui_sum2_" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmpRoot -Force | Out-Null
@@ -2400,7 +2651,10 @@ Describe '勾选视图 (v1.5.5)' {
 
             Assert-MockCalled Start-Process -Times 0 -Exactly
             @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
-            $script:Win.FindName('ErrorDetailText').Text | Should -Match 'scan'
+            $detail = $script:Win.FindName('ErrorDetailText').Text
+            $detail | Should -Match 'GUI-EXEC-START-FAILED'
+            $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+            $detail | Should -Not -Match 'pending review shape|scan|diagnostics|shushu_pending'
         } finally {
             $script:Root = $oldRoot
             $env:TEMP = $oldTemp
@@ -2419,7 +2673,7 @@ Describe '勾选视图 (v1.5.5)' {
         try {
             [System.IO.File]::WriteAllText($sentinel, 'keep', [System.Text.UTF8Encoding]::new($false))
             $fixture = Set-GuiReviewedExecutionFixture
-            Mock Start-Process { throw 'simulated UAC failure' }
+            Mock Start-Process { throw 'C:\internal\x token=secret ScriptStackTrace' }
 
             Start-GuiExecution -List $fixture.List | Should -BeFalse
 
@@ -2428,6 +2682,10 @@ Describe '勾选视图 (v1.5.5)' {
             @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json' | Where-Object { $_.FullName -ne $sentinel }).Count | Should -Be 0
             $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未授权'
             $script:Win.FindName('ErrorMutationText').Text | Should -Match '未开始处理'
+            $detail = $script:Win.FindName('ErrorDetailText').Text
+            $detail | Should -Match 'GUI-EXEC-START-FAILED'
+            $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+            $detail | Should -Not -Match 'C:\\internal|token=secret|ScriptStackTrace|diagnostics|shushu_pending'
         } finally {
             $script:Root = $oldRoot
             $env:TEMP = $oldTemp
@@ -2473,8 +2731,8 @@ Describe '勾选视图 (v1.5.5)' {
     }
 
     It '管理员进程启动后 timer <FailurePoint> 失败立即安全脱离且保留进程和 subset' -TestCases @(
-        @{ FailurePoint='construct'; FailureMessage='injected timer construction failure' }
-        @{ FailurePoint='start'; FailureMessage='injected timer start failure' }
+        @{ FailurePoint='construct'; FailureMessage='C:\internal\x token=secret ScriptStackTrace construct' }
+        @{ FailurePoint='start'; FailureMessage='C:\internal\x token=secret ScriptStackTrace start' }
     ) {
         param($FailurePoint, $FailureMessage)
         $oldTemp = $env:TEMP
@@ -2490,7 +2748,7 @@ Describe '勾选视图 (v1.5.5)' {
                 $timer = [pscustomobject]@{ Stopped=$false; Started=$false; TickHandler=$null; Interval=$null }
                 $timer | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.Stopped = $true }
                 $timer | Add-Member -MemberType ScriptMethod -Name Add_Tick -Value { param($handler); $this.TickHandler = $handler }
-                $timer | Add-Member -MemberType ScriptMethod -Name Start -Value { throw 'injected timer start failure' }
+                $timer | Add-Member -MemberType ScriptMethod -Name Start -Value { throw 'C:\internal\x token=secret ScriptStackTrace start' }
                 return $timer
             } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
 
@@ -2516,8 +2774,10 @@ Describe '勾选视图 (v1.5.5)' {
             $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未知'
             $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
             $script:Win.FindName('ErrorMutationText').Text | Should -Not -Match '未开始'
-            $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($FailureMessage))
-            $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($path))
+            $detail = $script:Win.FindName('ErrorDetailText').Text
+            $detail | Should -Match 'GUI-EXEC-STATUS-UNKNOWN'
+            $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+            $detail | Should -Not -Match 'C:\\internal|token=secret|ScriptStackTrace|diagnostics|shushu_pending'
         } finally {
             if ($script:ExecutionTempPath -and (Test-Path -LiteralPath $script:ExecutionTempPath)) { Remove-Item -LiteralPath $script:ExecutionTempPath -Force }
             $script:ExecutionProcess = $null
@@ -2720,6 +2980,217 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
+    It 'HRWSCCtrl high-impact confirmation rejects <Label> without subset or administrator launch' -TestCases @(
+        @{ Label='cancel'; Response=$null }
+        @{ Label='Boolean false'; Response=$false }
+        @{ Label='string true'; Response='true' }
+    ) {
+        param($Label, $Response)
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('hrwscctrl-no-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture)
+            $fixture.List.Items[0].IsChecked = $true
+            Mock Confirm-GuiImpactActions { return $Response }
+            Mock Start-Process { throw 'administrator clean must not start' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeFalse
+
+            Assert-MockCalled Confirm-GuiImpactActions -Times 1 -Exactly
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It 'HRWSCCtrl Boolean confirmation launches only its reviewed subset with matcher and identity provenance' {
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('hrwscctrl-yes-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture)
+            $fixture.Pending.PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+            $fixture.Pending.actions[0].PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+            $fixture.List.Items[0].IsChecked = $true
+            Mock Confirm-GuiImpactActions { return $true }
+            Mock Start-Process { return [pscustomobject]@{ HasExited=$false; ExitCode=0 } }
+            Mock New-Object { return (New-ExecutionFakeTimer) } -ParameterFilter { $TypeName -eq 'System.Windows.Threading.DispatcherTimer' }
+
+            Start-GuiExecution -List $fixture.List | Should -BeTrue
+
+            Assert-MockCalled Confirm-GuiImpactActions -Times 1 -Exactly
+            Assert-MockCalled Start-Process -Times 1 -Exactly
+            $json = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8
+            $payload = $json | ConvertFrom-Json
+            @($payload.actions).Count | Should -Be 1
+            $action = $payload.actions[0]
+            $action.id | Should -BeExactly 'lenovo-hrwscctrl'
+            $action.service_name | Should -BeExactly 'HRWSCCtrl'
+            $action.matched_pattern | Should -BeExactly 'HRWSCCtrl'
+            $action.matched_type | Should -BeExactly 'exact'
+            $action.matched_field | Should -BeExactly 'service_name'
+            $action.service_binary_path | Should -BeExactly 'C:\Program Files\Lenovo Security Center\wsctrl11.exe'
+            $action.process_id | Should -Be 4321
+            $action.process_name | Should -BeExactly 'wsctrl11.exe'
+            $action.process_path | Should -BeExactly 'C:\Program Files\Lenovo Security Center\wsctrl11.exe'
+            $json | Should -Match '"process_start_time_utc"\s*:\s*"2026-08-24T01:02:03\.0000000Z"'
+            $action.PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+            $json | Should -Not -Match 'ProcessIdentitySource|trusted_inventory_v2'
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It 'rejects internal marker property spelling <Label> before subset creation or administrator launch' -TestCases @(
+        @{ Label='canonical'; PropertyName='ProcessIdentitySource' }
+        @{ Label='lower case'; PropertyName='processidentitysource' }
+        @{ Label='upper case'; PropertyName='PROCESSIDENTITYSOURCE' }
+        @{ Label='mixed case'; PropertyName='pRoCeSsIdEnTiTySoUrCe' }
+    ) {
+        param($Label, $PropertyName)
+        $oldTemp = $env:TEMP
+        $tempRoot = Join-Path $TestDrive ('hrwscctrl-marker-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $env:TEMP = $tempRoot
+        try {
+            $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture)
+            $fixture.Pending.actions[0] | Add-Member -NotePropertyName $PropertyName -NotePropertyValue 'trusted_inventory_v2'
+            $fixture.List.Items[0].IsChecked = $true
+            $script:CapturedMarkerSubsetJson = $null
+            Mock Confirm-GuiImpactActions { return $true }
+            Mock New-PendingSubsetPayload { throw 'subset creation must not be reached' }
+            Mock Save-GuiExecutionErrorDiagnostic { return 'D-0123456789ABCDEF' }
+            Mock Start-Process {
+                $script:CapturedMarkerSubsetJson = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8
+                throw 'internal marker reached administrator launch'
+            }
+
+            Start-GuiExecution -List $fixture.List | Should -BeFalse
+
+            Assert-MockCalled New-PendingSubsetPayload -Times 0 -Exactly
+            Assert-MockCalled Start-Process -Times 0 -Exactly
+            Assert-MockCalled Save-GuiExecutionErrorDiagnostic -Times 1 -Exactly
+            $script:CapturedMarkerSubsetJson | Should -BeNullOrEmpty
+            @(Get-ChildItem -LiteralPath $tempRoot -Filter 'shushu_pending_*.json').Count | Should -Be 0
+            $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未授权'
+            $script:Win.FindName('ErrorMutationText').Text | Should -Match '未开始处理'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Not -Match 'ProcessIdentitySource|trusted_inventory_v2'
+        } finally {
+            $env:TEMP = $oldTemp
+        }
+    }
+
+    It 'rejects JSON marker property spelling <Label> at the normal-user review boundary' -TestCases @(
+        @{ Label='canonical'; JsonName='ProcessIdentitySource' }
+        @{ Label='lower case'; JsonName='processidentitysource' }
+        @{ Label='upper case'; JsonName='PROCESSIDENTITYSOURCE' }
+        @{ Label='mixed case'; JsonName='pRoCeSsIdEnTiTySoUrCe' }
+        @{ Label='canonical Unicode escaped'; JsonName='\u0050rocessIdentitySource' }
+        @{ Label='lower Unicode escaped'; JsonName='processidentitysourc\u0065' }
+        @{ Label='upper Unicode escaped'; JsonName='PROCESSIDENTITYSOURC\u0045' }
+        @{ Label='mixed Unicode escaped'; JsonName='pRoCeSsIdEnTiTySoUrC\u0065' }
+    ) {
+        param($Label, $JsonName)
+        $pending = New-GuiHRWSCCtrlPendingFixture
+        $pending.actions[0] | Add-Member -NotePropertyName ProcessIdentitySource -NotePropertyValue 'trusted_inventory_v2'
+        $json = ConvertTo-GuiPendingJson -InputObject $pending
+        $json = $json.Replace('"ProcessIdentitySource"', ('"' + $JsonName + '"'))
+        $path = Join-Path $TestDrive ('review-marker-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))
+
+        { Read-GuiPendingFile -Path $path } | Should -Throw '*internal inventory marker*'
+    }
+
+    It 'never copies internal marker spelling <PropertyName> into a selected action' -TestCases @(
+        @{ PropertyName='ProcessIdentitySource' }
+        @{ PropertyName='processidentitysource' }
+        @{ PropertyName='PROCESSIDENTITYSOURCE' }
+        @{ PropertyName='pRoCeSsIdEnTiTySoUrCe' }
+    ) {
+        param($PropertyName)
+        $action = (New-GuiHRWSCCtrlPendingFixture).actions[0]
+        $action | Add-Member -NotePropertyName $PropertyName -NotePropertyValue 'trusted_inventory_v2'
+
+        { Copy-PendingActionForSubset $action } | Should -Throw '*internal inventory marker*'
+    }
+
+    It 'truthfully warns that stop_service_runtime stops the exact service runtime without changing startup type' {
+        $oldLang = $script:Lang
+        $script:Lang = 'zh'
+        $script:CapturedImpactText = $null
+        try {
+            $result = Confirm-GuiImpactActions -Actions @((New-GuiHRWSCCtrlPendingFixture).actions[0]) -ShowDialog {
+                param($Text, $Title)
+                $script:CapturedImpactText = $Text
+                return 'No'
+            }
+
+            $result | Should -BeFalse
+            $script:CapturedImpactText | Should -Match '必要性：按需处理'
+            $script:CapturedImpactText | Should -Not -Match '必要性：optional'
+            $script:CapturedImpactText | Should -Match '停止 exact 服务的当前运行态'
+            $script:CapturedImpactText | Should -Match '不修改启动方式'
+            $script:CapturedImpactText | Should -Match '不创建备份或恢复包'
+            $script:CapturedImpactText | Should -Match '其他组件可能再次启动该服务'
+            $script:CapturedImpactText | Should -Not -Match '每个动作.*可通过恢复撤销'
+        } finally {
+            $script:Lang = $oldLang
+        }
+    }
+
+    It 'retains backup and Restore wording for persistent recoverable actions' {
+        $oldLang = $script:Lang
+        $script:Lang = 'zh'
+        $persistent = (New-GuiReviewPendingFixture).actions[0]
+        $persistent.execution_class = 'manual_impact'
+        $persistent.requires_confirmation = $true
+        $script:CapturedImpactText = $null
+        try {
+            $result = Confirm-GuiImpactActions -Actions @($persistent) -ShowDialog {
+                param($Text, $Title)
+                $script:CapturedImpactText = $Text
+                return 'No'
+            }
+
+            $result | Should -BeFalse
+            $script:CapturedImpactText | Should -Match '先创建备份'
+            $script:CapturedImpactText | Should -Match '可通过.*恢复.*撤销'
+            $script:CapturedImpactText | Should -Not -Match '不创建备份或恢复包|服务可能.*重新启动'
+        } finally {
+            $script:Lang = $oldLang
+        }
+    }
+
+    It 'renders both recoverable and exact-service-runtime boundaries for mixed selections' {
+        $oldLang = $script:Lang
+        $script:Lang = 'zh'
+        $persistent = (New-GuiReviewPendingFixture).actions[0]
+        $persistent.execution_class = 'manual_impact'
+        $persistent.requires_confirmation = $true
+        $ephemeral = (New-GuiHRWSCCtrlPendingFixture).actions[0]
+        $script:CapturedImpactText = $null
+        try {
+            $result = Confirm-GuiImpactActions -Actions @($persistent, $ephemeral) -ShowDialog {
+                param($Text, $Title)
+                $script:CapturedImpactText = $Text
+                return 'No'
+            }
+
+            $result | Should -BeFalse
+            $script:CapturedImpactText | Should -Match '先创建备份'
+            $script:CapturedImpactText | Should -Match '可通过.*恢复.*撤销'
+            $script:CapturedImpactText | Should -Match '不创建备份或恢复包'
+            $script:CapturedImpactText | Should -Match '其他组件可能再次启动该服务'
+            $script:CapturedImpactText | Should -Not -Match '每个动作.*可通过恢复撤销'
+        } finally {
+            $script:Lang = $oldLang
+        }
+    }
+
     It '确认高影响 action 后仅将 manual digest 与 subset SHA-256 传给管理员 clean' {
         $oldTemp = $env:TEMP
         $tempRoot = Join-Path $TestDrive ('impact-yes-' + [guid]::NewGuid().ToString('N'))
@@ -2772,7 +3243,7 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It 'mixed selection confirms only manual identities while launching the complete selected subset' {
+    It 'mixed selection confirms every selected boundary while digesting only manual identities' {
         $oldTemp = $env:TEMP
         $tempRoot = Join-Path $TestDrive ('impact-mixed-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
@@ -2786,8 +3257,8 @@ Describe '勾选视图 (v1.5.5)' {
 
             Start-GuiExecution -List $fixture.List | Should -BeTrue
 
-            @($script:ConfirmedImpactActions).Count | Should -Be 1
-            $script:ConfirmedImpactActions[0].service_name | Should -BeExactly 'ManualOne'
+            @($script:ConfirmedImpactActions).Count | Should -Be 2
+            @($script:ConfirmedImpactActions | ForEach-Object service_name) | Should -Be @('ActionService','ManualOne')
             $payload = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8 | ConvertFrom-Json
             @($payload.actions).Count | Should -Be 2
             @($payload.actions | ForEach-Object service_name) | Should -Be @('ActionService','ManualOne')
@@ -2870,17 +3341,27 @@ Describe '勾选视图 (v1.5.5)' {
     }
 
     It '篡改 observation 的 IsChecked 和 CanExecute 不能进入异步执行' {
+        $repositoryDiagnostics = Join-Path $script:GuiRoot 'diagnostics'
+        $diagnosticsBefore = if (Test-Path -LiteralPath $repositoryDiagnostics) {
+            @(Get-ChildItem -LiteralPath $repositoryDiagnostics -File | ForEach-Object { $_.FullName } | Sort-Object)
+        } else { @() }
         $fixture = Set-GuiReviewedExecutionFixture
         foreach ($item in @($fixture.List.Items)) { $item.IsChecked = $false }
         $observation = @($fixture.List.Items | Where-Object { -not $_.CanExecute })[0]
         $observation.IsChecked = $true
         $observation.CanExecute = $true
         Mock Start-Process { throw 'Start-Process must not run' }
+        Mock Save-GuiExecutionErrorDiagnostic { return 'D-0123456789ABCDEF' }
 
         Start-GuiExecution -List $fixture.List | Should -BeFalse
 
         Assert-MockCalled Start-Process -Times 0 -Exactly
+        Assert-MockCalled Save-GuiExecutionErrorDiagnostic -Times 1 -Exactly
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '未开始处理'
+        $diagnosticsAfter = if (Test-Path -LiteralPath $repositoryDiagnostics) {
+            @(Get-ChildItem -LiteralPath $repositoryDiagnostics -File | ForEach-Object { $_.FullName } | Sort-Object)
+        } else { @() }
+        ($diagnosticsAfter -join "`n") | Should -BeExactly ($diagnosticsBefore -join "`n")
     }
 
     It '大小写不同的 reviewed identity 以 Ordinal 精确解析原始 action' {
@@ -2938,7 +3419,7 @@ Describe '勾选视图 (v1.5.5)' {
         }
     }
 
-    It '运行中轮询从 subset 刷新逐项真实状态且暂时读失败保留旧显示' {
+    It '运行中轮询只显示可信快照的固定 executing 文案且不读取结果终态文案' {
         $oldTemp = $env:TEMP
         $tempRoot = Join-Path $TestDrive ('running-refresh-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
@@ -2952,18 +3433,22 @@ Describe '勾选视图 (v1.5.5)' {
 
             $payload = Get-Content -LiteralPath $script:ExecutionTempPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $payload.actions[0].status = 'failed'
+            $payload.actions[0] | Add-Member -NotePropertyName result_reason -NotePropertyValue 'UNTRUSTED_RUNNING C:\internal\x token=secret ScriptStackTrace'
+            $payload.actions[0] | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'mutation'
             [System.IO.File]::WriteAllText($script:ExecutionTempPath, (ConvertTo-GuiPendingJson $payload), [System.Text.UTF8Encoding]::new($false))
 
             Complete-ExecutionPoll | Should -BeFalse
             $rows = @($script:Win.FindName('ExecutionList').ItemsSource)
             $rows.Count | Should -Be 1
-            $rows[0].State | Should -Be 'failed'
-            $rows[0].StateLabel | Should -Be '失败'
+            $rows[0].State | Should -Be 'running'
+            $rows[0].StateLabel | Should -Be '执行中'
+            $rows[0].Reason | Should -BeExactly '正在等待管理员处理结果。'
+            (($rows | ConvertTo-Json -Depth 20)) | Should -Not -Match 'UNTRUSTED_RUNNING|C:\\internal|token=secret|ScriptStackTrace'
             $script:GuiState | Should -Be 'executing'
 
             [System.IO.File]::WriteAllText($script:ExecutionTempPath, '{temporarily incomplete', [System.Text.UTF8Encoding]::new($false))
             Complete-ExecutionPoll | Should -BeFalse
-            @($script:Win.FindName('ExecutionList').ItemsSource)[0].State | Should -Be 'failed'
+            @($script:Win.FindName('ExecutionList').ItemsSource)[0].State | Should -Be 'running'
             $script:GuiState | Should -Be 'executing'
         } finally {
             Clear-GuiExecutionResources -RemoveTemp -ProcessExitConfirmed
@@ -2976,7 +3461,7 @@ Describe '勾选视图 (v1.5.5)' {
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $oldRoot = $script:Root; $script:Root = $tempRoot
         $action = (New-GuiReviewPendingFixture).actions[0]
-        $resultAction = $action.PSObject.Copy(); $resultAction.status = 'success'
+        $resultAction = $action.PSObject.Copy(); $resultAction.status = 'success'; $null = Set-GuiTestTerminalMetadata $resultAction
         $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($resultAction); resolved=@(); observations=@(); suspicious=@() }
         $path = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
@@ -2984,7 +3469,7 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() })), [System.Text.UTF8Encoding]::new($false))
         Set-GuiReviewedGenerationFromFile $mainPath
         $process = [pscustomobject]@{ ExitCode=0; ProbeCalls=0 }
-        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); $this.ProbeCalls++; if ($this.ProbeCalls -eq 1) { throw 'probe method failed' }; return $true }
+        $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); $this.ProbeCalls++; if ($this.ProbeCalls -eq 1) { throw 'C:\internal\x token=secret ScriptStackTrace' }; return $true }
         $timer = New-ExecutionFakeTimer
         $script:ExecutionProcess = $process; $script:ExecutionTimer = $timer; $script:ExecutionTempPath = $path
         $script:ExecutionActions = @($action); $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
@@ -3002,6 +3487,11 @@ Describe '勾选视图 (v1.5.5)' {
         Test-Path -LiteralPath $path | Should -BeTrue
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未知'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
+        $detail = $script:Win.FindName('ErrorDetailText').Text
+        $detail | Should -Match 'GUI-EXEC-STATUS-UNKNOWN'
+        $detail | Should -Match '重试：1/3'
+        $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+        $detail | Should -Not -Match 'C:\\internal|token=secret|ScriptStackTrace|diagnostics|shushu_pending'
 
         Complete-ExecutionPoll | Should -BeTrue
         $script:GuiState | Should -Be 'completed'
@@ -3038,8 +3528,9 @@ Describe '勾选视图 (v1.5.5)' {
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $path = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($path, '{}', [System.Text.UTF8Encoding]::new($false))
-        $process = [pscustomobject]@{ ExitCode=$null }
+        $process = [pscustomobject]@{}
         $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($milliseconds); return $true }
+        $process | Add-Member -MemberType ScriptProperty -Name ExitCode -Value { throw 'C:\internal\x token=secret ScriptStackTrace' }
         $timer = New-ExecutionFakeTimer
         $script:ExecutionProcess = $process; $script:ExecutionTimer = $timer; $script:ExecutionTempPath = $path
         $script:ExecutionActions = @(); $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
@@ -3062,7 +3553,11 @@ Describe '勾选视图 (v1.5.5)' {
         Test-Path -LiteralPath $path | Should -BeTrue
         $script:Win.FindName('ErrorSummaryText').Text | Should -Match '未知'
         $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
-        $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($path))
+        $detail = $script:Win.FindName('ErrorDetailText').Text
+        $detail | Should -Match 'GUI-EXEC-STATUS-UNKNOWN'
+        $detail | Should -Match '重试：3/3'
+        $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+        $detail | Should -Not -Match 'C:\\internal|token=secret|ScriptStackTrace|diagnostics|shushu_pending'
         $script:Win.FindName('CompletedSummaryText').Text | Should -Not -Match 'Done|执行完成'
     }
 
@@ -3077,6 +3572,7 @@ Describe '勾选视图 (v1.5.5)' {
             $skipped = (New-GuiReviewPendingFixture -ActionServiceName 'S3').actions[0].PSObject.Copy(); $skipped.id='skipped-row'; $skipped.status='skipped'
             $manual = (New-GuiReviewPendingFixture -ActionServiceName 'S4').actions[0].PSObject.Copy(); $manual.id='manual-row'; $manual.status='manual_required'
             $success.status='success'
+            foreach ($terminal in @($success,$failed,$skipped,$manual)) { $null = Set-GuiTestTerminalMetadata $terminal }
             $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($success,$failed,$skipped,$manual); resolved=@(); observations=@(); suspicious=@() }
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
             [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
@@ -3116,6 +3612,7 @@ Describe '勾选视图 (v1.5.5)' {
                 $script:ExecutionResultReadCount++
                 $action = $expected.PSObject.Copy()
                 $action.status = if ($script:ExecutionResultReadCount -eq 1) { 'success' } else { 'pending' }
+                if ($action.status -ceq 'success') { $null = Set-GuiTestTerminalMetadata $action }
                 return [pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() }
             }
             $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
@@ -3150,6 +3647,8 @@ Describe '勾选视图 (v1.5.5)' {
 
             $successResult = $success.PSObject.Copy(); $successResult.status = 'success'
             $failedResult = $failed.PSObject.Copy(); $failedResult.status = 'failed'
+            $null = Set-GuiTestTerminalMetadata $successResult
+            $null = Set-GuiTestTerminalMetadata $failedResult
             $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($successResult,$failedResult); resolved=@(); observations=@(); suspicious=@() }
             $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
             [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
@@ -3181,7 +3680,7 @@ Describe '勾选视图 (v1.5.5)' {
         $tempRoot = Join-Path $TestDrive ('partial-error-' + [guid]::NewGuid().ToString('N'))
         [void][System.IO.Directory]::CreateDirectory($tempRoot)
         $oldRoot = $script:Root; $script:Root = $tempRoot
-        $action = (New-GuiReviewPendingFixture).actions[0]; $action.status='success'
+        $action = (New-GuiReviewPendingFixture).actions[0]; $action.status='success'; $null = Set-GuiTestTerminalMetadata $action
         $subset = [pscustomobject]@{ pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@() }
         $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
         [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson $subset), [System.Text.UTF8Encoding]::new($false))
@@ -3200,8 +3699,57 @@ Describe '勾选视图 (v1.5.5)' {
 
             $script:GuiState | Should -Be 'error'
             $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
-            $script:Win.FindName('ErrorDetailText').Text | Should -Match 'success'
+            $script:Win.FindName('ErrorDetailText').Text | Should -Match '测试终态结果'
             [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $mainBytes
+            Test-Path -LiteralPath $subsetPath | Should -BeFalse
+        } finally { $script:Root = $oldRoot }
+    }
+
+    It '非 0/2 exit 的畸形结果失败关闭、保存受控诊断且 UI 不泄漏原始内容' -ForEach @(
+        @{ Label='overlong'; Marker='LEAK_OVERLONG'; Configure={ param($a); $a.result_reason=('LEAK_OVERLONG_' + ('x' * 520)); $a.failure_stage='mutation' } }
+        @{ Label='control'; Marker='LEAK_CONTROL'; Configure={ param($a); $a.result_reason="LEAK_CONTROL`nHIDDEN"; $a.failure_stage='mutation' } }
+        @{ Label='path'; Marker='LEAK_PATH'; Configure={ param($a); $a.result_reason='LEAK_PATH C:\\private\\secret.txt'; $a.failure_stage='mutation' } }
+        @{ Label='token'; Marker='LEAK_TOKEN'; Configure={ param($a); $a.result_reason='LEAK_TOKEN Bearer abcdefghijklmnop'; $a.failure_stage='mutation' } }
+        @{ Label='stack'; Marker='LEAK_STACK'; Configure={ param($a); $a.result_reason='LEAK_STACK System.Management.Automation.RuntimeException at Invoke-Clean'; $a.failure_stage='mutation' } }
+        @{ Label='unknown stage'; Marker='LEAK_STAGE'; Configure={ param($a); $a.result_reason='LEAK_STAGE 未经验证说明'; $a.failure_stage='cleanup' } }
+    ) {
+        $tempRoot = Join-Path $TestDrive ("nonstandard-invalid-$Label-" + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $oldRoot = $script:Root; $script:Root = $tempRoot
+        try {
+            $expected = (New-GuiReviewPendingFixture -ActionServiceName 'NonstandardExitService').actions[0]
+            $actual = $expected.PSObject.Copy(); $actual.status='failed'
+            $actual | Add-Member -NotePropertyName result_reason -NotePropertyValue '占位'
+            $actual | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'mutation'
+            & $Configure $actual
+            $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
+            [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+                pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+            })), [System.Text.UTF8Encoding]::new($false))
+            $mainPath = Join-Path $tempRoot 'pending_actions.json'
+            $mainBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-GuiPendingJson ([pscustomobject]@{
+                pending_schema_version=3; marker='must-not-merge'; actions=@($expected); resolved=@(); observations=@(); suspicious=@()
+            })))
+            [System.IO.File]::WriteAllBytes($mainPath, $mainBytes)
+            Set-GuiReviewedGenerationFromFile $mainPath
+            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=7 }
+            $script:ExecutionTimer = New-ExecutionFakeTimer
+            $script:ExecutionTempPath = $subsetPath
+            $script:ExecutionActions = @($expected)
+            $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+            Set-GuiState executing -Force
+
+            Complete-ExecutionPoll | Should -BeTrue
+
+            $script:GuiState | Should -BeExactly 'error'
+            $script:Win.FindName('ErrorSummaryText').Text | Should -Match '7'
+            $script:Win.FindName('ErrorMutationText').Text | Should -Match '部分'
+            $visible = $script:Win.FindName('ErrorSummaryText').Text + $script:Win.FindName('ErrorMutationText').Text + $script:Win.FindName('ErrorDetailText').Text
+            $visible | Should -Not -Match ([regex]::Escape($Marker))
+            $visible | Should -Not -Match 'C:\\private|Bearer|abcdefghijklmnop|System\.Management\.Automation|Invoke-Clean'
+            $visible | Should -Not -Match ([regex]::Escape($subsetPath))
+            [System.IO.File]::ReadAllBytes($mainPath) | Should -Be $mainBytes
+            @(Get-ChildItem -LiteralPath (Join-Path $tempRoot 'diagnostics') -File).Count | Should -Be 1
             Test-Path -LiteralPath $subsetPath | Should -BeFalse
         } finally { $script:Root = $oldRoot }
     }
@@ -3216,7 +3764,7 @@ Describe '勾选视图 (v1.5.5)' {
         $oldRoot = $script:Root
         $script:Root = $tempRoot
         $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
-        $brokenBytes = [System.Text.UTF8Encoding]::new($false).GetBytes('{broken json')
+        $brokenBytes = [System.Text.UTF8Encoding]::new($false).GetBytes('{"bad":"C:\\internal\\x token=secret ScriptStackTrace"')
         [System.IO.File]::WriteAllBytes($subsetPath, $brokenBytes)
         $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=$exitCode }
         $script:ExecutionTimer = New-ExecutionFakeTimer
@@ -3231,8 +3779,21 @@ Describe '勾选视图 (v1.5.5)' {
         $diagnostics = @(Get-ChildItem -LiteralPath (Join-Path $tempRoot 'diagnostics') -File)
         $diagnostics.Count | Should -Be 1
         [System.IO.File]::ReadAllBytes($diagnostics[0].FullName) | Should -Be $brokenBytes
-        $script:Win.FindName('ErrorDetailText').Text | Should -Match ([regex]::Escape($diagnostics[0].FullName))
+        $detail = $script:Win.FindName('ErrorDetailText').Text
+        $detail | Should -Match 'GUI-EXEC-RESULT-INVALID'
+        $detail | Should -Match '诊断已保存.*D-[0-9A-F]{16}'
+        $detail | Should -Not -Match 'C:\\internal|token=secret|ScriptStackTrace|diagnostics|shushu_pending'
         Test-Path -LiteralPath $subsetPath | Should -BeFalse
+    }
+
+    It '诊断 ID 只接受受控诊断文件名且保存失败显示固定提示' {
+        $tempPath = Join-Path $TestDrive ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
+        $id = Get-GuiDiagnosticIdFromPath -Path $tempPath
+        $detail = Format-GuiSafeExecutionErrorDetail -Code 'GUI-EXEC-RESULT-INVALID' -DiagnosticId $id
+
+        $id | Should -BeExactly ''
+        $detail | Should -Match '诊断保存失败'
+        $detail | Should -Not -Match 'shushu_pending|diagnostics|[A-Za-z]:\\'
     }
 
     It 'exit <exitCode> 结果身份、终态或退出契约不可信时拒绝 completed 并保全诊断证据' -TestCases @(
@@ -3316,6 +3877,226 @@ Describe '勾选视图 (v1.5.5)' {
         $executionSection | Should -Match '\.WaitForExit\(0\)'
         $executionSection | Should -Not -Match '\.WaitForExit\(\s*\)'
         $source | Should -Not -Match 'function\s+Invoke-GuiCheckedExecution'
+    }
+
+    It 'Read-GuiStrictExecutionResult 从管理员结果文件保留结构化终态并用同一快照生成展示行' {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'ResultService').actions[0]
+        $actual = $expected.PSObject.Copy()
+        $actual.status = 'failed'
+        $actual | Add-Member -NotePropertyName result_reason -NotePropertyValue '当前实例已结束，但服务已自动重新拉起 PID 4321'
+        $actual | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'verification'
+        $path = Join-Path $TestDrive ('strict-result-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        $result = Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected)
+
+        $result.Actions[0].result_reason | Should -BeExactly $actual.result_reason
+        $result.Actions[0].failure_stage | Should -BeExactly 'verification'
+        $result.Items[0].IdentityKey | Should -BeExactly (Get-PendingIdentityKey $expected)
+        $result.Items[0].Status | Should -BeExactly 'failed'
+        $result.Items[0].ResultReason | Should -BeExactly $actual.result_reason
+        $result.Items[0].FailureStage | Should -BeExactly 'verification'
+        $result.Rows[0].Reason | Should -BeExactly $actual.result_reason
+        $result.Rows[0].FailureStageLabel | Should -BeExactly '失败阶段：结果复核'
+    }
+
+    It 'Read-GuiStrictExecutionResult 只从可信 expected action 取得展示元数据' {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'TrustedDisplayService').actions[0]
+        $actual = $expected.PSObject.Copy()
+        $actual.status = 'success'
+        $actual.name_cn = "UNTRUSTED_NAME C:\internal\x`n控制"
+        $actual.reason_cn = 'UNTRUSTED_REASON token=secret ScriptStackTrace'
+        $actual.execution_class = 'UNTRUSTED_CLASS C:\internal\x'
+        $actual.impact_cn = 'UNTRUSTED_IMPACT token=secret'
+        $actual.cleanup_reason_cn = 'UNTRUSTED_CLEANUP ScriptStackTrace'
+        $actual | Add-Member -NotePropertyName result_reason -NotePropertyValue '服务已安全停止'
+        $actual | Add-Member -NotePropertyName failure_stage -NotePropertyValue ''
+        $path = Join-Path $TestDrive ('trusted-display-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        $result = Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected)
+
+        $result.Actions[0].name_cn | Should -BeExactly $expected.name_cn
+        $result.Actions[0].reason_cn | Should -BeExactly $expected.reason_cn
+        $result.Actions[0].execution_class | Should -BeExactly $expected.execution_class
+        $result.Actions[0].impact_cn | Should -BeExactly $expected.impact_cn
+        $result.Rows[0].Name | Should -BeExactly $expected.name_cn
+        $result.Rows[0].TargetLabel | Should -BeExactly $expected.service_name
+        (($result.Actions | ConvertTo-Json -Depth 20) + ($result.Rows | ConvertTo-Json -Depth 20)) |
+            Should -Not -Match 'UNTRUSTED_|C:\\internal|token=secret|ScriptStackTrace'
+    }
+
+    It 'Read-GuiStrictExecutionResult 将合法旧 reason_cn 严格验证并规范化为 result_reason' {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'LegacyReasonService').actions[0]
+        $actual = $expected.PSObject.Copy(); $actual.status = 'success'; $actual.reason_cn = '  旧结果：服务已安全处理  '
+        $path = Join-Path $TestDrive ('legacy-reason-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        $result = Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected)
+
+        $result.Actions[0].result_reason | Should -BeExactly '旧结果：服务已安全处理'
+        $result.Rows[0].Reason | Should -BeExactly '旧结果：服务已安全处理'
+    }
+
+    It 'Read-GuiStrictExecutionResult 拒绝恶意旧 reason_cn' -ForEach @(
+        @{ Value=('鼠' * 501) }
+        @{ Value="失败`n隐藏" }
+        @{ Value='C:\internal\x' }
+        @{ Value='token=secret' }
+        @{ Value='ScriptStackTrace at Invoke-Clean' }
+    ) {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'UnsafeLegacyReasonService').actions[0]
+        $actual = $expected.PSObject.Copy(); $actual.status = 'success'; $actual.reason_cn = $Value
+        $path = Join-Path $TestDrive ('unsafe-legacy-reason-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        { Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected) } | Should -Throw
+    }
+
+    It 'Read-GuiStrictExecutionResult 拒绝不可信的新结果诊断字段' -ForEach @(
+        @{ Label='missing reason'; Mutate={ param($a) } }
+        @{ Label='wrong reason type'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue @('不允许数组') } }
+        @{ Label='overlong reason'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue ('鼠' * 501) } }
+        @{ Label='control character'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue "失败`n隐藏行" } }
+        @{ Label='raw path'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue '失败位置 C:\\private\\secret.txt' } }
+        @{ Label='token'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue 'Bearer abcdefghijklmnop' } }
+        @{ Label='stack'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue 'System.Management.Automation.RuntimeException at Invoke-Clean' } }
+        @{ Label='missing failed stage'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue '安全失败说明' } }
+        @{ Label='unknown failed stage'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue '安全失败说明'; $a | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'cleanup' } }
+        @{ Label='stage wrong type'; Mutate={ param($a); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue '安全失败说明'; $a | Add-Member -NotePropertyName failure_stage -NotePropertyValue @('verification') } }
+        @{ Label='status wrong type'; Mutate={ param($a); $a.status=@('failed'); $a | Add-Member -NotePropertyName result_reason -NotePropertyValue '安全失败说明'; $a | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'verification' } }
+    ) {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'InvalidResultService').actions[0]
+        $actual = $expected.PSObject.Copy()
+        $actual.status = 'failed'
+        & $Mutate $actual
+        $path = Join-Path $TestDrive ('invalid-result-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        { Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected) } |
+            Should -Throw -Because $Label
+    }
+
+    It 'Read-GuiStrictExecutionResult 拒绝非失败终态携带 failure_stage' {
+        $expected = (New-GuiReviewPendingFixture -ActionServiceName 'SuccessStageService').actions[0]
+        $actual = $expected.PSObject.Copy(); $actual.status = 'success'
+        $actual | Add-Member -NotePropertyName result_reason -NotePropertyValue '服务已安全停止'
+        $actual | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'verification'
+        $path = Join-Path $TestDrive ('invalid-success-stage-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        { Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($expected) } | Should -Throw
+    }
+
+    It 'Read-GuiStrictExecutionResult 按稳定标识拒绝重复和未知结果条目' -ForEach @(
+        @{ Label='duplicate'; Mutate={ param($rows); $rows[1].id=$rows[0].id; $rows[1].service_name=$rows[0].service_name } }
+        @{ Label='unknown'; Mutate={ param($rows); $rows[1].service_name='UnknownResultService' } }
+    ) {
+        $first = (New-GuiReviewPendingFixture -ActionServiceName 'ExpectedOne').actions[0]
+        $second = (New-GuiReviewPendingFixture -ActionServiceName 'ExpectedTwo').actions[0].PSObject.Copy(); $second.id='expected-two'
+        $actual = @($first.PSObject.Copy(), $second.PSObject.Copy())
+        foreach ($row in $actual) { $row.status='success'; $null = Set-GuiTestTerminalMetadata $row }
+        & $Mutate $actual
+        $path = Join-Path $TestDrive ('identity-result-' + [guid]::NewGuid().ToString('N') + '.json')
+        [System.IO.File]::WriteAllText($path, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=$actual; resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+
+        { Read-GuiStrictExecutionResult -Path $path -ExpectedActions @($first,$second) } |
+            Should -Throw -Because $Label
+    }
+
+    It '畸形结果 reason 失败关闭且只给安全通用提示' {
+        $tempRoot = Join-Path $TestDrive ('unsafe-result-prompt-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $oldRoot = $script:Root; $script:Root = $tempRoot
+        try {
+            $expected = (New-GuiReviewPendingFixture -ActionServiceName 'UnsafeReasonService').actions[0]
+            $mainPath = Join-Path $tempRoot 'pending_actions.json'
+            [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+                pending_schema_version=3; actions=@($expected); resolved=@(); observations=@(); suspicious=@()
+            })), [System.Text.UTF8Encoding]::new($false))
+            Set-GuiReviewedGenerationFromFile $mainPath
+            $actual = $expected.PSObject.Copy(); $actual.status='failed'
+            $actual | Add-Member -NotePropertyName result_reason -NotePropertyValue 'Bearer abcdefghijklmnop'
+            $actual | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'mutation'
+            $subsetPath = Join-Path $tempRoot 'unsafe-subset.json'
+            [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+                pending_schema_version=3; actions=@($actual); resolved=@(); observations=@(); suspicious=@()
+            })), [System.Text.UTF8Encoding]::new($false))
+            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=2 }
+            $script:ExecutionTimer = New-ExecutionFakeTimer
+            $script:ExecutionTempPath = $subsetPath
+            $script:ExecutionActions = @($expected)
+            $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+            Set-GuiState executing -Force
+
+            Complete-ExecutionPoll | Should -BeTrue
+
+            $script:GuiState | Should -BeExactly 'error'
+            $visible = $script:Win.FindName('ErrorSummaryText').Text + $script:Win.FindName('ErrorMutationText').Text
+            $visible | Should -Not -Match 'Bearer|abcdefghijklmnop'
+            (@($script:Win.FindName('CompletedList').ItemsSource | ForEach-Object { $_.Reason }) -join ' ') |
+                Should -Not -Match 'Bearer|abcdefghijklmnop'
+        } finally { $script:Root = $oldRoot }
+    }
+
+    It 'Merge-PendingStatus 只从不可变结果记录合并 status reason stage' {
+        $tmpRoot = Join-Path $TestDrive ('gui-merge-diagnostics-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tmpRoot)
+        $action = (New-GuiReviewPendingFixture -ActionServiceName 'MergeDiagnosticsService').actions[0]
+        $mainPath = Join-Path $tmpRoot 'pending_actions.json'
+        [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($action); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+        $resultAction = $action.PSObject.Copy(); $resultAction.status = 'failed'
+        $resultAction | Add-Member -NotePropertyName result_reason -NotePropertyValue '当前实例仍在运行'
+        $resultAction | Add-Member -NotePropertyName failure_stage -NotePropertyValue 'verification'
+        $subsetPath = Join-Path $tmpRoot 'subset.json'
+        [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+            pending_schema_version=3; actions=@($resultAction); resolved=@(); observations=@(); suspicious=@()
+        })), [System.Text.UTF8Encoding]::new($false))
+        $oldRoot = $script:Root; $script:Root = $tmpRoot
+        try {
+            Set-GuiReviewedGenerationFromFile $mainPath
+            $script:ExecutionActions = @($action)
+            $result = Read-GuiStrictExecutionResult -Path $subsetPath -ExpectedActions @($action)
+            Merge-PendingStatus $result
+        } finally { $script:Root = $oldRoot }
+
+        $merged = Get-Content -LiteralPath $mainPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $merged.actions[0].status | Should -BeExactly 'failed'
+        $merged.actions[0].result_reason | Should -BeExactly '当前实例仍在运行'
+        $merged.actions[0].failure_stage | Should -BeExactly 'verification'
+    }
+
+    It '幻想落地完成行显示目标、结果、具体原因和友好失败阶段并支持长文本换行' {
+        $list = $script:Win.FindName('CompletedList')
+        $list.ItemTemplate | Should -Not -BeNullOrEmpty
+        $xaml = Get-Content -LiteralPath (Join-Path $script:GuiRoot 'src\Gui\MainWindow.xaml') -Raw -Encoding UTF8
+        $xaml | Should -Match 'Text="\{Binding Name\}"'
+        $xaml | Should -Match 'Text="\{Binding StateLabel\}"'
+        $xaml | Should -Match '(?s)CompletedList.*?<Grid>\s*<Grid\.ColumnDefinitions><ColumnDefinition Width="\*"/><ColumnDefinition Width="Auto"/></Grid\.ColumnDefinitions>.*?Text="\{Binding Name\}"[^>]*TextWrapping="Wrap".*?Grid\.Column="1"[^>]*Text="\{Binding StateLabel\}"'
+        $xaml | Should -Match 'Text="\{Binding TargetLabel, StringFormat=目标：\{0\}\}"[^>]*TextWrapping="Wrap"'
+        $xaml | Should -Match 'Text="\{Binding Reason\}"[^>]*TextWrapping="Wrap"'
+        $xaml | Should -Match 'Text="\{Binding FailureStageLabel\}"[^>]*TextWrapping="Wrap"'
+        $xaml | Should -Match 'CompletedList[^>]*MaxHeight="[3-9][0-9]{2}"'
+        $xaml | Should -Match 'CompletedList[^>]*ScrollViewer\.VerticalScrollBarVisibility="Auto"'
+        $xaml | Should -Match 'CompletedList[^>]*ScrollViewer\.HorizontalScrollBarVisibility="Disabled"'
+        $script:Win.FindName('BtnRescan') | Should -Not -BeNullOrEmpty
+        $script:Win.FindName('BtnRestore') | Should -Not -BeNullOrEmpty
     }
 
     It 'pending identity 区分 action、PID/path 和 matcher provenance' {
@@ -3544,10 +4325,15 @@ Describe '勾选视图 (v1.5.5)' {
         [System.IO.File]::WriteAllBytes($mainPath, $mainBytes)
         Set-GuiReviewedGenerationFromFile $mainPath
         $resultAction = $action.PSObject.Copy(); $resultAction.status = 'success'
-        $pairs = [System.Collections.Generic.List[System.Tuple[string,string]]]::new()
-        $pairs.Add([System.Tuple[string,string]]::new((Get-PendingIdentityKey $resultAction), 'success'))
+        $values = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+        $values.Add('IdentityKey', (Get-PendingIdentityKey $resultAction))
+        $values.Add('Status', 'success')
+        $values.Add('ResultReason', '测试终态结果')
+        $values.Add('FailureStage', '')
+        $records = [System.Collections.Generic.List[object]]::new()
+        $records.Add([System.Collections.ObjectModel.ReadOnlyDictionary[string,string]]::new($values))
         $script:ExecutionActions = @($action)
-        $result = [pscustomobject]@{ Items=$pairs.AsReadOnly() }
+        $result = [pscustomobject]@{ Items=$records.AsReadOnly() }
         Mock Write-GuiPendingBytesToLockedStream {
             param($Stream, $Bytes)
             $Stream.Position = 0

@@ -73,6 +73,70 @@ Describe '待办清单规则' {
             }
             return $Hit
         }
+
+        function New-OfficialUninstallerPendingAction {
+            return [pscustomobject][ordered]@{
+                id='lenovo-hrwscctrl'; vendor='Lenovo'; name_cn='联想安全中心组件 HRWSCCtrl'
+                action='open_official_uninstaller'; hit_type='service'; status='pending'; detail='HRWSCCtrl'; reason_cn='官方卸载 handoff'
+                service_name='HRWSCCtrl'; service_display_name='Lenovo Security Controller'
+                autostart_source=''; autostart_name=''; autostart_value=''; task_name=''; task_path=''
+                process_name=''; process_id=$null; process_path=''; service_binary_path=''; process_start_time_utc=''
+                matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+                evidence=[pscustomobject]@{tested=$true}
+                execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                impact_cn='可能移除联想电脑管家的安全、防护、通知和相关后台组件'
+                cleanup_reason_cn='Windows 受保护服务阻止普通管理员实时停止；不需要联想电脑管家时可按需打开联想官方卸载程序'
+                launch_protected_status='complete'; launch_protected_level=[int]3
+                uninstall_evidence_status='complete'
+                uninstall_registry_path='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+                uninstall_display_name='联想电脑管家'; uninstall_publisher='联想（北京）有限公司'; uninstall_display_version='5.1.0'
+                uninstall_install_location='C:\Program Files\Lenovo\PCManager'
+                uninstall_string='"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+                uninstall_executable_path='C:\Program Files\Lenovo\PCManager\uninst.exe'
+            }
+        }
+
+        function Get-OfficialUninstallerIdentityFieldCases {
+            return @(
+                @{ Field='id'; MutatedValue='lenovo-hrwscctrl-changed' }
+                @{ Field='hit_type'; MutatedValue='process' }
+                @{ Field='action'; MutatedValue='disable_service' }
+                @{ Field='service_name'; MutatedValue='HRWSCCtrlChanged' }
+                @{ Field='service_display_name'; MutatedValue='Lenovo Security Controller Changed' }
+                @{ Field='matched_pattern'; MutatedValue='HRWSCCtrlChanged' }
+                @{ Field='matched_type'; MutatedValue='contains' }
+                @{ Field='matched_field'; MutatedValue='service_display_name' }
+                @{ Field='launch_protected_status'; MutatedValue='incomplete' }
+                @{ Field='launch_protected_level'; MutatedValue=[int]2 }
+                @{ Field='uninstall_evidence_status'; MutatedValue='incomplete' }
+                @{ Field='uninstall_registry_path'; MutatedValue='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManagerChanged' }
+                @{ Field='uninstall_display_name'; MutatedValue='联想电脑管家 Changed' }
+                @{ Field='uninstall_publisher'; MutatedValue='Changed Publisher' }
+                @{ Field='uninstall_display_version'; MutatedValue='5.1.1' }
+                @{ Field='uninstall_install_location'; MutatedValue='C:\Program Files\Lenovo\Changed' }
+                @{ Field='uninstall_string'; MutatedValue='"C:\Program Files\Lenovo\PCManager\uninst.exe" /S' }
+                @{ Field='uninstall_executable_path'; MutatedValue='C:\Program Files\Lenovo\PCManager\changed.exe' }
+            )
+        }
+
+        function Copy-OfficialUninstallerIdentityTamper($Action, [string]$Field, [string]$Operation, $MutatedValue) {
+            $copy = $Action.PSObject.Copy()
+            switch ($Operation) {
+                'mutation' { $copy.$Field = $MutatedValue }
+                'deletion' { $copy.PSObject.Properties.Remove($Field) }
+                'case-renamed' {
+                    $value = $copy.$Field
+                    $copy.PSObject.Properties.Remove($Field)
+                    $copy | Add-Member -NotePropertyName $Field.ToUpperInvariant() -NotePropertyValue $value
+                }
+                'array-wrapped' {
+                    $value = $copy.$Field
+                    $copy.PSObject.Properties[$Field].Value = [object[]]@($value)
+                }
+                default { throw "unknown official identity tamper operation: $Operation" }
+            }
+            return $copy
+        }
     }
 
     It '空数组以 schema v3 和 UTF-8 BOM 原子保存' {
@@ -803,89 +867,252 @@ Invoke-Clean
         $p.resolved[0].task_path | Should -BeExactly '\Lenovo\LenovoMachineFixUser_OOBE_AUTO_Notification'
     }
 
-    It 'exact HRWSCCtrl service persists as a manual_impact action' {
-        Mock Get-Service { [pscustomobject]@{ Name='HRWSCCtrl'; StartType='Automatic'; Status='Running' } } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
-        $hit = New-Schema3PolicyHit -Id 'lenovo-hrwscctrl' -Action 'disable_service' -HitType 'service' -ServiceName 'HRWSCCtrl' -ServiceDisplayName 'Lenovo Security Controller' -MatchedPattern 'HRWSCCtrl' -MatchedField 'service_name' -ExecutionClass 'manual_impact' -DefaultSelected $false -RequiresConfirmation $true -ImpactCn '可能影响联想电脑管家的安全状态、主动防护和通知' -CleanupReasonCn '不使用联想电脑管家时可减少常驻后台'
-
-        Save-PendingActions -Hits @($hit) -Suspicious @()
-        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
-
-        @($p.actions).Count | Should -Be 1
-        $p.actions[0].execution_class | Should -BeExactly 'manual_impact'
-        $p.actions[0].default_selected | Should -BeFalse
-        $p.actions[0].requires_confirmation | Should -BeTrue
-    }
-
-    It 'disabled HRWSCCtrl persists a full provenance and display-policy resolved row' {
-        Mock Get-Service { [pscustomobject]@{ Name='HRWSCCtrl'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
-        $hit = New-Schema3PolicyHit -Id 'lenovo-hrwscctrl' -Action 'disable_service' -HitType 'service' -ServiceName 'HRWSCCtrl' -ServiceDisplayName 'Lenovo Security Controller' -MatchedPattern 'HRWSCCtrl' -MatchedField 'service_name' -ExecutionClass 'manual_impact' -DefaultSelected $false -RequiresConfirmation $true -ImpactCn '可能影响联想电脑管家的安全状态、主动防护和通知' -CleanupReasonCn '不使用联想电脑管家时可减少常驻后台'
-
-        Save-PendingActions -Hits @($hit) -Suspicious @()
-        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
-
-        @($p.actions).Count | Should -Be 0
-        @($p.resolved).Count | Should -Be 1
-        foreach ($field in @('id','hit_type','action','service_name','service_display_name','matched_pattern','matched_type','matched_field','execution_class','necessity','default_selected','requires_confirmation','impact_cn','cleanup_reason_cn')) {
-            $p.resolved[0].$field | Should -Be $hit.$field -Because "resolved must preserve $field"
-        }
-        $p.resolved[0].current_state | Should -BeExactly 'disabled'
-        $p.resolved[0].status | Should -BeExactly 'success'
-    }
-
-    It 'persists the real safe=false HRWSCCtrl exact Match-Profiles hit as manual action when enabled' {
+    It 'persists a valid PPL3 official-uninstall HRWS handoff as an unchecked pending action with exact evidence' {
         $profiles = Load-Profiles -Path $script:ProfileFile
         $profile = @($profiles.profiles | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
-        $services = @([pscustomobject]@{ Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Auto' })
+        $services = @([pscustomobject]@{
+            Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Stopped'; StartMode='Manual'; PathName=''; ProcessId=[int]0
+            ProcessIdentitySource='trusted_inventory_v3'; ProcessIdentityStatus='not_running'; ProcessName=''; ProcessPath=''; ProcessStartTimeUtc=''
+            LaunchProtectedStatus='complete'; LaunchProtectedLevel=[int]3
+            UninstallEvidenceStatus='complete'
+            UninstallRegistryPath='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+            UninstallDisplayName='联想电脑管家'; UninstallPublisher='联想（北京）有限公司'; UninstallDisplayVersion='5.1.0'
+            UninstallInstallLocation='C:\Program Files\Lenovo\PCManager'
+            UninstallString='"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+            UninstallExecutablePath='C:\Program Files\Lenovo\PCManager\uninst.exe'
+        })
         $hit = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
-        Mock Get-Service { [pscustomobject]@{ Name='HRWSCCtrl'; StartType='Automatic'; Status='Running' } } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
 
         $profile.safe | Should -BeFalse
         $profile.evidence.tested | Should -BeTrue
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'disable_service'
+        $profile.execution.allow_auto | Should -BeFalse
+        $profile.execution.review_note | Should -BeExactly '仅允许用户确认后的官方卸载入口；不属于自动安全清理'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'open_official_uninstaller'
         $hit.safe | Should -BeFalse
         $hit.evidence.tested | Should -BeTrue
         $hit.matched_type | Should -BeExactly 'exact'
         $hit.execution_class | Should -BeExactly 'manual_impact'
-        $hit.action | Should -BeExactly 'disable_service'
+        $hit.action | Should -BeExactly 'open_official_uninstaller'
+        ($hit.launch_protected_level -is [int]) | Should -BeTrue
+        $hit.launch_protected_level | Should -Be 3
+        $hit.uninstall_evidence_status | Should -BeExactly 'complete'
+        $hit.PSObject.Properties.Name | Should -Not -Contain 'process_id'
 
         Save-PendingActions -Hits @($hit) -Suspicious @()
-        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $pendingJson = Get-Content $script:PendingFile -Raw -Encoding UTF8
+        $p = if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+            $pendingJson | ConvertFrom-Json -DateKind String
+        } else {
+            $pendingJson | ConvertFrom-Json
+        }
 
         @($p.actions).Count | Should -Be 1
         @($p.resolved).Count | Should -Be 0
         @($p.observations).Count | Should -Be 0
-        $p.actions[0].execution_class | Should -BeExactly 'manual_impact'
-        $p.actions[0].action | Should -BeExactly 'disable_service'
-        $p.actions[0].default_selected | Should -BeFalse
-        $p.actions[0].requires_confirmation | Should -BeTrue
+        $action = $p.actions[0]
+        $action.execution_class | Should -BeExactly 'manual_impact'
+        $action.action | Should -BeExactly 'open_official_uninstaller'
+        $action.hit_type | Should -BeExactly 'service'
+        $action.service_name | Should -BeExactly 'HRWSCCtrl'
+        $action.matched_type | Should -BeExactly 'exact'
+        $action.matched_field | Should -BeExactly 'service_name'
+        $action.safe | Should -BeFalse
+        $action.default_selected | Should -BeFalse
+        $action.requires_confirmation | Should -BeTrue
+        $action.launch_protected_status | Should -BeExactly 'complete'
+        (($action.launch_protected_level -is [int32]) -or ($action.launch_protected_level -is [int64])) | Should -BeTrue
+        $action.launch_protected_level | Should -Be 3
+        $action.uninstall_evidence_status | Should -BeExactly 'complete'
+        $action.uninstall_registry_path | Should -BeExactly 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+        $action.uninstall_display_name | Should -BeExactly '联想电脑管家'
+        $action.uninstall_publisher | Should -BeExactly '联想（北京）有限公司'
+        $action.uninstall_display_version | Should -BeExactly '5.1.0'
+        $action.uninstall_install_location | Should -BeExactly 'C:\Program Files\Lenovo\PCManager'
+        $action.uninstall_string | Should -BeExactly '"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+        $action.uninstall_executable_path | Should -BeExactly 'C:\Program Files\Lenovo\PCManager\uninst.exe'
+        $pendingJson | Should -Not -Match 'ProcessIdentitySource|trusted_inventory_v3'
     }
 
-    It 'persists the real safe=false HRWSCCtrl exact Match-Profiles hit as resolved when disabled' {
+    It 'exhaustively binds every official-uninstaller identity field against mutation deletion case rename and array wrapping' {
+        $officialShapeFields = @(
+            'action','hit_type','matched_pattern','matched_type','matched_field','service_name',
+            'launch_protected_status','launch_protected_level','uninstall_evidence_status','uninstall_registry_path',
+            'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
+            'uninstall_string','uninstall_executable_path'
+        )
+        $semanticallyMutableFields = @(
+            'id','service_display_name','uninstall_registry_path','uninstall_display_name','uninstall_display_version'
+        )
+        $valid = New-OfficialUninstallerPendingAction
+        Test-OfficialUninstallerActionShape $valid | Should -BeTrue
+        Test-ManualImpactDigestActionShape $valid | Should -BeTrue
+        $identity = Get-PendingIdentityKey $valid
+        $digest = Get-ManualImpactDigest @($valid)
+        $digest | Should -Match '^[0-9a-f]{64}$'
+        $mutationKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        $mutationKeys.Add($identity) | Should -BeTrue
+
+        foreach ($case in Get-OfficialUninstallerIdentityFieldCases) {
+            $field = [string]$case.Field
+            foreach ($operation in @('mutation','deletion','case-renamed','array-wrapped')) {
+                $tampered = Copy-OfficialUninstallerIdentityTamper $valid $field $operation $case.MutatedValue
+                $shapeValid = Test-OfficialUninstallerActionShape $tampered
+                if ($officialShapeFields -ccontains $field -and
+                    ($operation -cne 'mutation' -or $semanticallyMutableFields -cnotcontains $field)) {
+                    $shapeValid | Should -BeFalse -Because "$field $operation is semantically invalid"
+                }
+
+                $tamperedIdentity = Get-PendingIdentityKey $tampered
+                $tamperedIdentity | Should -Not -BeExactly $identity -Because "$field $operation must change or invalidate identity"
+                if (Test-ManualImpactDigestActionShape $tampered) {
+                    Get-ManualImpactDigest @($tampered) | Should -Not -BeExactly $digest -Because "$field $operation must mismatch the reviewed digest"
+                } else {
+                    { Get-ManualImpactDigest @($tampered) } | Should -Throw -Because "$field $operation must be rejected by manual digest shape"
+                }
+
+                $duplicate = $tampered.PSObject.Copy()
+                Get-PendingIdentityKey $duplicate | Should -BeExactly $tamperedIdentity -Because "$field $operation exact duplicates must collide"
+            }
+
+            $mutated = Copy-OfficialUninstallerIdentityTamper $valid $field 'mutation' $case.MutatedValue
+            $mutationKey = Get-PendingIdentityKey $mutated
+            $mutationKeys.Add($mutationKey) | Should -BeTrue -Because "$field mutation must be pairwise unique"
+        }
+        $mutationKeys.Count | Should -Be ((Get-OfficialUninstallerIdentityFieldCases).Count + 1)
+
+        $exactDuplicate = $valid.PSObject.Copy()
+        Get-PendingIdentityKey $exactDuplicate | Should -BeExactly $identity
+        Get-ManualImpactDigest @($valid,$exactDuplicate) | Should -BeExactly $digest
+    }
+
+    It 'authorizes only the exact current profile matcher and exact reviewed official-uninstaller evidence' {
+        $profiles = Load-Profiles -Path $script:ProfileFile
+        $valid = New-OfficialUninstallerPendingAction
+        Mock Get-Service { [pscustomobject]@{Name='HRWSCCtrl';DisplayName='Lenovo Security Controller'} } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+
+        Test-PendingActionEligible $valid $profiles | Should -BeTrue
+        $digest = Get-ManualImpactDigest @($valid)
+        Test-PendingActionAuthorized $valid $profiles $digest $digest | Should -BeTrue
+
+        foreach ($field in @(
+            'launch_protected_status','launch_protected_level','uninstall_evidence_status','uninstall_registry_path',
+            'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
+            'uninstall_string','uninstall_executable_path'
+        )) {
+            $tampered = $valid.PSObject.Copy()
+            if ($field -ceq 'launch_protected_level') { $tampered.$field = [int]2 }
+            else { $tampered.$field = ([string]$tampered.$field + '-changed') }
+            if (Test-OfficialUninstallerActionShape $tampered) {
+                Test-PendingActionEligible $tampered $profiles | Should -BeTrue -Because "$field remains inventory-semantic until Task6 live revalidation"
+                (New-ManualImpactConfirmationContext @($tampered) $digest).IsApproved |
+                    Should -BeFalse -Because "$field drift must fail the reviewed identity digest"
+            } else {
+                Test-PendingActionEligible $tampered $profiles | Should -BeFalse -Because "$field malformed drift must fail shape authorization"
+            }
+        }
+    }
+
+    It 'never promotes broad display v2 missing malformed or observation official-uninstaller edits into actions' {
+        $cases = @(
+            @{ Label='broad'; Mutate={ param($a) $a.matched_type='contains'; $a.matched_pattern='HRWS' } }
+            @{ Label='display'; Mutate={ param($a) $a.matched_field='service_display_name'; $a.matched_pattern='Lenovo Security Controller' } }
+            @{ Label='v2-marker'; Mutate={ param($a) $a | Add-Member -NotePropertyName ProcessIdentitySource -NotePropertyValue 'trusted_inventory_v2' } }
+            @{ Label='missing'; Mutate={ param($a) $a.PSObject.Properties.Remove('uninstall_executable_path') } }
+            @{ Label='malformed'; Mutate={ param($a) $a.uninstall_string='"C:\Program Files\Lenovo\PCManager\uninst.exe" /S' } }
+            @{ Label='observation'; Mutate={ param($a) $a.action='investigate'; $a.execution_class='observation'; $a.necessity='informational'; $a.requires_confirmation=$false } }
+        )
+        $profiles = Load-Profiles -Path $script:ProfileFile
+        Mock Get-Service { [pscustomobject]@{Name='HRWSCCtrl';DisplayName='Lenovo Security Controller'} } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+
+        foreach ($case in $cases) {
+            $hit = New-OfficialUninstallerPendingAction
+            $hit.PSObject.Properties.Remove('status')
+            & $case.Mutate $hit
+            Test-OfficialUninstallerActionShape $hit | Should -BeFalse -Because $case.Label
+
+            Save-PendingActions -Hits @($hit) -Suspicious @()
+            $saved = ConvertFrom-StrictPendingJson (Get-Content $script:PendingFile -Raw -Encoding UTF8)
+            @($saved.actions).Count | Should -Be 0 -Because $case.Label
+            @($saved.observations).Count | Should -Be 1 -Because $case.Label
+
+            $promoted = $saved.observations[0].PSObject.Copy()
+            $promoted.action='open_official_uninstaller'; $promoted | Add-Member -NotePropertyName status -NotePropertyValue 'pending'
+            $promoted.execution_class='manual_impact'
+            $promoted.necessity='optional'; $promoted.default_selected=$false; $promoted.requires_confirmation=$true
+            Test-PendingActionEligible $promoted $profiles | Should -BeFalse -Because "$($case.Label) observation edit must not authorize"
+        }
+    }
+
+    It 'keeps official-uninstaller pending identities unique when only reviewed uninstall evidence differs' {
+        $first = New-OfficialUninstallerPendingAction
+        $second = New-OfficialUninstallerPendingAction
+        $second.uninstall_registry_path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager2'
+
+        Test-OfficialUninstallerActionShape $first | Should -BeTrue
+        Test-OfficialUninstallerActionShape $second | Should -BeTrue
+        Get-PendingIdentityKey $first | Should -Not -BeExactly (Get-PendingIdentityKey $second)
+        { Get-ManualImpactDigest @($first,$second) } | Should -Not -Throw
+    }
+
+    It 'accepts stop_service_runtime only for service hits with exact provenance' {
+        Test-ActionMatchesHitType 'stop_service_runtime' 'service' | Should -BeTrue
+        Test-ActionMatchesHitType 'stop_service_runtime' 'process' | Should -BeFalse
+        Test-ActionMatchesHitType 'stop_service_runtime' 'task' | Should -BeFalse
+    }
+
+    It 'recognizes open_official_uninstaller only for service hits' {
+        Test-ActionMatchesHitType 'open_official_uninstaller' 'service' | Should -BeTrue
+        Test-ActionMatchesHitType 'open_official_uninstaller' 'process' | Should -BeFalse
+        Test-ActionMatchesHitType 'open_official_uninstaller' 'autostart' | Should -BeFalse
+        Test-ActionMatchesHitType 'open_official_uninstaller' 'task' | Should -BeFalse
+    }
+
+    It 'persists stopped HRWSCCtrl exact hit as observation rather than resolved disabled' {
         $profiles = Load-Profiles -Path $script:ProfileFile
         $profile = @($profiles.profiles | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
-        $services = @([pscustomobject]@{ Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Stopped'; StartMode='Disabled' })
+        $services = @([pscustomobject]@{ Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Stopped'; StartMode='Manual'; PathName='"C:\Program Files\Lenovo Security Center\wsctrl11.exe" -service'; ProcessId=[int]0 })
+        Mock Get-CimInstance { [pscustomobject]@{ Name='HRWSCCtrl'; State='Stopped'; ProcessId=[int]0; PathName='"C:\Program Files\Lenovo Security Center\wsctrl11.exe" -service' } } -ParameterFilter { $ClassName -eq 'Win32_Service' }
         $hit = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
-        Mock Get-Service { [pscustomobject]@{ Name='HRWSCCtrl'; StartType='Disabled'; Status='Stopped' } } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
 
         $profile.safe | Should -BeFalse
         $profile.evidence.tested | Should -BeTrue
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'disable_service'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'open_official_uninstaller'
         $hit.safe | Should -BeFalse
         $hit.evidence.tested | Should -BeTrue
         $hit.matched_type | Should -BeExactly 'exact'
-        $hit.execution_class | Should -BeExactly 'manual_impact'
-        $hit.action | Should -BeExactly 'disable_service'
+        $hit.execution_class | Should -BeExactly 'observation'
+        $hit.action | Should -BeExactly 'investigate'
+        [string]::IsNullOrWhiteSpace([string]$hit.obs_reason) | Should -BeFalse
 
         Save-PendingActions -Hits @($hit) -Suspicious @()
         $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
 
         @($p.actions).Count | Should -Be 0
-        @($p.resolved).Count | Should -Be 1
-        @($p.observations).Count | Should -Be 0
-        $p.resolved[0].current_state | Should -BeExactly 'disabled'
-        $p.resolved[0].status | Should -BeExactly 'success'
-        $p.resolved[0].execution_class | Should -BeExactly 'manual_impact'
-        $p.resolved[0].action | Should -BeExactly 'disable_service'
+        @($p.resolved).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
+        $p.observations[0].execution_class | Should -BeExactly 'observation'
+        $p.observations[0].action | Should -BeExactly 'investigate'
+    }
+
+    It 'does not promote a running HRWSCCtrl hit with incomplete one-time identity' {
+        $missingBinary = Join-Path $TestDrive 'Program Files\Lenovo Security Center\missing-wsctrl11.exe'
+        $pathName = '"' + $missingBinary + '" -service'
+        $services = @([pscustomobject]@{ Name='HRWSCCtrl'; DisplayName='Lenovo Security Controller'; State='Running'; StartMode='Manual'; PathName=$pathName; ProcessId=[int]4321 })
+        Mock Get-CimInstance {
+            if ($ClassName -ceq 'Win32_Service') { return [pscustomobject]@{ Name='HRWSCCtrl'; State='Running'; ProcessId=[int]4321; PathName=$pathName } }
+            throw 'process lookup must not occur for a missing service binary'
+        } -ParameterFilter { $ClassName -in @('Win32_Service','Win32_Process') }
+
+        $hit = @(Match-Profiles -Services $services -AutoStarts @() -Tasks @() -TopProcs @() | Where-Object { $_.id -ceq 'lenovo-hrwscctrl' }) | Select-Object -First 1
+        Save-PendingActions -Hits @($hit) -Suspicious @()
+        $p = Get-Content $script:PendingFile -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        $hit.action | Should -BeExactly 'investigate'
+        $hit.execution_class | Should -BeExactly 'observation'
+        [string]::IsNullOrWhiteSpace([string]$hit.obs_reason) | Should -BeFalse
+        @($p.actions).Count | Should -Be 0
+        @($p.resolved).Count | Should -Be 0
+        @($p.observations).Count | Should -Be 1
     }
 
     It 'keeps the real HRWSCCtrl contains Match-Profiles hit as observation' {
@@ -896,7 +1123,7 @@ Invoke-Clean
 
         $profile.safe | Should -BeFalse
         $profile.evidence.tested | Should -BeTrue
-        Get-ManualActionFor $profile 'service' | Should -BeExactly 'disable_service'
+        Get-ManualActionFor $profile 'service' | Should -BeExactly 'open_official_uninstaller'
         $hit.safe | Should -BeFalse
         $hit.evidence.tested | Should -BeTrue
         $hit.matched_type | Should -BeExactly 'contains'

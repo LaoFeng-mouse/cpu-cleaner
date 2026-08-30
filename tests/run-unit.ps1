@@ -11,7 +11,7 @@ $defs = $src.Substring(0, $idx)
 # 删除 dot-source 块, 改为下方按依赖顺序点源 src/Core/
 $defs = $defs -replace "(?s)# ---------- v1\.7\.0 模块化.*?\n\}", ''
 Invoke-Expression $defs
-foreach ($f in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
+foreach ($f in @('Utils','ProtectedServiceHandoff','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
     . (Join-Path $projectRoot ('src\Core\' + $f + '.ps1'))
 }
 

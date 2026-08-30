@@ -43,6 +43,17 @@ function Get-GuiItemSummary {
     }
 }
 
+function Get-GuiNecessityText {
+    param([Parameter(Mandatory=$true)][string]$Necessity)
+    $text = switch ($Necessity) {
+        'recommended'   { '建议处理' }
+        'optional'      { '按需处理' }
+        'informational' { '仅供参考' }
+        default         { $Necessity }
+    }
+    return $text
+}
+
 function Get-GuiReviewPresentation {
     param(
         [Parameter(Mandatory=$true)][ValidateSet('actions','resolved','observations')][string]$Branch,
@@ -67,7 +78,8 @@ function Get-GuiReviewPresentation {
         default       { '仅观察' }
     }
     $statusLabel = if ($groupKey -eq 'resolved') { '已处理' } elseif ($groupKey -eq 'observation') { '仅观察' } elseif ($groupKey -eq 'manual') { '需确认' } else { '可执行' }
-    $necessityLabel = '必要性：{0}' -f $Necessity
+    $necessityText = Get-GuiNecessityText $Necessity
+    $necessityLabel = '必要性：{0}' -f $necessityText
     return [pscustomobject]@{
         GroupKey           = $groupKey
         GroupLabel         = $groupLabel
@@ -151,10 +163,65 @@ function Format-GuiMatcherDetail {
     ) -join [Environment]::NewLine
 }
 
+function Get-GuiSafeStableTargetFallback {
+    param($Item)
+    foreach ($propertyName in @('target','matched_pattern','id')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $property.Value -isnot [string]) { continue }
+        $value = $property.Value.Trim()
+        if ([string]::IsNullOrWhiteSpace($value) -or $value.Length -gt 200) { continue }
+        $hasControl = $false
+        foreach ($character in $value.ToCharArray()) {
+            if ([char]::IsControl($character)) { $hasControl = $true; break }
+        }
+        if ($hasControl -or $value -match '[A-Za-z]:[\\/]' -or $value -match '\\\\' -or
+            $value -match '(?i)\b(?:bearer|token|secret|password)\b\s*[:= ]\s*\S+' -or
+            $value -match '(?i)System\.Management\.Automation|ScriptStackTrace|StackTrace') { continue }
+        return $value
+    }
+    return '已验证目标'
+}
+
+function Get-GuiExecutionTargetLabel {
+    param($Item)
+    $hitType = [string]$Item.hit_type
+    $action = [string]$Item.action
+    if ($action -ceq 'stop_service_runtime') {
+        $serviceName = [string]$Item.service_name
+        $processId = $Item.process_id
+        if (-not [string]::IsNullOrWhiteSpace($serviceName) -and
+            ($processId -is [int32] -or $processId -is [int64]) -and [int64]$processId -gt 0) {
+            return ('{0}（扫描 PID {1}）' -f $serviceName.Trim(), [int64]$processId)
+        }
+    }
+    if ($hitType -cin @('process','service_process')) {
+        $processName = [string]$Item.process_name
+        $processId = $Item.process_id
+        if (-not [string]::IsNullOrWhiteSpace($processName) -and
+            ($processId -is [int32] -or $processId -is [int64]) -and [int64]$processId -gt 0) {
+            return ('{0}（PID {1}）' -f $processName.Trim(), [int64]$processId)
+        }
+    }
+    switch ($hitType) {
+        'service' {
+            if (-not [string]::IsNullOrWhiteSpace([string]$Item.service_name)) { return ([string]$Item.service_name).Trim() }
+        }
+        'task' {
+            if (-not [string]::IsNullOrWhiteSpace([string]$Item.task_path)) { return ([string]$Item.task_path).Trim() }
+        }
+        'autostart' {
+            $parts = @([string]$Item.autostart_source, [string]$Item.autostart_name) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() }
+            if ($parts.Count -gt 0) { return ($parts -join ' / ') }
+        }
+    }
+    return Get-GuiSafeStableTargetFallback -Item $Item
+}
+
 function ConvertTo-GuiExecutionRows {
     param($Items)
     foreach ($item in @($Items)) {
-        $label = switch ([string]$item.status) {
+        $status = [string]$item.status
+        $label = switch ($status) {
             'success' { '成功' }
             'failed' { '失败' }
             'skipped' { '已跳过' }
@@ -162,14 +229,31 @@ function ConvertTo-GuiExecutionRows {
             'running' { '执行中' }
             default { '等待执行' }
         }
+        $failureStage = if ($status -ceq 'failed') { [string]$item.failure_stage } else { '' }
+        $failureStageLabel = switch ($failureStage) {
+            'authorization' { '失败阶段：权限授权' }
+            'backup' { '失败阶段：安全备份' }
+            'mutation' { '失败阶段：系统修改' }
+            'verification' { '失败阶段：结果复核' }
+            'result_persistence' { '失败阶段：结果保存' }
+            default { '' }
+        }
+        $reason = if ($status -cin @('success','failed','skipped','manual_required')) {
+            [string]$item.result_reason
+        } else {
+            [string]$item.reason_cn
+        }
         [pscustomobject]@{
-            Name       = $item.name_cn
-            Action     = $item.action
-            State      = $item.status
-            StateLabel = $label
-            Reason     = $item.reason_cn
-            IsFailure  = ([string]$item.status -eq 'failed')
-            Raw        = $item
+            Name              = $item.name_cn
+            TargetLabel       = Get-GuiExecutionTargetLabel -Item $item
+            Action            = $item.action
+            State             = $status
+            StateLabel        = $label
+            Reason            = $reason
+            FailureStage      = $failureStage
+            FailureStageLabel = $failureStageLabel
+            IsFailure         = ($status -ceq 'failed')
+            Raw               = $item
         }
     }
 }

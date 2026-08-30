@@ -18,13 +18,21 @@
 7. **敌对 pending 防护**：管理员 clean 拒绝重复 JSON 键、超过 5 MiB、容器深度超过 64、非法 UTF-8 或读取期间变化的文件；检查和读取使用同一受保护文件句柄，授权失败只标记 skipped，不执行 mutation
 8. **类别与高影响项隔离**：`safe=false` 不能成为 `automatic_safe`；只有完整合法的 `manual_impact` 策略、`exact/path` 实际命中、用户主动勾选并完成二次确认，才可进入手动执行路径。其余 `safe=false` / `tested=false` 只报告
 9. **双重摘要绑定**：执行子集的 pending 文件 SHA-256 与已确认 `manual_impact` 身份摘要同时绑定并校验；任一清单、身份或确认范围改变都拒绝执行
-10. **执行后验证**：每个动作执行完重新读取真实状态，验证失败标记 failed，不假装成功
-11. **自动备份 + 一键恢复**：服务、自启、计划任务等持久化 mutation 在执行前备份到 `backups/`；restore 只接受可信备份并还原、复核原状态。`stop_process` 是用户单独确认的一次性会话操作，只结束当前进程实例，不删除文件或修改自启，并明确不可恢复
-12. **特征库供应链**：`-Mode update` 支持 SHA256 校验（配置 `ProfileSha256Url` 后强制校验，不一致拒绝替换）；建议发布方配套发布 `.sha256` 文件
+10. **执行后验证与安全结果**：每个动作执行完重新读取真实状态；每项结果持久化并写回 `result_reason` / `failure_stage`，GUI 仅显示通过严格验证和安全净化的 `result_reason` / `failure_stage`。验证失败标记 `failed`，不假装成功
+11. **持久动作备份 + 一次性动作隔离**：持久动作 `disable_service` / `remove_autostart` / `disable_task` 在执行前备份并可通过可信恢复包恢复。`stop_process` 和 `stop_service_runtime` 是用户单独确认的一次性、非持久动作，不进入恢复包，因此不可通过恢复包恢复；它们不删除文件或修改自启
+12. **HRWSCCtrl 精确服务运行态约束**：`stop_service_runtime` 授权停止 exact HRWSCCtrl 服务当前运行态，不禁用服务、不修改 `StartMode`。执行前复验服务/路径/PID/进程名/进程路径/启动时间；随后在同一个原生 SCM 服务句柄上核对原始配置和 PID，并直接发送 STOP，不级联停止依赖服务。停止后进行约 5 秒稳定验证，出现任意正 PID（`> 0`）即记录为 `failed/verification`
+13. **受保护清单版本**：只接受整数 `inventory_schema_version: 2`。v1、缺失版本和未来 v3+ 均拒绝并要求重新扫描；不自动迁移，也不静默迁移
+14. **服务进程身份状态机**：`complete` 只表示受保护采集确认了稳定运行 PID，并原子记录 `ProcessName`、`ProcessPath`、`ProcessStartTimeUtc`；它本身不判断 matcher 授权。`not_running` 和 `unavailable` 始终是观察项、不可执行，并要求重新扫描
+15. **只读采集与故障隔离**：管理员采集器保持只读，使用两次服务快照包围唯一进程身份采集。单条记录失败只产生经过净化的 `unavailable`；其他记录继续独立处理，不会被错误标记为失败
+16. **内部可信来源标记**：内部 `ProcessIdentitySource` 仅在受保护 inventory 包验证通过后附加，不序列化到 pending 或执行子集。任何带有 `ProcessIdentitySource` 的已复核动作都失败关闭并拒绝执行
+17. **普通扫描的数据边界**：普通扫描不再需要读取受保护的 `Win32_Process.ExecutablePath`；它消费受信证据及其中由两次服务快照验证的身份
+18. **服务名授权边界**：`stop_service_runtime` 只接受 `exact` 的 `service_name` 来源；显示名 exact、显示名 contains、显示名 regex 以及服务名 contains/regex 都不授权该动作
+19. **管理员执行时再绑定**：管理员执行仍重新读取唯一当前服务/进程，并比较 PID、进程名、完全限定路径和严格 UTC 启动时间。任何身份漂移都令 `status='skipped'`、`failure_stage` 为空，并用安全净化的 `result_reason` 提示授权不足和重新扫描；`failure_stage` 仅供 `status='failed'` 终态使用
+20. **特征库供应链**：`-Mode update` 支持 SHA256 校验（配置 `ProfileSha256Url` 后强制校验，不一致拒绝替换）；建议发布方配套发布 `.sha256` 文件
 
 ## 测试与实机边界
 
-本次 matcher provenance 与可选清理的自动测试全部使用 Mock 或非破坏性夹具。测试通过不代表已经完成真实 UAC、用户勾选与二次确认、停服务、删除注册表自启项、禁用计划任务、执行后状态核对或恢复闭环；真实系统 mutation 仍需人工验收。
+本次 matcher provenance 与可选清理的自动测试全部使用 Mock 或非破坏性夹具。自动测试不等同真实机器验收：测试通过不代表已经完成真实 UAC、用户勾选与二次确认、停服务、删除注册表自启项、禁用计划任务、执行后状态核对或恢复闭环。HRWSCCtrl 的重启及 0 秒 / 5 秒 / 30 秒真实回读验收尚未完成，执行前仍需新鲜的用户批准；真实系统 mutation 仍需人工验收，本次文档更新没有执行这些操作。v1.8.1 未发布、未推送、未完成真实清理验证。
 
 ## 已知限制（透明声明）
 

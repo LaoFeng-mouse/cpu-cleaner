@@ -43,7 +43,7 @@ function Test-ActionMatchesHitType($Action, $HitType) {
         return @('service','process','autostart','task') -ccontains $HitType
     }
     switch -CaseSensitive ($HitType) {
-        'service'   { return $Action -ceq 'disable_service' }
+        'service'   { return @('disable_service','stop_service_runtime','open_official_uninstaller') -ccontains $Action }
         'autostart' { return $Action -ceq 'remove_autostart' }
         'task'      { return $Action -ceq 'disable_task' }
         default     { return $false }
@@ -113,15 +113,30 @@ function Remove-LiteralAutostartValue {
     }
 }
 
-function New-AutostartRemovalResult($Status, $Reason, $Backup = '', $Manifest = $null) {
-    return [pscustomobject]@{ status=$Status; reason=$Reason; backup=$Backup; manifest=$Manifest }
+function New-CleanupActionResult($Status, $ResultReason, $FailureStage = '', $Backup = '', $Manifest = $null) {
+    if ($Status -cnotin @('success','failed','skipped') -or $ResultReason -isnot [string] -or [string]::IsNullOrWhiteSpace($ResultReason)) {
+        throw 'cleanup action result is invalid'
+    }
+    if ($Status -ceq 'failed') {
+        if ($FailureStage -cnotin @('authorization','backup','mutation','verification','result_persistence')) { throw 'cleanup action failure_stage is invalid' }
+    } elseif ($FailureStage -cne '') {
+        throw 'non-failed cleanup action failure_stage must be empty'
+    }
+    return [pscustomobject]@{
+        status=$Status; result_reason=$ResultReason; failure_stage=[string]$FailureStage
+        reason=$ResultReason; backup=$Backup; manifest=$Manifest
+    }
+}
+
+function New-AutostartRemovalResult($Status, $Reason, $Backup = '', $Manifest = $null, $FailureStage = '') {
+    return New-CleanupActionResult -Status $Status -ResultReason $Reason -FailureStage $FailureStage -Backup $Backup -Manifest $Manifest
 }
 
 function Invoke-LiteralAutostartRemovalFromKey {
     param($RegistryKey, $Source, $Name, $ExpectedValue, $BackupDir, $Tag, [bool]$RequireArtifactIdentity = $false)
     $artifact = $null
     try {
-    if ($null -eq $RegistryKey) { return New-AutostartRemovalResult 'failed' '注册表键未打开' }
+    if ($null -eq $RegistryKey) { return New-AutostartRemovalResult 'failed' '注册表键未打开' -FailureStage 'authorization' }
     if ($Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name) -or
         $ExpectedValue -isnot [string] -or [string]::IsNullOrWhiteSpace($ExpectedValue)) {
         return New-AutostartRemovalResult 'skipped' 'pending 自启名称或原始 Value 无效'
@@ -140,7 +155,7 @@ function Invoke-LiteralAutostartRemovalFromKey {
         }
         $valueKind = $RegistryKey.GetValueKind($literalName)
     } catch {
-        return New-AutostartRemovalResult 'failed' ('读取当前自启值失败: ' + $_.Exception.Message)
+        return New-AutostartRemovalResult 'failed' '无法读取当前自启值' -FailureStage 'authorization'
     }
 
     $backupInfo = [pscustomobject]@{
@@ -152,11 +167,11 @@ function Invoke-LiteralAutostartRemovalFromKey {
     try {
         $backup = Write-AutostartValueBackup -Info $backupInfo -BackupDir $BackupDir -Tag $Tag
     } catch {
-        return New-AutostartRemovalResult 'failed' ('单值备份失败: ' + $_.Exception.Message)
+        return New-AutostartRemovalResult 'failed' '自启项单值备份失败' -FailureStage 'backup'
     }
     if ($backup -isnot [string] -or [string]::IsNullOrWhiteSpace($backup) -or
         -not [System.IO.File]::Exists($backup) -or (Get-Item -LiteralPath $backup).Length -le 0) {
-        return New-AutostartRemovalResult 'failed' '单值备份未成功写入有效文件'
+        return New-AutostartRemovalResult 'failed' '单值备份未成功写入有效文件' -FailureStage 'backup'
     }
     if ($RequireArtifactIdentity) {
         try {
@@ -164,7 +179,7 @@ function Invoke-LiteralAutostartRemovalFromKey {
             $artifact = Open-LockedBackupArtifact $backup
             $null = Assert-BackupArtifactIdentity -Type 'autostart' -Artifact $artifact -Key $Source -Name $literalName -ExpectedValue $currentValue
         } catch {
-            return New-AutostartRemovalResult 'failed' ('单值备份身份验证失败: ' + $_.Exception.Message) $backup
+            return New-AutostartRemovalResult 'failed' '自启项备份身份验证失败' $backup -FailureStage 'backup'
         }
     }
 
@@ -177,11 +192,11 @@ function Invoke-LiteralAutostartRemovalFromKey {
     try {
         $null = Add-BackupManifestEntryAtomic -BackupDir $BackupDir -Entry $manifestEntry
     } catch {
-        return New-AutostartRemovalResult 'failed' ('manifest write-ahead 失败: ' + $_.Exception.Message) $backup
+        return New-AutostartRemovalResult 'failed' '自启项备份清单预写失败' $backup -FailureStage 'backup'
     }
     if ($RequireArtifactIdentity) {
         try { $null = Assert-TrustedBackupPackagePath $BackupDir; Assert-TrustedBackupPathAcl $backup; Assert-TrustedBackupPathAcl (Join-Path $BackupDir 'manifest.json') } catch {
-            return New-AutostartRemovalResult 'failed' ('mutation 前备份 ACL 复验失败: ' + $_.Exception.Message) $backup $manifestEntry
+            return New-AutostartRemovalResult 'failed' '自启项 mutation 前备份信任复验失败' $backup $manifestEntry -FailureStage 'backup'
         }
     }
 
@@ -205,18 +220,18 @@ function Invoke-LiteralAutostartRemovalFromKey {
         }).Count -gt 0
         if ($stillPresent) {
             try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
-            return New-AutostartRemovalResult 'failed' '字面删除后自启项仍存在' $backup $manifestEntry
+            return New-AutostartRemovalResult 'failed' '字面删除后自启项仍存在' $backup $manifestEntry -FailureStage 'verification'
         }
         try {
             $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'success' $true
             $manifestEntry.execution_status = 'success'; $manifestEntry.verified = $true
         } catch {
-            return New-AutostartRemovalResult 'failed' ('自启项已删除，但 manifest 状态更新失败: ' + $_.Exception.Message) $backup $manifestEntry
+            return New-AutostartRemovalResult 'failed' '自启项已删除，但备份清单状态更新失败' $backup $manifestEntry -FailureStage 'result_persistence'
         }
         return New-AutostartRemovalResult 'success' '自启项已完成单值备份并删除' $backup $manifestEntry
     } catch {
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
-        return New-AutostartRemovalResult 'failed' ('字面删除或验证失败: ' + $_.Exception.Message) $backup $manifestEntry
+        return New-AutostartRemovalResult 'failed' '自启项删除命令执行失败' $backup $manifestEntry -FailureStage 'mutation'
     }
     } finally { Close-BackupArtifact $artifact }
 }
@@ -277,7 +292,7 @@ function Build-SuspiciousSubsetPayload($Rows) {
 function Invoke-LiteralAutostartRemoval {
     param($Source, $Name, $ExpectedValue, $BackupDir, $Tag)
     try { $null = Assert-TrustedBackupPackagePath $BackupDir } catch {
-        return New-AutostartRemovalResult 'failed' ('备份 ACL 信任验证失败: ' + $_.Exception.Message)
+        return New-AutostartRemovalResult 'failed' '自启项备份目录信任验证失败' -FailureStage 'backup'
     }
     if (-not (Test-AllowedAutostartRegistrySource $Source)) {
         return New-AutostartRemovalResult 'skipped' '自启注册表路径不在白名单'
@@ -302,7 +317,7 @@ function Invoke-LiteralAutostartRemoval {
         if ($null -eq $key) { return New-AutostartRemovalResult 'skipped' '自启注册表键不存在' }
         return Invoke-LiteralAutostartRemovalFromKey -RegistryKey $key -Source $Source -Name $Name -ExpectedValue $ExpectedValue -BackupDir $BackupDir -Tag $Tag -RequireArtifactIdentity $true
     } catch {
-        return New-AutostartRemovalResult 'failed' ('打开或处理自启注册表键失败: ' + $_.Exception.Message)
+        return New-AutostartRemovalResult 'failed' '无法打开或处理自启注册表键' -FailureStage 'authorization'
     } finally {
         if ($null -ne $key) { $key.Dispose() }
         if ($null -ne $baseKey) { $baseKey.Dispose() }
@@ -494,6 +509,133 @@ function Test-PendingSchemaSupported($Pending) {
     $version = $schemaProperty.Value
     if ($version -isnot [int32] -and $version -isnot [int64]) { return $false }
     return ([int64]3).Equals([int64]$version)
+}
+
+function Test-ServiceProcessActionShape($Action) {
+    if ($null -eq $Action -or
+        (Get-StrictNonBlankStringProperty $Action 'action') -cne 'stop_service_runtime' -or
+        (Get-StrictNonBlankStringProperty $Action 'hit_type') -cne 'service' -or
+        (Get-StrictNonBlankStringProperty $Action 'matched_type') -cne 'exact' -or
+        (Get-StrictNonBlankStringProperty $Action 'matched_field') -cne 'service_name' -or
+        -not (Test-HitMatcherEvidenceShape $Action -AllowedMatchTypes @('exact')) -or
+        (Get-StrictNonBlankStringProperty $Action 'service_name') -eq $null -or
+        (Get-StrictNonBlankStringProperty $Action 'service_binary_path') -eq $null -or
+        (Get-StrictNonBlankStringProperty $Action 'process_name') -eq $null -or
+        (Get-StrictNonBlankStringProperty $Action 'process_path') -eq $null -or
+        $Action.PSObject.Properties.Name -notcontains 'process_id' -or
+        -not (Test-PositiveScalarProcessId $Action.process_id) -or
+        -not (Test-StrictUtcProcessStartTime (Get-PendingHitProperty $Action 'process_start_time_utc'))) {
+        return $false
+    }
+    try {
+        if (-not [System.IO.Path]::IsPathRooted([string]$Action.service_binary_path) -or
+            -not [System.IO.Path]::IsPathRooted([string]$Action.process_path)) { return $false }
+    } catch { return $false }
+    if ($null -eq (Get-CanonicalServiceProcessFileName -Identity $Action)) { return $false }
+    $policy = Get-ValidPendingDisplayPolicy $Action
+    return $Action.safe -is [bool] -and $Action.safe -eq $false -and
+        $null -ne $policy -and $policy.execution_class -ceq 'manual_impact' -and
+        $policy.default_selected -eq $false -and $policy.requires_confirmation -eq $true
+}
+
+function Get-ExactPendingProperty($Object, [string]$PropertyName) {
+    if ($null -eq $Object) { return $null }
+    foreach ($property in $Object.PSObject.Properties) {
+        if ([string]::Equals($property.Name, $PropertyName, [System.StringComparison]::Ordinal)) {
+            return $property
+        }
+    }
+    return $null
+}
+
+function Test-PendingBoundedCleanString($Value, [bool]$AllowEmpty = $false) {
+    if ($Value -isnot [string] -or $Value.Length -gt 32767 -or $Value -cne $Value.Trim()) { return $false }
+    if (-not $AllowEmpty -and $Value.Length -eq 0) { return $false }
+    return ($Value -cnotmatch '[\x00-\x1F\x7F-\x9F]')
+}
+
+function Test-PendingOfficialUninstallEvidenceSemantics($Action) {
+    foreach ($name in @(
+        'uninstall_registry_path','uninstall_display_name','uninstall_publisher','uninstall_install_location',
+        'uninstall_string','uninstall_executable_path'
+    )) {
+        if (-not (Test-PendingBoundedCleanString $Action.$name)) { return $false }
+    }
+    if (-not (Test-PendingBoundedCleanString $Action.uninstall_display_version -AllowEmpty $true)) { return $false }
+    if (-not (Test-LenovoOfficialUninstallRegistryPath -RegistryPath $Action.uninstall_registry_path)) { return $false }
+    $displayNameAllowed = $false
+    foreach ($prefix in $script:LenovoOfficialUninstallDisplayNamePrefixes) {
+        if ($Action.uninstall_display_name.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+            $displayNameAllowed = $true
+            break
+        }
+    }
+    if (-not $displayNameAllowed -or -not ($script:LenovoOfficialUninstallPublishers -ccontains $Action.uninstall_publisher)) {
+        return $false
+    }
+    $installLocation = $Action.uninstall_install_location
+    if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $installLocation)) { return $false }
+    try { $canonicalInstallLocation = [System.IO.Path]::GetFullPath($installLocation) } catch { return $false }
+    if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $canonicalInstallLocation) -or
+        -not $installLocation.Equals($canonicalInstallLocation, [System.StringComparison]::Ordinal) -or
+        $canonicalInstallLocation.Equals([System.IO.Path]::GetPathRoot($canonicalInstallLocation), [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $rawExecutablePath = if ($Action.uninstall_string -cmatch '^"([^"\r\n]+\.exe)"$') { $matches[1] }
+        elseif ($Action.uninstall_string -cmatch '^([^"\r\n]+\.exe)$') { $matches[1] }
+        else { $null }
+    if ($rawExecutablePath -isnot [string]) { return $false }
+    try { $canonicalRawExecutablePath = [System.IO.Path]::GetFullPath($rawExecutablePath) } catch { return $false }
+    if (-not $rawExecutablePath.Equals($canonicalRawExecutablePath, [System.StringComparison]::Ordinal)) { return $false }
+    $parsedExecutablePath = ConvertFrom-StrictOfficialUninstallString -Command $Action.uninstall_string
+    if ($parsedExecutablePath -isnot [string] -or
+        -not $Action.uninstall_executable_path.Equals($parsedExecutablePath, [System.StringComparison]::Ordinal)) {
+        return $false
+    }
+    $installBoundary = $canonicalInstallLocation.TrimEnd('\') + '\'
+    return $parsedExecutablePath.StartsWith($installBoundary, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-OfficialUninstallerActionShape($Action) {
+    if ($null -eq $Action) { return $false }
+    foreach ($property in $Action.PSObject.Properties) {
+        if ([string]::Equals($property.Name, 'ProcessIdentitySource', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    }
+    foreach ($name in @(
+        'action','hit_type','matched_pattern','matched_type','matched_field','service_name',
+        'execution_class','necessity','impact_cn','cleanup_reason_cn','launch_protected_status',
+        'uninstall_evidence_status','uninstall_registry_path','uninstall_display_name','uninstall_publisher',
+        'uninstall_display_version','uninstall_install_location','uninstall_string','uninstall_executable_path'
+    )) {
+        $property = Get-ExactPendingProperty $Action $name
+        if ($null -eq $property -or $property.Value -isnot [string]) { return $false }
+    }
+    foreach ($name in @('safe','default_selected','requires_confirmation')) {
+        $property = Get-ExactPendingProperty $Action $name
+        if ($null -eq $property -or $property.Value -isnot [bool]) { return $false }
+    }
+    if ($Action.action -cne 'open_official_uninstaller' -or
+        $Action.hit_type -cne 'service' -or
+        $Action.matched_pattern -cne 'HRWSCCtrl' -or
+        $Action.matched_type -cne 'exact' -or
+        $Action.matched_field -cne 'service_name' -or
+        -not (Test-HitMatcherEvidenceShape $Action -AllowedMatchTypes @('exact')) -or
+        -not [string]::Equals($Action.service_name, 'HRWSCCtrl', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $Action.safe -ne $false -or
+        $Action.execution_class -cne 'manual_impact' -or $Action.necessity -cne 'optional' -or
+        $Action.default_selected -ne $false -or $Action.requires_confirmation -ne $true -or
+        [string]::IsNullOrWhiteSpace($Action.impact_cn) -or [string]::IsNullOrWhiteSpace($Action.cleanup_reason_cn) -or
+        $Action.launch_protected_status -cne 'complete' -or
+        $Action.uninstall_evidence_status -cne 'complete') {
+        return $false
+    }
+    $levelProperty = Get-ExactPendingProperty $Action 'launch_protected_level'
+    if ($null -eq $levelProperty -or -not (Test-ProfileStrictInteger $levelProperty.Value) -or [int64]$levelProperty.Value -ne 3) {
+        return $false
+    }
+    return Test-PendingOfficialUninstallEvidenceSemantics $Action
 }
 
 function Test-PendingEnvelopeShape($Pending) {
@@ -995,24 +1137,44 @@ function Get-CurrentPendingMatchValue($Pending) {
     }
 }
 
+function Get-ExactPendingIdentityValue($Item, [string]$Name) {
+    $property = Get-ExactPendingProperty $Item $Name
+    if ($null -eq $property) { return $null }
+    if ($property.Value -is [System.Array]) { return ,$property.Value }
+    return $property.Value
+}
+
 function Get-PendingIdentityKey($Item) {
     $identity = [pscustomobject][ordered]@{
-        id                   = $Item.id
-        hit_type             = $Item.hit_type
-        action               = $Item.action
-        service_name         = $Item.service_name
-        service_display_name = $Item.service_display_name
-        autostart_source     = $Item.autostart_source
-        autostart_name       = $Item.autostart_name
-        autostart_value      = $Item.autostart_value
-        task_name            = $Item.task_name
-        task_path            = $Item.task_path
-        process_name         = $Item.process_name
-        process_id           = $Item.process_id
-        process_path         = $Item.process_path
-        matched_pattern      = $Item.matched_pattern
-        matched_type         = $Item.matched_type
-        matched_field        = $Item.matched_field
+        id                   = (Get-ExactPendingIdentityValue $Item 'id')
+        hit_type             = (Get-ExactPendingIdentityValue $Item 'hit_type')
+        action               = (Get-ExactPendingIdentityValue $Item 'action')
+        service_name         = (Get-ExactPendingIdentityValue $Item 'service_name')
+        service_display_name = (Get-ExactPendingIdentityValue $Item 'service_display_name')
+        autostart_source     = (Get-ExactPendingIdentityValue $Item 'autostart_source')
+        autostart_name       = (Get-ExactPendingIdentityValue $Item 'autostart_name')
+        autostart_value      = (Get-ExactPendingIdentityValue $Item 'autostart_value')
+        task_name            = (Get-ExactPendingIdentityValue $Item 'task_name')
+        task_path            = (Get-ExactPendingIdentityValue $Item 'task_path')
+        process_name         = (Get-ExactPendingIdentityValue $Item 'process_name')
+        process_id           = (Get-ExactPendingIdentityValue $Item 'process_id')
+        process_path         = (Get-ExactPendingIdentityValue $Item 'process_path')
+        matched_pattern      = (Get-ExactPendingIdentityValue $Item 'matched_pattern')
+        matched_type         = (Get-ExactPendingIdentityValue $Item 'matched_type')
+        matched_field        = (Get-ExactPendingIdentityValue $Item 'matched_field')
+    }
+    if ($Item.action -ceq 'stop_service_runtime') {
+        $identity | Add-Member NoteProperty service_binary_path $Item.service_binary_path
+        $identity | Add-Member NoteProperty process_start_time_utc $Item.process_start_time_utc
+    }
+    if ($Item.action -ceq 'open_official_uninstaller') {
+        foreach ($name in @(
+            'launch_protected_status','launch_protected_level','uninstall_evidence_status','uninstall_registry_path',
+            'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
+            'uninstall_string','uninstall_executable_path'
+        )) {
+            $identity | Add-Member NoteProperty $name (Get-ExactPendingIdentityValue $Item $name)
+        }
     }
     return ConvertTo-Json -InputObject $identity -Compress -Depth 4
 }
@@ -1037,7 +1199,11 @@ function Test-ManualImpactDigestActionShape($Action) {
         -not (Test-HitMatcherEvidenceShape $Action -AllowedMatchTypes @('exact','path','contains','regex','publisher','sha256')) -or
         -not (Test-ActionMatchesHitType $Action.action $Action.hit_type)) { return $false }
     switch -CaseSensitive ($Action.hit_type) {
-        'service' { return $null -ne (Get-StrictNonBlankStringProperty $Action 'service_name') }
+        'service' {
+            if ($Action.action -ceq 'stop_service_runtime') { return Test-ServiceProcessActionShape $Action }
+            if ($Action.action -ceq 'open_official_uninstaller') { return Test-OfficialUninstallerActionShape $Action }
+            return $null -ne (Get-StrictNonBlankStringProperty $Action 'service_name')
+        }
         'autostart' {
             return $null -ne (Get-StrictNonBlankStringProperty $Action 'autostart_source') -and
                 $null -ne (Get-StrictNonBlankStringProperty $Action 'autostart_name') -and
@@ -1119,6 +1285,13 @@ function Get-PendingExecutableTargetIdentityKey($Item) {
     switch -CaseSensitive ($hitType) {
         'SERVICE' {
             $identity.service_name = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'service_name')
+            if ((Get-PendingHitProperty $Item 'action') -ceq 'stop_service_runtime') {
+                $identity.service_binary_path = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'service_binary_path')
+                $identity.process_id = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_id')
+                $identity.process_name = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_name')
+                $identity.process_path = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_path')
+                $identity.process_start_time_utc = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'process_start_time_utc')
+            }
         }
         'TASK' {
             $identity.task_path = ConvertTo-PendingTargetIdentityValue (Get-PendingHitProperty $Item 'task_path')
@@ -1211,6 +1384,8 @@ function New-PendingPersistedHit($Hit, $Policy, [string]$Status = '', [string]$C
         process_name         = Get-PendingHitProperty $Hit 'process_name'
         process_id           = Get-PendingHitProperty $Hit 'process_id'
         process_path         = Get-PendingHitProperty $Hit 'process_path'
+        service_binary_path  = Get-PendingHitProperty $Hit 'service_binary_path'
+        process_start_time_utc = [string](Get-PendingHitProperty $Hit 'process_start_time_utc')
         matched_pattern      = Get-PendingHitProperty $Hit 'matched_pattern'
         matched_type         = Get-PendingHitProperty $Hit 'matched_type'
         matched_field        = Get-PendingHitProperty $Hit 'matched_field'
@@ -1221,6 +1396,16 @@ function New-PendingPersistedHit($Hit, $Policy, [string]$Status = '', [string]$C
         requires_confirmation = $Policy.requires_confirmation
         impact_cn            = $Policy.impact_cn
         cleanup_reason_cn    = $Policy.cleanup_reason_cn
+    }
+    if ((Get-PendingHitProperty $Hit 'action') -ceq 'open_official_uninstaller' -and
+        (Test-OfficialUninstallerActionShape $Hit)) {
+        foreach ($name in @(
+            'launch_protected_status','launch_protected_level','uninstall_evidence_status','uninstall_registry_path',
+            'uninstall_display_name','uninstall_publisher','uninstall_display_version','uninstall_install_location',
+            'uninstall_string','uninstall_executable_path'
+        )) {
+            $item[$name] = (Get-ExactPendingProperty $Hit $name).Value
+        }
     }
     if (-not [string]::IsNullOrEmpty($Status)) { $item.status = $Status }
     if (-not [string]::IsNullOrEmpty($CurrentState)) { $item.current_state = $CurrentState }
@@ -1301,6 +1486,12 @@ function Save-PendingActions($Hits, $Suspicious, $ScanHealth = $script:ScanHealt
             $actionHitTypeAllowed -and
             ($null -ne $displayPolicy) -and
             $categoryComplete
+        if ($executable -and $h.action -ceq 'stop_service_runtime') {
+            $executable = Test-ServiceProcessActionShape $h
+        }
+        if ($executable -and $h.action -ceq 'open_official_uninstaller') {
+            $executable = Test-OfficialUninstallerActionShape $h
+        }
 
         # observations 保持 rule/action/provenance 身份，防止宽匹配观察压制同目标的窄匹配动作。
         $dedupeKey = Get-PendingIdentityKey $h
@@ -1408,6 +1599,8 @@ function Test-PendingActionEligible($p, $profiles) {
     if ($p.status -cnotin @('pending','failed')) { return $false }
     if ($p.action -cnotin $script:DangerousActions) { return $false }
     if (-not (Test-HitMatcherEvidenceShape $p)) { return $false }
+    if ($p.action -ceq 'stop_service_runtime' -and -not (Test-ServiceProcessActionShape $p)) { return $false }
+    if ($p.action -ceq 'open_official_uninstaller' -and -not (Test-OfficialUninstallerActionShape $p)) { return $false }
 
     if ($profiles.PSObject.Properties.Name -notcontains 'profiles') { return $false }
     $rules = @($profiles.profiles | Where-Object {
@@ -1487,12 +1680,20 @@ function Test-SelectedPendingActionAuthorized($Pending, $Profiles, $ImpactConfir
         ($null -eq $ImpactConfirmation -or $ImpactConfirmation.HasManualImpact -isnot [bool] -or
             $ImpactConfirmation.HasManualImpact -ne $true -or $ImpactConfirmation.IsApproved -isnot [bool] -or
             $ImpactConfirmation.IsApproved -ne $true)) {
-        if ($null -ne $Pending) { $Pending.status = 'skipped' }
+        if ($null -ne $Pending) {
+            Set-PendingTransactionResult -Pending $Pending -Result ([pscustomobject]@{
+                status='skipped'; result_reason='手动影响确认摘要无效或与最终选择不一致'; failure_stage=''
+            })
+        }
         Write-Host '  跳过: 手动影响确认摘要无效或与最终选择不一致。' -ForegroundColor Red
         return $false
     }
     if (Test-PendingActionEligible $Pending $Profiles) { return $true }
-    if ($null -ne $Pending) { $Pending.status = 'skipped' }
+    if ($null -ne $Pending) {
+        Set-PendingTransactionResult -Pending $Pending -Result ([pscustomobject]@{
+            status='skipped'; result_reason='执行前最终授权失败，当前系统状态或特征证据已变化，需要重新扫描'; failure_stage=''
+        })
+    }
     Write-Host '  跳过: 执行前最终授权失败，当前系统状态或特征证据已变化。' -ForegroundColor Red
     return $false
 }
@@ -1707,10 +1908,10 @@ function Invoke-ServiceDisableAction {
     try {
     $srvName = $Pending.service_name
     if ($srvName -isnot [string] -or $srvName -cnotmatch '^[A-Za-z0-9_.]+$') {
-        return [pscustomobject]@{ status='skipped'; reason='服务名无效'; backup=''; manifest=$null }
+        return New-CleanupActionResult 'skipped' '服务名无效'
     }
     try { $null = Assert-TrustedBackupPackagePath $BackupDir } catch {
-        return [pscustomobject]@{ status='failed'; reason=('备份 ACL 信任验证失败: ' + $_.Exception.Message); backup=''; manifest=$null }
+        return New-CleanupActionResult 'failed' '服务备份目录信任验证失败' 'backup'
     }
     try {
         $info = Get-ServiceBackupInfo $srvName
@@ -1720,7 +1921,7 @@ function Invoke-ServiceDisableAction {
         $artifact = Open-LockedBackupArtifact $bak
         $null = Assert-BackupArtifactIdentity -Type 'service' -Artifact $artifact -TargetIdentity $srvName
     } catch {
-        return [pscustomobject]@{ status='failed'; reason=('服务备份失败: ' + $_.Exception.Message); backup=''; manifest=$null }
+        return New-CleanupActionResult 'failed' '服务备份或身份验证失败' 'backup'
     }
 
     $manifest = [pscustomobject]@{
@@ -1733,28 +1934,33 @@ function Invoke-ServiceDisableAction {
         execution_status='prepared'; verified=$false; note='restore: sc config <name> start= <start_type_sc>'
     }
     try { $null = Add-BackupManifestEntryAtomic -BackupDir $BackupDir -Entry $manifest } catch {
-        return [pscustomobject]@{ status='failed'; reason=('manifest write-ahead 失败: ' + $_.Exception.Message); backup=$bak; manifest=$null }
+        return New-CleanupActionResult 'failed' '服务备份清单预写失败' 'backup' $bak
     }
     try { $null = Assert-TrustedBackupPackagePath $BackupDir; Assert-TrustedBackupPathAcl $bak; Assert-TrustedBackupPathAcl (Join-Path $BackupDir 'manifest.json') } catch {
-        return [pscustomobject]@{ status='failed'; reason=('mutation 前备份 ACL 复验失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' '服务 mutation 前备份信任复验失败' 'backup' $bak $manifest
     }
     try {
         Invoke-ServiceConfigDisable -ServiceName $srvName
+    } catch {
+        try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
+        return New-CleanupActionResult 'failed' '服务禁用命令执行失败' 'mutation' $bak $manifest
+    }
+    try {
         $after = Get-Service -Name $srvName -ErrorAction SilentlyContinue
         if ($after -and $after.StartType -eq 'Disabled' -and $after.Status -eq 'Stopped') {
             try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'success' $true } catch {
-                return [pscustomobject]@{ status='failed'; reason=('服务已修改，但 manifest 状态更新失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+                return New-CleanupActionResult 'failed' '服务已修改，但备份清单状态更新失败' 'result_persistence' $bak $manifest
             }
             $manifest.execution_status = 'success'; $manifest.verified = $true
-            return [pscustomobject]@{ status='success'; reason='已禁用并停止'; backup=$bak; manifest=$manifest }
+            return New-CleanupActionResult 'success' '已禁用并停止' '' $bak $manifest
         }
         $actual = if ($after) { ('StartType={0}; Status={1}' -f $after.StartType,$after.Status) } else { '服务不存在' }
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
         $reason = if ($after -and $after.StartType -eq 'Disabled' -and $after.Status -eq 'Running') { '服务已禁用但仍在运行' } else { "服务禁用后置验证失败: $actual" }
-        return [pscustomobject]@{ status='failed'; reason=$reason; backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' $reason 'verification' $bak $manifest
     } catch {
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
-        return [pscustomobject]@{ status='failed'; reason=('服务修改或验证失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' '服务后置状态读取失败' 'verification' $bak $manifest
     }
     } finally { Close-BackupArtifact $artifact }
 }
@@ -1777,16 +1983,16 @@ function Invoke-TaskDisableAction {
     $artifact = $null
     try {
     try { $null = Assert-TrustedBackupPackagePath $BackupDir } catch {
-        return [pscustomobject]@{ status='failed'; reason=('备份 ACL 信任验证失败: ' + $_.Exception.Message); backup=''; manifest=$null }
+        return New-CleanupActionResult 'failed' '计划任务备份目录信任验证失败' 'backup'
     }
     try { $taskPath = Normalize-TaskPathIdentity $Pending.task_path } catch {
-        return [pscustomobject]@{ status='skipped'; reason='计划任务路径无效'; backup=''; manifest=$null }
+        return New-CleanupActionResult 'skipped' '计划任务路径无效'
     }
     $taskName = $taskPath.Split('\')[-1]
     $taskFolder = if ($taskPath.Length -gt $taskName.Length) { $taskPath.Substring(0, $taskPath.Length - $taskName.Length) } else { '\' }
     try {
         $task = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
-        if (-not $task) { return [pscustomobject]@{ status='skipped'; reason='计划任务不存在'; backup=''; manifest=$null } }
+        if (-not $task) { return New-CleanupActionResult 'skipped' '计划任务不存在' }
         if ($task.State -isnot [string] -or [string]::IsNullOrWhiteSpace($task.State)) { throw '计划任务原始 Enabled 状态不可用' }
         $enabled = ($task.State -cne 'Disabled')
         $xml = Export-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop
@@ -1795,7 +2001,7 @@ function Invoke-TaskDisableAction {
         $artifact = Open-LockedBackupArtifact $bak
         $null = Assert-BackupArtifactIdentity -Type 'task' -Artifact $artifact -TargetIdentity $taskPath
     } catch {
-        return [pscustomobject]@{ status='failed'; reason=('计划任务备份失败: ' + $_.Exception.Message); backup=''; manifest=$null }
+        return New-CleanupActionResult 'failed' '计划任务备份或身份验证失败' 'backup'
     }
 
     $manifest = [pscustomobject]@{
@@ -1806,27 +2012,32 @@ function Invoke-TaskDisableAction {
         note='restore: Register-ScheduledTask -Xml <backup> -TaskName <name> -TaskPath <path> -Force'
     }
     try { $null = Add-BackupManifestEntryAtomic -BackupDir $BackupDir -Entry $manifest } catch {
-        return [pscustomobject]@{ status='failed'; reason=('manifest write-ahead 失败: ' + $_.Exception.Message); backup=$bak; manifest=$null }
+        return New-CleanupActionResult 'failed' '计划任务备份清单预写失败' 'backup' $bak
     }
     try { $null = Assert-TrustedBackupPackagePath $BackupDir; Assert-TrustedBackupPathAcl $bak; Assert-TrustedBackupPathAcl (Join-Path $BackupDir 'manifest.json') } catch {
-        return [pscustomobject]@{ status='failed'; reason=('mutation 前备份 ACL 复验失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' '计划任务 mutation 前备份信任复验失败' 'backup' $bak $manifest
     }
     try {
         Disable-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction Stop | Out-Null
+    } catch {
+        try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
+        return New-CleanupActionResult 'failed' '计划任务禁用命令执行失败' 'mutation' $bak $manifest
+    }
+    try {
         $taskAfter = Get-ScheduledTask -TaskName $taskName -TaskPath $taskFolder -ErrorAction SilentlyContinue
         if ($taskAfter -and $taskAfter.State -eq 'Disabled') {
             try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'success' $true } catch {
-                return [pscustomobject]@{ status='failed'; reason=('任务已禁用，但 manifest 状态更新失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+                return New-CleanupActionResult 'failed' '任务已禁用，但备份清单状态更新失败' 'result_persistence' $bak $manifest
             }
             $manifest.execution_status = 'success'; $manifest.verified = $true
-            return [pscustomobject]@{ status='success'; reason='计划任务已禁用'; backup=$bak; manifest=$manifest }
+            return New-CleanupActionResult 'success' '计划任务已禁用' '' $bak $manifest
         }
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
         $actualState = if ($taskAfter) { $taskAfter.State } else { '目标不存在' }
-        return [pscustomobject]@{ status='failed'; reason=("任务状态=$actualState"); backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' ("任务状态=$actualState") 'verification' $bak $manifest
     } catch {
         try { $null = Update-BackupManifestEntryAtomic $BackupDir $Tag 'failed' $false } catch {}
-        return [pscustomobject]@{ status='failed'; reason=('计划任务禁用或验证失败: ' + $_.Exception.Message); backup=$bak; manifest=$manifest }
+        return New-CleanupActionResult 'failed' '计划任务后置状态读取失败' 'verification' $bak $manifest
     }
     } finally { Close-BackupArtifact $artifact }
 }
@@ -2199,6 +2410,505 @@ function Resolve-LatestTrustedRestorePackage {
     throw (New-RestoreNoTrustedBackupException '没有通过 owner、DACL、manifest、哈希和身份验证的可信备份')
 }
 
+function Get-CurrentServiceProcessIdentity {
+    param([string]$ServiceName)
+    if ($ServiceName -isnot [string] -or [string]::IsNullOrWhiteSpace($ServiceName)) {
+        return [pscustomobject]@{ Identity=$null; Reason='service name is invalid; rescan required' }
+    }
+    $snapshotReason = ''
+    $first = Get-CurrentServiceExecutionSnapshot -ServiceName $ServiceName -FailureReason ([ref]$snapshotReason)
+    if ($null -eq $first) {
+        return [pscustomobject]@{ Identity=$null; Reason='current service identity is missing or not unique; rescan required' }
+    }
+    try {
+        $processes = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $first.ProcessId) -ErrorAction Stop)
+    } catch {
+        return [pscustomobject]@{ Identity=$null; Reason='current process identity could not be read; rescan required' }
+    }
+    if ($processes.Count -ne 1 -or $null -eq $processes[0]) {
+        return [pscustomobject]@{ Identity=$null; Reason='current process identity is missing or not unique; rescan required' }
+    }
+    $process = $processes[0]
+    $processId = Get-StrictServiceProcessId $process.ProcessId
+    $processName = Get-StrictNonBlankStringProperty $process 'Name'
+    $wmiProcessPath = Get-StrictNonBlankStringProperty $process 'ExecutablePath'
+    $wmiStartTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
+    if ($null -eq $processId -or $processId -ne $first.ProcessId -or $null -eq $processName -or
+        [string]::IsNullOrWhiteSpace([string]$wmiStartTimeUtc)) {
+        return [pscustomobject]@{ Identity=$null; Reason='current process identity is incomplete; rescan required' }
+    }
+    $normalizedWmiPath = Get-NormalizedServiceProcessPath $wmiProcessPath
+    $wmiPathIsValid = $null -ne $normalizedWmiPath -and [System.IO.File]::Exists($normalizedWmiPath) -and
+        [string]::Equals($normalizedWmiPath, $first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($wmiPathIsValid) {
+        $processPath = $normalizedWmiPath
+        $startTimeUtc = $wmiStartTimeUtc
+    } else {
+        $nativeIdentity = Get-NativeProcessIdentity -ProcessId $first.ProcessId
+        $nativePath = if ($null -ne $nativeIdentity) { Get-NormalizedServiceProcessPath $nativeIdentity.Path } else { $null }
+        if ($null -eq $nativeIdentity -or
+            (Get-StrictServiceProcessId $nativeIdentity.PID) -ne $first.ProcessId -or
+            $nativeIdentity.Name -isnot [string] -or
+            -not [string]::Equals([string]$nativeIdentity.Name, $processName, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $null -eq $nativePath -or -not [System.IO.File]::Exists($nativePath) -or
+            -not [string]::Equals($nativePath, $first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $nativeIdentity.StartTimeUtc -isnot [string] -or
+            -not (Test-WmiNativeProcessStartTimeEqual -WmiStartTimeUtc $wmiStartTimeUtc -NativeStartTimeUtc $nativeIdentity.StartTimeUtc)) {
+            return [pscustomobject]@{ Identity=$null; Reason='current native process identity is inconsistent; rescan required' }
+        }
+        $processName = [string]$nativeIdentity.Name
+        $processPath = $nativePath
+        $startTimeUtc = [string]$nativeIdentity.StartTimeUtc
+    }
+    $canonicalProcessName = Get-CanonicalServiceProcessFileName -Identity ([pscustomobject]@{
+        process_name=$processName; process_path=$processPath; service_binary_path=$first.BinaryPath
+    })
+    if ($null -eq $canonicalProcessName -or
+        -not [string]::Equals($processPath, $first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Identity=$null; Reason='current process name or path is inconsistent; rescan required' }
+    }
+    $processName = $canonicalProcessName
+
+    $snapshotReason = ''
+    $second = Get-CurrentServiceExecutionSnapshot -ServiceName $ServiceName -FailureReason ([ref]$snapshotReason)
+    if ($null -eq $second -or
+        -not [string]::Equals($first.Name, $second.Name, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $second.State -cne 'Running' -or $first.ProcessId -ne $second.ProcessId -or
+        -not [string]::Equals($first.PathName, $second.PathName, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($first.BinaryPath, $second.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Identity=$null; Reason='service identity changed during validation; rescan required' }
+    }
+    return [pscustomobject]@{
+        Identity=[pscustomobject]@{
+            service_name=$first.Name; service_binary_path=$first.BinaryPath; process_id=[int]$first.ProcessId
+            process_name=$processName; process_path=$processPath; process_start_time_utc=$startTimeUtc
+        }
+        Reason=''
+    }
+}
+
+function Get-NormalizedServiceProcessPath($Value) {
+    if ($Value -isnot [string] -or [string]::IsNullOrWhiteSpace($Value) -or -not [System.IO.Path]::IsPathRooted($Value)) { return $null }
+    try { return [System.IO.Path]::GetFullPath($Value) } catch { return $null }
+}
+
+function Get-CanonicalProcessFileName {
+    param($Name, $ExecutablePath, [switch]$AllowExtensionlessName)
+    if ($Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Name) -or $Name -cne $Name.Trim() -or
+        $Name.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { return $null }
+    $normalizedPath = Get-NormalizedServiceProcessPath $ExecutablePath
+    if ($null -eq $normalizedPath) { return $null }
+    try {
+        $pathFileName = [System.IO.Path]::GetFileName($normalizedPath)
+        if ([string]::IsNullOrWhiteSpace($pathFileName) -or $pathFileName -cne $pathFileName.Trim() -or
+            [string]::IsNullOrWhiteSpace([System.IO.Path]::GetExtension($pathFileName)) -or
+            $pathFileName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+            -not [string]::Equals([System.IO.Path]::GetFileName($Name), $Name, [System.StringComparison]::Ordinal)) {
+            return $null
+        }
+        if ([string]::Equals($Name, $pathFileName, [System.StringComparison]::OrdinalIgnoreCase)) { return $pathFileName }
+        if ($AllowExtensionlessName -and
+            [string]::IsNullOrEmpty([System.IO.Path]::GetExtension($Name)) -and
+            [string]::Equals($Name, [System.IO.Path]::GetFileNameWithoutExtension($pathFileName), [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $pathFileName
+        }
+    } catch { return $null }
+    return $null
+}
+
+function Get-CanonicalServiceProcessFileName {
+    param($Identity)
+    if ($null -eq $Identity) { return $null }
+    $processName = Get-StrictNonBlankStringProperty $Identity 'process_name'
+    $processPath = Get-StrictNonBlankStringProperty $Identity 'process_path'
+    $serviceBinaryPath = Get-StrictNonBlankStringProperty $Identity 'service_binary_path'
+    $canonicalName = Get-CanonicalProcessFileName -Name $processName -ExecutablePath $processPath
+    $normalizedServicePath = Get-NormalizedServiceProcessPath $serviceBinaryPath
+    if ($null -eq $canonicalName -or $null -eq $normalizedServicePath) { return $null }
+    try { $serviceFileName = [System.IO.Path]::GetFileName($normalizedServicePath) } catch { return $null }
+    if (-not [string]::Equals($canonicalName, $serviceFileName, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+    return $canonicalName
+}
+
+function Get-NormalizedStrictUtcProcessStartTime($Value) {
+    if (-not (Test-StrictUtcProcessStartTime $Value)) { return $null }
+    $parsed = [datetime]::ParseExact($Value, 'o', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+    return $parsed.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Test-ServiceProcessIdentityEqual {
+    param($Pending, $Current)
+    if ($null -eq $Pending -or $null -eq $Current) { return [pscustomobject]@{ Equal=$false; Reason='current identity is unavailable; rescan required' } }
+    $expectedServiceName = Get-StrictNonBlankStringProperty $Pending 'service_name'
+    $actualServiceName = Get-StrictNonBlankStringProperty $Current 'service_name'
+    if ($null -eq $expectedServiceName -or $null -eq $actualServiceName -or
+        -not [string]::Equals($expectedServiceName,$actualServiceName,[System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Equal=$false; Reason='service name changed; rescan required' }
+    }
+    $expectedProcessName = Get-CanonicalServiceProcessFileName -Identity $Pending
+    $actualProcessName = Get-CanonicalServiceProcessFileName -Identity $Current
+    if ($null -eq $expectedProcessName -or $null -eq $actualProcessName -or
+        -not [string]::Equals($expectedProcessName,$actualProcessName,[System.StringComparison]::OrdinalIgnoreCase)) {
+        return [pscustomobject]@{ Equal=$false; Reason='process name changed; rescan required' }
+    }
+    if (-not (Test-PositiveScalarProcessId $Pending.process_id) -or -not (Test-PositiveScalarProcessId $Current.process_id) -or
+        [int]$Pending.process_id -ne [int]$Current.process_id) {
+        return [pscustomobject]@{ Equal=$false; Reason='PID changed; rescan required' }
+    }
+    foreach ($comparison in @(@('service binary path','service_binary_path'),@('process path','process_path'))) {
+        $field = $comparison[1]
+        $expected = Get-NormalizedServiceProcessPath (Get-PendingHitProperty $Pending $field)
+        $actual = Get-NormalizedServiceProcessPath (Get-PendingHitProperty $Current $field)
+        if ($null -eq $expected -or $null -eq $actual -or
+            -not [string]::Equals($expected, $actual, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return [pscustomobject]@{ Equal=$false; Reason=("$($comparison[0]) changed; rescan required") }
+        }
+    }
+    $expectedStart = Get-NormalizedStrictUtcProcessStartTime (Get-PendingHitProperty $Pending 'process_start_time_utc')
+    $actualStart = Get-NormalizedStrictUtcProcessStartTime (Get-PendingHitProperty $Current 'process_start_time_utc')
+    if ($null -eq $expectedStart -or $null -eq $actualStart -or
+        -not [string]::Equals($expectedStart, $actualStart, [System.StringComparison]::Ordinal)) {
+        return [pscustomobject]@{ Equal=$false; Reason='start time changed; rescan required' }
+    }
+    return [pscustomobject]@{ Equal=$true; Reason='' }
+}
+
+function New-ServiceProcessStopResult([string]$Status, [string]$Reason, [string]$FailureStage = '') {
+    return [pscustomobject]@{ status=$Status; result_reason=$Reason; failure_stage=$FailureStage }
+}
+
+function Get-ServiceProcessVerificationTimeMilliseconds {
+    return [int64]([System.Diagnostics.Stopwatch]::GetTimestamp() * 1000 / [System.Diagnostics.Stopwatch]::Frequency)
+}
+
+function Start-ServiceProcessVerificationDelay([int]$Milliseconds) {
+    Start-Sleep -Milliseconds $Milliseconds
+}
+
+function Initialize-NativeExactServiceRuntimeStopApi {
+    if ($null -ne ('ShushuCleaner.ExactServiceRuntimeStopNativeV1' -as [type])) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+namespace ShushuCleaner
+{
+    public sealed class ExactServiceRuntimeStopResultV1
+    {
+        public string Status { get; set; }
+        public bool StopSent { get; set; }
+        public int ErrorCode { get; set; }
+        public uint ProcessId { get; set; }
+    }
+
+    public static class ExactServiceRuntimeStopNativeV1
+    {
+        private const uint SC_MANAGER_CONNECT = 0x0001;
+        private const uint SERVICE_QUERY_CONFIG = 0x0001;
+        private const uint SERVICE_QUERY_STATUS = 0x0004;
+        private const uint SERVICE_STOP = 0x0020;
+        private const uint SERVICE_CONTROL_STOP = 0x00000001;
+        private const int SC_STATUS_PROCESS_INFO = 0;
+        private const uint SERVICE_STOPPED = 0x00000001;
+        private const uint SERVICE_RUNNING = 0x00000004;
+        private const int ERROR_INSUFFICIENT_BUFFER = 122;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SERVICE_STATUS
+        {
+            public uint dwServiceType;
+            public uint dwCurrentState;
+            public uint dwControlsAccepted;
+            public uint dwWin32ExitCode;
+            public uint dwServiceSpecificExitCode;
+            public uint dwCheckPoint;
+            public uint dwWaitHint;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SERVICE_STATUS_PROCESS
+        {
+            public uint dwServiceType;
+            public uint dwCurrentState;
+            public uint dwControlsAccepted;
+            public uint dwWin32ExitCode;
+            public uint dwServiceSpecificExitCode;
+            public uint dwCheckPoint;
+            public uint dwWaitHint;
+            public uint dwProcessId;
+            public uint dwServiceFlags;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct QUERY_SERVICE_CONFIG
+        {
+            public uint dwServiceType;
+            public uint dwStartType;
+            public uint dwErrorControl;
+            public IntPtr lpBinaryPathName;
+            public IntPtr lpLoadOrderGroup;
+            public uint dwTagId;
+            public IntPtr lpDependencies;
+            public IntPtr lpServiceStartName;
+            public IntPtr lpDisplayName;
+        }
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenSCManagerW(string machineName, string databaseName, uint desiredAccess);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr OpenServiceW(IntPtr serviceControlManager, string serviceName, uint desiredAccess);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseServiceHandle(IntPtr handle);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceStatusEx(IntPtr service, int infoLevel, IntPtr buffer, int bufferSize, out int bytesNeeded);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceConfigW(IntPtr service, IntPtr config, int configSize, out int bytesNeeded);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ControlService(IntPtr service, uint control, out SERVICE_STATUS status);
+
+        private static ExactServiceRuntimeStopResultV1 Result(string status, bool stopSent, int errorCode, uint processId)
+        {
+            return new ExactServiceRuntimeStopResultV1 { Status = status, StopSent = stopSent, ErrorCode = errorCode, ProcessId = processId };
+        }
+
+        private static bool TryQueryStatus(IntPtr service, out SERVICE_STATUS_PROCESS status, out int errorCode)
+        {
+            int size = Marshal.SizeOf(typeof(SERVICE_STATUS_PROCESS));
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                int needed;
+                if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, buffer, size, out needed))
+                {
+                    errorCode = Marshal.GetLastWin32Error();
+                    status = new SERVICE_STATUS_PROCESS();
+                    return false;
+                }
+                status = (SERVICE_STATUS_PROCESS)Marshal.PtrToStructure(buffer, typeof(SERVICE_STATUS_PROCESS));
+                errorCode = 0;
+                return true;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+
+        private static bool TryQueryBinaryPath(IntPtr service, out string binaryPath, out int errorCode)
+        {
+            int needed;
+            QueryServiceConfigW(service, IntPtr.Zero, 0, out needed);
+            errorCode = Marshal.GetLastWin32Error();
+            if (needed <= 0 || errorCode != ERROR_INSUFFICIENT_BUFFER)
+            {
+                binaryPath = null;
+                return false;
+            }
+            IntPtr buffer = Marshal.AllocHGlobal(needed);
+            try
+            {
+                if (!QueryServiceConfigW(service, buffer, needed, out needed))
+                {
+                    errorCode = Marshal.GetLastWin32Error();
+                    binaryPath = null;
+                    return false;
+                }
+                QUERY_SERVICE_CONFIG config = (QUERY_SERVICE_CONFIG)Marshal.PtrToStructure(buffer, typeof(QUERY_SERVICE_CONFIG));
+                binaryPath = Marshal.PtrToStringUni(config.lpBinaryPathName);
+                errorCode = 0;
+                return binaryPath != null;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+
+        public static ExactServiceRuntimeStopResultV1 StopExact(string serviceName, uint expectedProcessId, string expectedPathName, int timeoutMilliseconds)
+        {
+            if (String.IsNullOrWhiteSpace(serviceName) || serviceName != serviceName.Trim() || expectedProcessId == 0 ||
+                String.IsNullOrWhiteSpace(expectedPathName) || expectedPathName != expectedPathName.Trim() || timeoutMilliseconds < 1)
+                return Result("invalid", false, 0, 0);
+
+            IntPtr manager = IntPtr.Zero;
+            IntPtr service = IntPtr.Zero;
+            try
+            {
+                manager = OpenSCManagerW(null, null, SC_MANAGER_CONNECT);
+                if (manager == IntPtr.Zero) return Result("open_failed", false, Marshal.GetLastWin32Error(), 0);
+                service = OpenServiceW(manager, serviceName, SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_STOP);
+                if (service == IntPtr.Zero) return Result("open_failed", false, Marshal.GetLastWin32Error(), 0);
+
+                string currentPathName;
+                int errorCode;
+                if (!TryQueryBinaryPath(service, out currentPathName, out errorCode))
+                    return Result("query_failed", false, errorCode, 0);
+                if (!String.Equals(currentPathName, expectedPathName, StringComparison.Ordinal))
+                    return Result("identity_changed", false, 0, 0);
+
+                SERVICE_STATUS_PROCESS current;
+                if (!TryQueryStatus(service, out current, out errorCode))
+                    return Result("query_failed", false, errorCode, 0);
+                if (current.dwCurrentState != SERVICE_RUNNING || current.dwProcessId != expectedProcessId)
+                    return Result("identity_changed", false, 0, current.dwProcessId);
+
+                SERVICE_STATUS controlStatus;
+                if (!ControlService(service, SERVICE_CONTROL_STOP, out controlStatus))
+                    return Result("control_rejected", false, Marshal.GetLastWin32Error(), current.dwProcessId);
+
+                Stopwatch stopwatch = Stopwatch.StartNew();
+                while (stopwatch.ElapsedMilliseconds < timeoutMilliseconds)
+                {
+                    SERVICE_STATUS_PROCESS observed;
+                    if (!TryQueryStatus(service, out observed, out errorCode))
+                        return Result("verification_unknown", true, errorCode, current.dwProcessId);
+                    if (observed.dwCurrentState == SERVICE_STOPPED && observed.dwProcessId == 0)
+                        return Result("stopped", true, 0, 0);
+                    Thread.Sleep(50);
+                }
+                return Result("timeout", true, 0, current.dwProcessId);
+            }
+            finally
+            {
+                if (service != IntPtr.Zero) CloseServiceHandle(service);
+                if (manager != IntPtr.Zero) CloseServiceHandle(manager);
+            }
+        }
+    }
+}
+'@ -Language CSharp -ErrorAction Stop
+}
+
+function Stop-ExactServiceRuntime {
+    param(
+        [Parameter(Mandatory=$true)][string]$ServiceName,
+        [Parameter(Mandatory=$true)]$ExpectedProcessId,
+        [Parameter(Mandatory=$true)][string]$ExpectedPathName,
+        [int]$TimeoutMilliseconds = 5000
+    )
+    $strictProcessId = Get-StrictServiceProcessId $ExpectedProcessId
+    if ($null -eq $strictProcessId -or [string]::IsNullOrWhiteSpace($ServiceName) -or $ServiceName -cne $ServiceName.Trim() -or
+        [string]::IsNullOrWhiteSpace($ExpectedPathName) -or $ExpectedPathName -cne $ExpectedPathName.Trim() -or $TimeoutMilliseconds -lt 1) {
+        return [pscustomobject]@{ Status='invalid'; StopSent=$false; ErrorCode=0; ProcessId=0 }
+    }
+    Initialize-NativeExactServiceRuntimeStopApi
+    return [ShushuCleaner.ExactServiceRuntimeStopNativeV1]::StopExact(
+        $ServiceName, [uint32]$strictProcessId, $ExpectedPathName, $TimeoutMilliseconds
+    )
+}
+
+function Invoke-ServiceProcessStopAction {
+    param($Pending, [int]$VerificationTimeoutMilliseconds = 5000, [int]$PollIntervalMilliseconds = 100)
+    if (-not (Test-ServiceProcessActionShape $Pending)) {
+        return New-ServiceProcessStopResult 'skipped' 'pending service process identity is invalid; rescan required'
+    }
+    $capture = Get-CurrentServiceProcessIdentity -ServiceName $Pending.service_name
+    if ($null -eq $capture -or $null -eq $capture.Identity) {
+        $reason = if ($capture -and $capture.Reason -is [string] -and -not [string]::IsNullOrWhiteSpace($capture.Reason)) { $capture.Reason } else { 'current identity is unavailable; rescan required' }
+        return New-ServiceProcessStopResult 'skipped' $reason
+    }
+    $comparison = Test-ServiceProcessIdentityEqual -Pending $Pending -Current $capture.Identity
+    if (-not $comparison.Equal) { return New-ServiceProcessStopResult 'skipped' $comparison.Reason }
+
+    $targetPid = [int]$capture.Identity.process_id
+    $boundTarget = Get-BoundProcessTarget -ProcessId $targetPid
+    if ($null -eq $boundTarget -or $null -eq $boundTarget.Process -or $null -eq $boundTarget.Identity) {
+        return New-ServiceProcessStopResult 'skipped' 'current process handle could not be bound; rescan required'
+    }
+    try {
+        $boundIdentity = [pscustomobject]@{
+            service_name=$capture.Identity.service_name; service_binary_path=$capture.Identity.service_binary_path
+            process_id=$boundTarget.Identity.PID; process_name=$boundTarget.Identity.Name
+            process_path=$boundTarget.Identity.Path; process_start_time_utc=$boundTarget.Identity.StartTimeUtc
+        }
+        $pendingBoundComparison = Test-ServiceProcessIdentityEqual -Pending $Pending -Current $boundIdentity
+        if (-not $pendingBoundComparison.Equal) { return New-ServiceProcessStopResult 'skipped' $pendingBoundComparison.Reason }
+        $captureBoundComparison = Test-ServiceProcessIdentityEqual -Pending $capture.Identity -Current $boundIdentity
+        if (-not $captureBoundComparison.Equal) { return New-ServiceProcessStopResult 'skipped' 'process identity changed while binding handle; rescan required' }
+
+        $snapshotReason = ''
+        $boundService = Get-CurrentServiceExecutionSnapshot -ServiceName $Pending.service_name -FailureReason ([ref]$snapshotReason)
+        if ($null -eq $boundService -or $boundService.State -cne 'Running' -or $boundService.ProcessId -ne $targetPid -or
+            -not [string]::Equals($boundService.Name,$Pending.service_name,[System.StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($boundService.BinaryPath,$capture.Identity.service_binary_path,[System.StringComparison]::OrdinalIgnoreCase)) {
+            return New-ServiceProcessStopResult 'skipped' 'service binding changed before mutation; rescan required'
+        }
+
+        try {
+            $serviceStop = Stop-ExactServiceRuntime -ServiceName $Pending.service_name -ExpectedProcessId $targetPid `
+                -ExpectedPathName $boundService.PathName -TimeoutMilliseconds 5000
+        } catch {
+            return New-ServiceProcessStopResult 'failed' "exact service runtime stop could not be started for reviewed PID $targetPid" 'mutation'
+        }
+        $validNativeStatuses = @('stopped','identity_changed','open_failed','query_failed','control_rejected','verification_unknown','timeout','invalid')
+        $zeroErrorStatuses = @('stopped','identity_changed','timeout','invalid')
+        $nonzeroErrorStatuses = @('open_failed','query_failed','control_rejected','verification_unknown')
+        if ($null -eq $serviceStop -or $serviceStop.Status -isnot [string] -or
+            $validNativeStatuses -cnotcontains $serviceStop.Status -or $serviceStop.StopSent -isnot [bool] -or
+            $serviceStop.ErrorCode -isnot [int32] -or [int32]$serviceStop.ErrorCode -lt 0 -or
+            ($zeroErrorStatuses -ccontains $serviceStop.Status -and [int32]$serviceStop.ErrorCode -ne 0) -or
+            ($nonzeroErrorStatuses -ccontains $serviceStop.Status -and [int32]$serviceStop.ErrorCode -eq 0) -or
+            ($serviceStop.Status -ceq 'stopped' -and -not $serviceStop.StopSent) -or
+            ($serviceStop.Status -cin @('identity_changed','open_failed','query_failed','control_rejected','invalid') -and $serviceStop.StopSent) -or
+            ($serviceStop.Status -cin @('verification_unknown','timeout') -and -not $serviceStop.StopSent)) {
+            return New-ServiceProcessStopResult 'failed' "exact service runtime stop returned an invalid result for reviewed PID $targetPid" 'mutation'
+        }
+        if ($serviceStop.Status -cne 'stopped') {
+            if (-not $serviceStop.StopSent -and $serviceStop.Status -ceq 'identity_changed') {
+                return New-ServiceProcessStopResult 'skipped' 'service runtime identity changed before mutation; rescan required'
+            }
+            $stage = if ($serviceStop.StopSent) { 'verification' } else { 'mutation' }
+            $reason = if ($serviceStop.StopSent) {
+                "service STOP was sent but final state is $($serviceStop.Status) for reviewed PID $targetPid"
+            } else {
+                "exact service runtime stop failed before mutation: status=$($serviceStop.Status) win32=$([int32]$serviceStop.ErrorCode) reviewed PID $targetPid"
+            }
+            return New-ServiceProcessStopResult 'failed' $reason $stage
+        }
+        try { $exited = $boundTarget.Process.WaitForExit(5000) } catch {
+            return New-ServiceProcessStopResult 'failed' "could not verify reviewed PID $targetPid after exact service runtime stop" 'verification'
+        }
+        if (-not $exited) { return New-ServiceProcessStopResult 'failed' "recorded process PID $targetPid did not exit within the bounded wait" 'verification' }
+
+        if ($VerificationTimeoutMilliseconds -lt 1 -or $PollIntervalMilliseconds -lt 1) {
+            return New-ServiceProcessStopResult 'failed' 'service stabilization window is invalid' 'verification'
+        }
+        $escapedName = ([string]$Pending.service_name).Replace('\', '\\').Replace("'", "\'")
+        $verificationDeadline = (Get-ServiceProcessVerificationTimeMilliseconds) + $VerificationTimeoutMilliseconds
+        while ($true) {
+            try { $services = @(Get-CimInstance -ClassName Win32_Service -Filter ("Name = '{0}'" -f $escapedName) -ErrorAction Stop) } catch {
+                return New-ServiceProcessStopResult 'failed' 'could not verify service restart state' 'verification'
+            }
+            if ($services.Count -ne 1 -or $null -eq $services[0] -or
+                -not [string]::Equals([string]$services[0].Name,[string]$Pending.service_name,[System.StringComparison]::OrdinalIgnoreCase)) {
+                return New-ServiceProcessStopResult 'failed' 'service restart identity is missing or not unique' 'verification'
+            }
+            if (Test-PositiveScalarProcessId $services[0].ProcessId) {
+                $replacementPid = [int]$services[0].ProcessId
+                $replacementReason = if ([string]::Equals([string]$services[0].State,'Running',[System.StringComparison]::OrdinalIgnoreCase)) {
+                    "exact service runtime restarted with PID $replacementPid"
+                } else {
+                    "exact service runtime reports PID $replacementPid after STOP"
+                }
+                return New-ServiceProcessStopResult 'failed' $replacementReason 'verification'
+            }
+            if (-not (Test-StrictInteger $services[0].ProcessId) -or [int64]$services[0].ProcessId -ne 0) {
+                return New-ServiceProcessStopResult 'failed' 'service restart PID is unreadable' 'verification'
+            }
+            if ((Get-ServiceProcessVerificationTimeMilliseconds) -ge $verificationDeadline) { break }
+            Start-ServiceProcessVerificationDelay -Milliseconds $PollIntervalMilliseconds
+        }
+        return New-ServiceProcessStopResult 'success' "stopped exact service runtime $($Pending.service_name); reviewed PID $targetPid exited and no service PID is bound"
+    } finally {
+        try { $boundTarget.Process.Dispose() } catch {}
+    }
+}
+
 function Get-CurrentProcessIdentity($ProcessId) {
     if (-not (Test-PositiveScalarProcessId $ProcessId)) { return $null }
     try { $processes = @(Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue) } catch { return $null }
@@ -2228,9 +2938,31 @@ function Get-BoundProcessTarget($ProcessId) {
     try { $path = [string]$process.Path } catch {}
     try { $startTimeUtc = $process.StartTime.ToUniversalTime().ToString('o') } catch {}
     try { $name = [string]$process.ProcessName } catch {}
+    $canonicalName = Get-CanonicalProcessFileName -Name $name -ExecutablePath $path -AllowExtensionlessName
+    if ($null -eq $canonicalName) {
+        $nativeIdentity = Get-NativeProcessIdentity -ProcessId ([int]$process.Id)
+        $nativePath = if ($null -ne $nativeIdentity) { Get-NormalizedServiceProcessPath $nativeIdentity.Path } else { $null }
+        $nativeName = if ($null -ne $nativeIdentity) {
+            Get-CanonicalProcessFileName -Name $name -ExecutablePath $nativePath -AllowExtensionlessName
+        } else { $null }
+        $boundStart = Get-NormalizedStrictUtcProcessStartTime $startTimeUtc
+        $nativeStart = if ($null -ne $nativeIdentity) { Get-NormalizedStrictUtcProcessStartTime $nativeIdentity.StartTimeUtc } else { $null }
+        if ($null -eq $nativeIdentity -or
+            (Get-StrictServiceProcessId $nativeIdentity.PID) -ne [int]$process.Id -or
+            $null -eq $nativeName -or
+            -not [string]::Equals($nativeName, [string]$nativeIdentity.Name, [System.StringComparison]::OrdinalIgnoreCase) -or
+            $null -eq $nativePath -or -not [System.IO.File]::Exists($nativePath) -or
+            $null -eq $boundStart -or $null -eq $nativeStart -or $boundStart -cne $nativeStart) {
+            try { $process.Dispose() } catch {}
+            return $null
+        }
+        $canonicalName = [string]$nativeIdentity.Name
+        $path = $nativePath
+        $startTimeUtc = $nativeStart
+    }
     return [pscustomobject]@{
         Process = $process
-        Identity = [pscustomobject]@{ PID=[int]$process.Id; Name=$name; Path=$path; StartTimeUtc=$startTimeUtc }
+        Identity = [pscustomobject]@{ PID=[int]$process.Id; Name=$canonicalName; Path=$path; StartTimeUtc=$startTimeUtc }
     }
 }
 
@@ -2262,10 +2994,16 @@ function Test-SameProcessIdentity($Expected, $Current) {
     } catch { return $false }
 }
 
-function New-ProcessStopResult($Row, [string]$Status, [string]$Reason) {
+function New-ProcessStopResult($Row, [string]$Status, [string]$Reason, [string]$FailureStage = '') {
+    if ($Status -ceq 'failed') {
+        if ($FailureStage -cnotin @('authorization','mutation','verification')) { throw 'process stop failure_stage is invalid' }
+    } elseif ($FailureStage -cne '') {
+        throw 'non-failed process stop failure_stage must be empty'
+    }
     $copy = $Row.PSObject.Copy()
     $copy.status = $Status
     $copy | Add-Member NoteProperty result_reason $Reason -Force
+    $copy | Add-Member NoteProperty failure_stage ([string]$FailureStage) -Force
     return $copy
 }
 
@@ -2280,7 +3018,7 @@ function Wait-ProcessIdentityExit {
 
 function Invoke-OneTimeProcessStop($Row) {
     try { $null = Assert-SuspiciousPendingRow $Row -RequireStoppable } catch {
-        return New-ProcessStopResult $Row 'failed' ('身份结构无效: ' + $_.Exception.Message)
+        return New-ProcessStopResult $Row 'failed' '进程身份结构无效' 'authorization'
     }
     if ($Row.status -cnotin @('pending','failed')) { return New-ProcessStopResult $Row 'skipped' '该条目已是终态' }
     $protectedNames = @('system','system idle process','registry','smss','csrss','wininit','services','lsass','winlogon','svchost','fontdrvhost','dwm')
@@ -2298,9 +3036,11 @@ function Invoke-OneTimeProcessStop($Row) {
     try {
         if (-not (Test-SameProcessIdentity $Row $target.Identity)) { return New-ProcessStopResult $Row 'skipped' 'PID 对应的名称、路径或启动时间已变化' }
         try { $exited = Stop-BoundProcessTarget -Target $target } catch {
-            return New-ProcessStopResult $Row 'failed' ('停止进程失败: ' + $_.Exception.Message)
+            $denied = $_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception.Message -match '(?i)access.+denied|拒绝访问|权限'
+            $reason = if ($denied) { '权限不足，无法结束进程' } else { '结束进程命令失败' }
+            return New-ProcessStopResult $Row 'failed' $reason 'mutation'
         }
-        if (-not $exited) { return New-ProcessStopResult $Row 'failed' '等待退出超时，进程仍存在' }
+        if (-not $exited) { return New-ProcessStopResult $Row 'failed' '等待退出超时，进程仍存在' 'verification' }
         return New-ProcessStopResult $Row 'success' '已结束这一次进程实例'
     } finally {
         try { if ($null -ne $target.Process) { $target.Process.Dispose() } } catch {}
@@ -2338,6 +3078,29 @@ function Invoke-StopProcessPending {
     }
 }
 
+function Test-PersistentCleanupAction($Action) {
+    return $Action -is [string] -and @('disable_service','remove_autostart','disable_task') -ccontains $Action
+}
+
+function Set-PendingTransactionResult {
+    param($Pending, $Result)
+    if ($null -eq $Pending -or $null -eq $Result) { throw 'pending transaction result is missing' }
+    $status = [string]$Result.status
+    if ($status -cnotin @('success','failed','skipped','manual_required')) { throw 'pending transaction status is invalid' }
+    if ($Result.PSObject.Properties.Name -notcontains 'result_reason') { throw 'pending transaction result_reason is missing' }
+    $reason = [string]$Result.result_reason
+    if ([string]::IsNullOrWhiteSpace($reason)) { throw 'pending transaction result_reason is blank' }
+    $failureStage = ''
+    if ($status -ceq 'failed') {
+        if ($Result.PSObject.Properties.Name -notcontains 'failure_stage') { throw 'failed transaction failure_stage is missing' }
+        $failureStage = [string]$Result.failure_stage
+        if ($failureStage -cnotin @('authorization','backup','mutation','verification','result_persistence')) { throw 'failed transaction failure_stage is invalid' }
+    }
+    $Pending.status = $status
+    $Pending | Add-Member NoteProperty result_reason $reason -Force
+    $Pending | Add-Member NoteProperty failure_stage ([string]$failureStage) -Force
+}
+
 function Invoke-Clean {
     if (-not (Is-Admin)) {
         Write-Host '错误: clean 模式需要管理员权限。请右键以管理员身份运行 PowerShell 再执行。' -ForegroundColor Red
@@ -2350,6 +3113,7 @@ function Invoke-Clean {
     $pendingStream = $null
     $pending = $null
     $pendingValidated = $false
+    $pendingSha256Verified = $false
     $cleanExitCode = 0
     try {
     $pendingStream = Open-LockedPendingFile $script:PendingFile
@@ -2361,6 +3125,7 @@ function Invoke-Clean {
         if (-not [string]::Equals($actualPendingSha256, $script:PendingSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw '自定义 pending 文件 SHA-256 不匹配，拒绝执行'
         }
+        $pendingSha256Verified = $true
     }
     $pendingRaw = Read-LimitedPendingJsonStream $pendingStream
     $pending = ConvertFrom-StrictPendingJson $pendingRaw
@@ -2375,6 +3140,11 @@ function Invoke-Clean {
     if ($pending.actions) { $actions = @($pending.actions | Where-Object { $_ -and $_.status -in @('pending','failed') }) }
     $suspicious = @()
     if ($pending.suspicious) { $suspicious = @($pending.suspicious) }
+    if (-not $pendingSha256Verified -and @($actions | Where-Object { $_.action -ceq 'stop_service_runtime' }).Count -gt 0) {
+        Write-Host '错误: stop_service_runtime 要求本次 clean 已验证 pending 文件 SHA-256 绑定，未执行且未改写清单。' -ForegroundColor Red
+        $pendingValidated = $false
+        return [int]1
+    }
 
     # v1.5.3 P0: 提权后重新验证 — 不信任 pending_actions.json, 按当前特征库授权
     try { $profiles = Load-Profiles } catch {
@@ -2386,7 +3156,12 @@ function Invoke-Clean {
     foreach ($a in $actions) {
         # Manual rows must be displayed before the user can supply a digest for the final selected subset.
         if (Test-PendingActionEligible $a $profiles) { $authorized += $a }
-        else { $rejected += $a; $a.status = 'skipped' }
+        else {
+            $rejected += $a
+            Set-PendingTransactionResult -Pending $a -Result ([pscustomobject]@{
+                status='skipped'; result_reason='初始管理员授权失败，当前特征库或目标身份不匹配，需要重新扫描'; failure_stage=''
+            })
+        }
     }
     if ($rejected.Count -gt 0) {
         Write-Host ('拒绝 {0} 条未授权动作 (与当前特征库不一致, 清单可能被修改, 已标 skipped 不执行):' -f $rejected.Count) -ForegroundColor Red
@@ -2400,7 +3175,7 @@ function Invoke-Clean {
     if ($actions.Count -eq 0) {
         Write-Host '待办动作已全部完成或为空。' -ForegroundColor Green
     } else {
-        Write-Step '以下动作将被处理, 每个动作都会先备份:'
+        Write-Step '以下动作将被处理；持久化修改会先备份，一次性进程操作不生成恢复包:'
         for ($i = 0; $i -lt $actions.Count; $i++) {
             $p = $actions[$i]
             Write-Host ('  [{0}] {1} | 动作: {2} | 命中: {3}' -f $i, $p.name_cn, $p.action, $p.hit_type) -ForegroundColor Yellow
@@ -2456,18 +3231,34 @@ function Invoke-Clean {
             # selection-bound digest and its current policy instead of treating safe=false as permission.
             if ($p.execution_class -ceq 'automatic_safe' -and $p.safe -ne $true) {
                 Write-Host '  拒绝: safe=false 条目禁止自动执行, 只做人工调查。' -ForegroundColor Red
-                $p.status = 'skipped'
+                Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
+                    status='skipped'; result_reason='automatic_safe 动作要求 safe=true，授权被拒绝'; failure_stage=''
+                })
                 continue
             }
 
             # 用户作出最终选择后，在任何备份或系统变更前完整重读并重放保存的 matcher。
             if (-not (Test-SelectedPendingActionAuthorized $p $profiles $impactConfirmation)) { continue }
+
+            # stop_service_runtime 是不生成恢复包的一次性 exact 服务运行态动作。它仍在最终授权后执行，
+            # 但必须先于持久化动作的备份目录初始化分流，避免留下空备份包。
+            if ($p.action -ceq 'stop_service_runtime') {
+                $stopResult = Invoke-ServiceProcessStopAction -Pending $p
+                Set-PendingTransactionResult -Pending $p -Result $stopResult
+                if ($stopResult.status -ceq 'success') { Write-Host "  验证通过: $($stopResult.result_reason)" -ForegroundColor Green }
+                elseif ($stopResult.status -ceq 'skipped') { Write-Host "  跳过: $($stopResult.result_reason)" -ForegroundColor DarkYellow }
+                else { Write-Host "  失败: $($stopResult.result_reason)" -ForegroundColor Red }
+                continue
+            }
+
             # 安全顺序不变量：下方分支或其事务 helper 才能调用 Backup-RegistryKey、
             # sc.exe config、sc.exe stop、Disable-ScheduledTask 等 mutation 原语。
-            if (-not $backupDirReady) {
+            if ((Test-PersistentCleanupAction $p.action) -and -not $backupDirReady) {
                 try { $backupDir = Initialize-ProtectedBackupDirectory $backupDir } catch {
-                    Write-Host ('  安全备份目录创建/ACL 验证失败，拒绝执行任何 mutation: ' + $_.Exception.Message) -ForegroundColor Red
-                    $p.status = 'failed'
+                    Write-Host '  安全备份目录创建或 ACL 验证失败，拒绝执行任何 mutation。' -ForegroundColor Red
+                    Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
+                        status='failed'; result_reason='安全备份目录创建或 ACL 验证失败'; failure_stage='backup'
+                    })
                     continue
                 }
                 $backupDirReady = $true
@@ -2476,38 +3267,48 @@ function Invoke-Clean {
             switch ($p.action) {
                 'disable_service' {
                     $serviceResult = Invoke-ServiceDisableAction -Pending $p -BackupDir $backupDir -Tag $tag
-                    $p.status = $serviceResult.status
-                    if ($serviceResult.status -eq 'success') { Write-Host "  验证通过: $($serviceResult.reason)" -ForegroundColor Green }
-                    elseif ($serviceResult.status -eq 'skipped') { Write-Host "  跳过: $($serviceResult.reason)" -ForegroundColor DarkYellow }
-                    else { Write-Host "  失败: $($serviceResult.reason)" -ForegroundColor Red }
+                    Set-PendingTransactionResult -Pending $p -Result $serviceResult
+                    if ($serviceResult.status -eq 'success') { Write-Host "  验证通过: $($serviceResult.result_reason)" -ForegroundColor Green }
+                    elseif ($serviceResult.status -eq 'skipped') { Write-Host "  跳过: $($serviceResult.result_reason)" -ForegroundColor DarkYellow }
+                    else { Write-Host "  失败: $($serviceResult.result_reason)" -ForegroundColor Red }
                 }
                 'remove_autostart' {
                     $rp = $p.autostart_source
                     $nm = $p.autostart_name
                     $removal = Invoke-LiteralAutostartRemoval -Source $rp -Name $nm -ExpectedValue $p.autostart_value -BackupDir $backupDir -Tag $tag
-                    $p.status = $removal.status
+                    Set-PendingTransactionResult -Pending $p -Result $removal
                     if ($removal.status -eq 'success') {
                         Write-Host "  验证通过: 自启项已删除: $nm (备份: $($removal.backup))" -ForegroundColor Green
                     } elseif ($removal.status -eq 'skipped') {
-                        Write-Host "  跳过: $($removal.reason) ($nm)" -ForegroundColor DarkYellow
+                        Write-Host "  跳过: $($removal.result_reason) ($nm)" -ForegroundColor DarkYellow
                     } else {
-                        Write-Host "  失败: $($removal.reason) ($nm)" -ForegroundColor Red
+                        Write-Host "  失败: $($removal.result_reason) ($nm)" -ForegroundColor Red
                     }
                 }
                 'disable_task' {
                     $taskResult = Invoke-TaskDisableAction -Pending $p -BackupDir $backupDir -Tag $tag
-                    $p.status = $taskResult.status
+                    Set-PendingTransactionResult -Pending $p -Result $taskResult
                     if ($taskResult.status -eq 'success') { Write-Host "  验证通过: 已禁用计划任务: $($p.task_path) (备份: $($taskResult.backup))" -ForegroundColor Green }
-                    elseif ($taskResult.status -eq 'skipped') { Write-Host "  跳过: $($taskResult.reason)" -ForegroundColor DarkYellow }
-                    else { Write-Host "  失败: $($taskResult.reason)" -ForegroundColor Red }
+                    elseif ($taskResult.status -eq 'skipped') { Write-Host "  跳过: $($taskResult.result_reason)" -ForegroundColor DarkYellow }
+                    else { Write-Host "  失败: $($taskResult.result_reason)" -ForegroundColor Red }
+                }
+                'open_official_uninstaller' {
+                    Write-Host '  跳过: 该动作只能返回 GUI 完成人工确认并打开官方卸载程序。' -ForegroundColor DarkYellow
+                    Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
+                        status='skipped'; result_reason='需要返回 GUI 完成人工确认并打开官方卸载程序'; failure_stage=''
+                    })
                 }
                 'uninstall' {
                     Write-Host '  uninstall 动作需要人工确认, 请到 设置 -> 应用 -> 已安装的应用 手动卸载。' -ForegroundColor Yellow
-                    $p.status = 'manual_required'
+                    Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
+                        status='manual_required'; result_reason='需要在系统设置中人工确认并卸载'; failure_stage=''
+                    })
                 }
                 default {
                     Write-Host "  未知动作: $($p.action), 跳过" -ForegroundColor DarkYellow
-                    $p.status = 'skipped'
+                    Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
+                        status='skipped'; result_reason=("未知或不支持的动作: $($p.action)"); failure_stage=''
+                    })
                 }
             }
         }

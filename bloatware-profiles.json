@@ -352,7 +352,7 @@
                          "name_cn":  "联想安全中心组件",
                          "risk":  "low",
                          "safe":  false,
-                         "reason_cn":  "联想电脑管家安全组件，不属于自动安全清理项；仅在用户阅读并确认影响后按需禁用",
+                         "reason_cn":  "联想电脑管家安全组件可能受 Windows 保护；仅在可信扫描确认后提供官方卸载交接或普通运行态停止，不属于自动安全清理项",
                          "detect":  {
                                         "services":  [
                                                          {
@@ -382,15 +382,15 @@
                                          "process":  "none"
                                      },
                          "manual_actions":  {
-                                                "service":  "disable_service"
+                                                "service":  "open_official_uninstaller"
                                             },
                          "cleanup_policy":  {
                                                 "execution_class":  "manual_impact",
                                                 "necessity":  "optional",
                                                 "default_selected":  false,
                                                 "requires_confirmation":  true,
-                                                "impact_cn":  "可能影响联想电脑管家的安全状态、主动防护和通知",
-                                                "cleanup_reason_cn":  "不使用联想电脑管家时可减少常驻后台"
+                                                "impact_cn":  "可能移除联想电脑管家的安全、防护、通知和相关后台组件",
+                                                "cleanup_reason_cn":  "Windows 受保护服务阻止普通管理员实时停止；不需要联想电脑管家时可按需打开联想官方卸载程序"
                                             },
                          "evidence":  {
                                           "tested":  true,
@@ -401,8 +401,8 @@
                                           "last_verified":  "2026-08-09"
                                       },
                          "execution":  {
-                                           "allow_auto":  true,
-                                           "review_note":  "v2 迁移: 实机验证过, 保留自动执行资格"
+                                           "allow_auto":  false,
+                                           "review_note":  "仅允许用户确认后的官方卸载入口；不属于自动安全清理"
                                        }
                      },
                      {

@@ -1,9 +1,11 @@
 # Trusted reader for nonce-bound privileged scan inventory packages.
-$script:InventorySchemaVersion = 1
+$script:InventorySchemaVersion = 3
 $script:MaxInventoryJsonBytes = 8MB
 $script:MaxInventoryJsonDepth = 12
 $script:MaxInventoryRecords = 20000
 $script:MaxInventoryReadyBytes = 256
+$script:MaxInventoryProcessNameLength = 260
+$script:MaxInventoryProcessPathLength = 32767
 $script:TrustedInventorySystemSid = 'S-1-5-18'
 $script:TrustedInventoryAdministratorsSid = 'S-1-5-32-544'
 
@@ -256,15 +258,213 @@ function Test-InventoryString($Value, [bool]$AllowEmpty = $false) {
     return ($AllowEmpty -or -not [string]::IsNullOrWhiteSpace($Value))
 }
 
-function Assert-InventoryServiceRecord($Record) {
-    $required = @('Name','DisplayName','State','StartMode','PathName','ProcessId')
-    if (-not (Test-InventoryExactProperties $Record $required)) { throw 'Inventory service record fields are invalid.' }
+function ConvertFrom-InventoryCanonicalUtc($Value) {
+    if ($Value -isnot [string] -or $Value -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$') {
+        return $null
+    }
+    try {
+        $parsed = [datetimeoffset]::MinValue
+        $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+        if (-not [datetimeoffset]::TryParseExact($Value, "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
+                [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed) -or
+            $parsed.Offset -ne [timespan]::Zero) {
+            return $null
+        }
+        return $parsed
+    } catch {
+        return $null
+    }
+}
+
+function Test-InventoryBoundedCleanString($Value, [int]$MaxLength) {
+    if ($Value -isnot [string] -or $MaxLength -lt 1 -or $Value.Length -eq 0 -or $Value.Length -gt $MaxLength) { return $false }
+    if ($Value -cne $Value.Trim()) { return $false }
+    return ($Value -cnotmatch '[\x00-\x1F\x7F-\x9F]')
+}
+
+function Test-InventoryFullyQualifiedWindowsPath($Value) {
+    if ($Value -isnot [string] -or [string]::IsNullOrEmpty($Value)) { return $false }
+    if ($Value -cmatch '^[A-Za-z]:[\\/]') { return $true }
+    return ($Value -cmatch '^[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/].*)?$')
+}
+
+function ConvertFrom-InventoryServicePathName([string]$PathName) {
+    if ($PathName -isnot [string] -or [string]::IsNullOrWhiteSpace($PathName) -or $PathName -cne $PathName.Trim()) { return $null }
+    if ($PathName -cmatch '^"([^"\r\n]+\.exe)"(?:\s+.*)?$') { return $matches[1] }
+    if ($PathName -cmatch '^([^\s"]+\.exe)(?:\s+.*)?$') { return $matches[1] }
+    return $null
+}
+
+function Assert-InventoryServiceBaseRecord($Record) {
     foreach ($name in @('Name','DisplayName','State','StartMode')) {
         if (-not (Test-InventoryString $Record.$name)) { throw "Inventory service $name is invalid." }
     }
     if (-not (Test-InventoryString $Record.PathName $true)) { throw 'Inventory service PathName is invalid.' }
     if (-not (Test-InventoryInteger $Record.ProcessId) -or [int64]$Record.ProcessId -lt 0 -or [uint64]$Record.ProcessId -gt [uint64][uint32]::MaxValue) {
         throw 'Inventory service ProcessId is invalid.'
+    }
+}
+
+function Assert-InventoryLaunchProtectedShape($Record) {
+    if ($Record.LaunchProtectedStatus -isnot [string] -or
+        $Record.LaunchProtectedStatus -cnotin @('complete','unavailable')) {
+        throw 'Inventory service LaunchProtectedStatus is invalid.'
+    }
+    if (-not (Test-InventoryInteger $Record.LaunchProtectedLevel)) {
+        throw 'Inventory service LaunchProtectedLevel is invalid.'
+    }
+    $level = [int64]$Record.LaunchProtectedLevel
+    if (($Record.LaunchProtectedStatus -ceq 'complete' -and ($level -lt 0 -or $level -gt 3)) -or
+        ($Record.LaunchProtectedStatus -ceq 'unavailable' -and $level -ne -1)) {
+        throw 'Inventory service LaunchProtected status and level are inconsistent.'
+    }
+}
+
+function Assert-InventoryUninstallEvidenceShape($Record) {
+    $stringFields = @(
+        'UninstallRegistryPath','UninstallDisplayName','UninstallPublisher','UninstallDisplayVersion',
+        'UninstallInstallLocation','UninstallString','UninstallExecutablePath'
+    )
+    if ($Record.UninstallEvidenceStatus -isnot [string] -or
+        $Record.UninstallEvidenceStatus -cnotin @('complete','unavailable')) {
+        throw 'Inventory service uninstall evidence status is invalid.'
+    }
+    foreach ($name in $stringFields) {
+        if ($Record.$name -isnot [string]) { throw "Inventory service uninstall evidence $name is invalid." }
+    }
+
+    if ($Record.UninstallEvidenceStatus -ceq 'unavailable') {
+        foreach ($name in $stringFields) {
+            if ($Record.$name -cne '') { throw 'Inventory service unavailable uninstall evidence must be completely empty.' }
+        }
+        return
+    }
+
+    foreach ($name in @('UninstallRegistryPath','UninstallDisplayName','UninstallPublisher','UninstallInstallLocation','UninstallString','UninstallExecutablePath')) {
+        if (-not (Test-InventoryBoundedCleanString $Record.$name $script:MaxInventoryProcessPathLength)) {
+            throw "Inventory service complete uninstall evidence $name is not a clean nonblank string."
+        }
+    }
+    if ($Record.UninstallDisplayVersion -cne '' -and
+        -not (Test-InventoryBoundedCleanString $Record.UninstallDisplayVersion $script:MaxInventoryProcessPathLength)) {
+        throw 'Inventory service uninstall evidence DisplayVersion is not a clean string.'
+    }
+
+    if ($Record.Name -isnot [string] -or
+        -not [string]::Equals($Record.Name, 'HRWSCCtrl', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Inventory service complete uninstall evidence is not authorized for this service.'
+    }
+    if (-not (Test-LenovoOfficialUninstallRegistryPath -RegistryPath $Record.UninstallRegistryPath)) {
+        throw 'Inventory service uninstall registry path is not an allowed Lenovo uninstall key.'
+    }
+    $displayNameAllowed = $false
+    foreach ($prefix in $script:LenovoOfficialUninstallDisplayNamePrefixes) {
+        if ($Record.UninstallDisplayName.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+            $displayNameAllowed = $true
+            break
+        }
+    }
+    if (-not $displayNameAllowed) {
+        throw 'Inventory service uninstall display name is not allowed.'
+    }
+    if (-not ($script:LenovoOfficialUninstallPublishers -ccontains $Record.UninstallPublisher)) {
+        throw 'Inventory service uninstall publisher is not allowed.'
+    }
+
+    $installLocation = $Record.UninstallInstallLocation
+    if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $installLocation)) {
+        throw 'Inventory service uninstall install location is invalid.'
+    }
+    try { $canonicalInstallLocation = [System.IO.Path]::GetFullPath($installLocation) }
+    catch { throw 'Inventory service uninstall install location is invalid.' }
+    if (-not (Test-StrictOfficialUninstallLocalDrivePath -Path $canonicalInstallLocation) -or
+        -not $installLocation.Equals($canonicalInstallLocation, [System.StringComparison]::Ordinal) -or
+        $canonicalInstallLocation.Equals([System.IO.Path]::GetPathRoot($canonicalInstallLocation), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Inventory service uninstall install location is not a canonical ordinary local directory.'
+    }
+
+    $rawExecutablePath = if ($Record.UninstallString -cmatch '^"([^"\r\n]+\.exe)"$') { $matches[1] }
+        elseif ($Record.UninstallString -cmatch '^([^"\r\n]+\.exe)$') { $matches[1] }
+        else { $null }
+    if ($rawExecutablePath -isnot [string]) {
+        throw 'Inventory service uninstall command or executable path is invalid.'
+    }
+    try { $canonicalRawExecutablePath = [System.IO.Path]::GetFullPath($rawExecutablePath) }
+    catch { throw 'Inventory service uninstall command or executable path is invalid.' }
+    if (-not $rawExecutablePath.Equals($canonicalRawExecutablePath, [System.StringComparison]::Ordinal)) {
+        throw 'Inventory service raw uninstall command path is not canonical.'
+    }
+
+    $parsedExecutablePath = ConvertFrom-StrictOfficialUninstallString -Command $Record.UninstallString
+    if ($parsedExecutablePath -isnot [string] -or
+        -not $Record.UninstallExecutablePath.Equals($parsedExecutablePath, [System.StringComparison]::Ordinal)) {
+        throw 'Inventory service uninstall command or executable path is invalid.'
+    }
+    $installBoundary = $canonicalInstallLocation.TrimEnd('\') + '\'
+    if (-not $parsedExecutablePath.StartsWith($installBoundary, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Inventory service uninstall executable is outside the install location.'
+    }
+}
+
+function Assert-InventoryServiceRecord($Record, [datetimeoffset]$GeneratedUtc) {
+    $required = @(
+        'Name','DisplayName','State','StartMode','PathName','ProcessId','ProcessIdentityStatus','ProcessName','ProcessPath','ProcessStartTimeUtc',
+        'LaunchProtectedStatus','LaunchProtectedLevel','UninstallEvidenceStatus','UninstallRegistryPath','UninstallDisplayName','UninstallPublisher',
+        'UninstallDisplayVersion','UninstallInstallLocation','UninstallString','UninstallExecutablePath'
+    )
+    if (-not (Test-InventoryExactProperties $Record $required)) { throw 'Inventory service record fields are invalid.' }
+    Assert-InventoryServiceBaseRecord $Record
+    if ($Record.ProcessIdentityStatus -isnot [string] -or
+        $Record.ProcessIdentityStatus -cnotin @('complete','not_running','unavailable')) {
+        throw 'Inventory service ProcessIdentityStatus is invalid.'
+    }
+    foreach ($name in @('ProcessName','ProcessPath','ProcessStartTimeUtc')) {
+        if ($Record.$name -isnot [string]) { throw "Inventory service $name is invalid." }
+    }
+    Assert-InventoryLaunchProtectedShape $Record
+    Assert-InventoryUninstallEvidenceShape $Record
+
+    if ($Record.ProcessIdentityStatus -ceq 'complete') {
+        if ($Record.State -cne 'Running' -or [int64]$Record.ProcessId -le 0 -or
+            [uint64]$Record.ProcessId -gt [uint64][int]::MaxValue) {
+            throw 'Inventory service complete process identity state or PID is invalid.'
+        }
+        if (-not (Test-InventoryBoundedCleanString $Record.ProcessName $script:MaxInventoryProcessNameLength) -or
+            $Record.ProcessName -cne [System.IO.Path]::GetFileName($Record.ProcessName) -or
+            $Record.ProcessName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+            throw 'Inventory service ProcessName is invalid.'
+        }
+        if (-not (Test-InventoryBoundedCleanString $Record.ProcessPath $script:MaxInventoryProcessPathLength) -or
+            -not (Test-InventoryFullyQualifiedWindowsPath $Record.ProcessPath)) {
+            throw 'Inventory service ProcessPath is invalid.'
+        }
+        try { $processPath = [System.IO.Path]::GetFullPath($Record.ProcessPath) }
+        catch { throw 'Inventory service ProcessPath is invalid.' }
+        if (-not [System.IO.File]::Exists($processPath) -or
+            -not [string]::Equals([System.IO.Path]::GetFileName($processPath), $Record.ProcessName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Inventory service process filename or path is invalid.'
+        }
+        $serviceBinary = ConvertFrom-InventoryServicePathName $Record.PathName
+        if ($serviceBinary -isnot [string] -or -not (Test-InventoryFullyQualifiedWindowsPath $serviceBinary)) {
+            throw 'Inventory service PathName binary is invalid.'
+        }
+        try { $serviceBinary = [System.IO.Path]::GetFullPath($serviceBinary) }
+        catch { throw 'Inventory service PathName binary is invalid.' }
+        if (-not [string]::Equals($serviceBinary, $processPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Inventory service PathName binary does not match ProcessPath.'
+        }
+        $processStart = ConvertFrom-InventoryCanonicalUtc $Record.ProcessStartTimeUtc
+        if ($null -eq $processStart) { throw 'Inventory service ProcessStartTimeUtc is invalid.' }
+        if ($processStart -gt $GeneratedUtc) { throw 'Inventory service process start time is after package generation.' }
+        return
+    }
+
+    if ($Record.ProcessName -cne '' -or $Record.ProcessPath -cne '' -or $Record.ProcessStartTimeUtc -cne '') {
+        throw 'Inventory service process identity must be completely empty.'
+    }
+    if ($Record.ProcessIdentityStatus -ceq 'not_running' -and
+        ($Record.State -ceq 'Running' -or [int64]$Record.ProcessId -ne 0)) {
+        throw 'Inventory service not_running state or PID is invalid.'
     }
 }
 
@@ -301,15 +501,8 @@ function Assert-InventoryPackageShape($Package, [string]$ExpectedNonce, [string]
     if ($Package.collector_sid -isnot [string] -or $Package.collector_sid -cne $ExpectedSid) {
         throw 'Inventory package collector SID mismatch.'
     }
-    if ($Package.generated_utc -isnot [string] -or
-        $Package.generated_utc -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$') {
-        throw 'Inventory package UTC timestamp is invalid.'
-    }
-    $generated = [datetimeoffset]::MinValue
-    $timestampStyles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
-    if (-not [datetimeoffset]::TryParseExact($Package.generated_utc, "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'",
-            [Globalization.CultureInfo]::InvariantCulture, $timestampStyles, [ref]$generated) -or
-        $generated.Offset -ne [timespan]::Zero) { throw 'Inventory package UTC timestamp is invalid.' }
+    $generated = ConvertFrom-InventoryCanonicalUtc $Package.generated_utc
+    if ($null -eq $generated) { throw 'Inventory package UTC timestamp is invalid.' }
     $nowOffset = [datetimeoffset]::new($UtcNow.ToUniversalTime())
     if ($generated -lt $nowOffset.AddMinutes(-5) -or $generated -gt $nowOffset.AddMinutes(1)) {
         throw 'Inventory package UTC timestamp is outside the trusted window.'
@@ -332,7 +525,7 @@ function Assert-InventoryPackageShape($Package, [string]$ExpectedNonce, [string]
     }
     foreach ($service in @($Package.services)) {
         if ($null -eq $service) { throw 'Inventory service record cannot be null.' }
-        Assert-InventoryServiceRecord $service
+        Assert-InventoryServiceRecord $service $generated
     }
     foreach ($task in @($Package.tasks)) {
         if ($null -eq $task) { throw 'Inventory task record cannot be null.' }
@@ -718,12 +911,184 @@ function Remove-StaleTrustedInventoryPackages {
     }
 }
 
+function New-InventoryProcessIdentityState($Status, $Name, $Path, $StartUtc) {
+    return [pscustomobject][ordered]@{
+        ProcessIdentityStatus = $Status
+        ProcessName = $Name
+        ProcessPath = $Path
+        ProcessStartTimeUtc = $StartUtc
+    }
+}
+
+function Get-PrivilegedServiceExecutionSnapshot([string]$ServiceName) {
+    if ([string]::IsNullOrWhiteSpace($ServiceName)) { return $null }
+    try {
+        $escapedName = $ServiceName.Replace('\', '\\').Replace("'", "\'")
+        $services = @(Get-CimInstance -ClassName Win32_Service -Filter ("Name = '{0}'" -f $escapedName) -ErrorAction Stop)
+        if ($services.Count -ne 1 -or $null -eq $services[0]) { return $null }
+        $service = $services[0]
+        if ($service.Name -isnot [string] -or $service.Name -cne $ServiceName -or
+            $service.State -isnot [string] -or $service.State -cne 'Running') {
+            return $null
+        }
+        $processId = Get-StrictServiceProcessId $service.ProcessId
+        if ($null -eq $processId -or $service.PathName -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($service.PathName)) {
+            return $null
+        }
+        $binaryPath = ConvertFrom-InventoryServicePathName $service.PathName
+        if ($binaryPath -isnot [string] -or -not (Test-InventoryFullyQualifiedWindowsPath $binaryPath)) {
+            return $null
+        }
+        $binaryPath = [System.IO.Path]::GetFullPath($binaryPath)
+        if (-not [System.IO.File]::Exists($binaryPath)) { return $null }
+        return [pscustomobject][ordered]@{
+            Name = $service.Name
+            State = $service.State
+            ProcessId = $processId
+            PathName = $service.PathName
+            BinaryPath = $binaryPath
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Get-PrivilegedServiceProcessIdentity($Service) {
+    if ($null -ne $Service -and $Service.State -is [string] -and $Service.State -cne 'Running' -and
+        (Test-InventoryInteger $Service.ProcessId) -and [int64]$Service.ProcessId -eq 0) {
+        return New-InventoryProcessIdentityState not_running '' '' ''
+    }
+
+    try {
+        if ($null -eq $Service -or $Service.Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Service.Name) -or
+            $Service.State -isnot [string] -or $Service.State -cne 'Running') {
+            throw 'unavailable'
+        }
+        $collectedProcessId = Get-StrictServiceProcessId $Service.ProcessId
+        if ($null -eq $collectedProcessId -or $Service.PathName -isnot [string]) { throw 'unavailable' }
+
+        $first = Get-PrivilegedServiceExecutionSnapshot -ServiceName $Service.Name
+        if ($null -eq $first -or $first.Name -cne $Service.Name -or $first.State -cne $Service.State -or
+            $first.ProcessId -ne $collectedProcessId -or $first.PathName -cne $Service.PathName) {
+            throw 'unavailable'
+        }
+        $collectedBinaryPath = ConvertFrom-InventoryServicePathName $Service.PathName
+        if ($collectedBinaryPath -isnot [string] -or -not (Test-InventoryFullyQualifiedWindowsPath $collectedBinaryPath)) {
+            throw 'unavailable'
+        }
+        $collectedBinaryPath = [System.IO.Path]::GetFullPath($collectedBinaryPath)
+        if (-not [string]::Equals($collectedBinaryPath, [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'unavailable'
+        }
+
+        $processes = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $first.ProcessId) -ErrorAction Stop)
+        if ($processes.Count -ne 1 -or $null -eq $processes[0]) { throw 'unavailable' }
+        $process = $processes[0]
+        $processId = Get-StrictServiceProcessId $process.ProcessId
+        if ($null -eq $processId -or $processId -ne $first.ProcessId) { throw 'unavailable' }
+
+        if ($process.Name -isnot [string] -or [string]::IsNullOrWhiteSpace($process.Name)) { throw 'unavailable' }
+        $processName = [string]$process.Name
+        $expectedName = [System.IO.Path]::GetFileName([string]$first.BinaryPath)
+        if (-not [string]::Equals($processName, $expectedName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'unavailable'
+        }
+
+        $wmiProcessStartTimeUtc = ConvertTo-ServiceProcessStartTimeUtc $process.CreationDate
+        if ([string]::IsNullOrWhiteSpace([string]$wmiProcessStartTimeUtc)) { throw 'unavailable' }
+        $parsedWmiProcessStart = ConvertFrom-InventoryCanonicalUtc $wmiProcessStartTimeUtc
+        if ($null -eq $parsedWmiProcessStart -or $parsedWmiProcessStart -gt [datetimeoffset]::UtcNow) { throw 'unavailable' }
+
+        $wmiPathIsValid = $false
+        $wmiProcessPath = $null
+        if ($process.ExecutablePath -is [string] -and (Test-InventoryFullyQualifiedWindowsPath $process.ExecutablePath)) {
+            try { $wmiProcessPath = [System.IO.Path]::GetFullPath([string]$process.ExecutablePath) } catch { $wmiProcessPath = $null }
+            $wmiPathIsValid = $null -ne $wmiProcessPath -and [System.IO.File]::Exists($wmiProcessPath) -and
+                [string]::Equals($wmiProcessPath, [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)
+        }
+
+        if ($wmiPathIsValid) {
+            $processPath = $wmiProcessPath
+            $processStartTimeUtc = $wmiProcessStartTimeUtc
+        } else {
+            $nativeIdentity = Get-NativeProcessIdentity -ProcessId $first.ProcessId
+            if ($null -eq $nativeIdentity -or
+                (Get-StrictServiceProcessId $nativeIdentity.PID) -ne $first.ProcessId -or
+                $nativeIdentity.Name -isnot [string] -or
+                -not [string]::Equals([string]$nativeIdentity.Name, $processName, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $nativeIdentity.Path -isnot [string] -or -not (Test-InventoryFullyQualifiedWindowsPath $nativeIdentity.Path) -or
+                -not [System.IO.File]::Exists([string]$nativeIdentity.Path) -or
+                -not [string]::Equals([System.IO.Path]::GetFullPath([string]$nativeIdentity.Path), [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $nativeIdentity.StartTimeUtc -isnot [string] -or
+                -not (Test-WmiNativeProcessStartTimeEqual -WmiStartTimeUtc $wmiProcessStartTimeUtc -NativeStartTimeUtc $nativeIdentity.StartTimeUtc)) {
+                throw 'unavailable'
+            }
+            $processName = [string]$nativeIdentity.Name
+            $processPath = [System.IO.Path]::GetFullPath([string]$nativeIdentity.Path)
+            $processStartTimeUtc = [string]$nativeIdentity.StartTimeUtc
+        }
+
+        $second = Get-PrivilegedServiceExecutionSnapshot -ServiceName $first.Name
+        if ($null -eq $second -or $second.Name -cne $first.Name -or $second.State -cne 'Running' -or
+            $second.ProcessId -ne $first.ProcessId -or $second.PathName -cne $first.PathName -or
+            -not [string]::Equals([string]$second.BinaryPath, [string]$first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'unavailable'
+        }
+
+        return New-InventoryProcessIdentityState complete $processName $processPath $processStartTimeUtc
+    } catch {
+        $warning = [string]::Concat(
+            [char]0x670D, [char]0x52A1, [char]0x8FDB, [char]0x7A0B, [char]0x8EAB,
+            [char]0x4EFD, [char]0x4E0D, [char]0x53EF, [char]0x7528, [char]0x3002
+        )
+        Add-ScanWarning $warning
+        return New-InventoryProcessIdentityState unavailable '' '' ''
+    }
+}
+
 function ConvertTo-InventoryServiceRecord($Record) {
     if ($null -eq $Record) { throw 'Inventory service record cannot be null.' }
     $required = @('Name','DisplayName','State','StartMode','PathName','ProcessId')
     $names = @($Record.PSObject.Properties.Name)
     foreach ($name in $required) {
         if ($names -cnotcontains $name) { throw "Inventory service collection is missing required field $name." }
+    }
+    Assert-InventoryServiceBaseRecord $Record
+    $identity = Get-PrivilegedServiceProcessIdentity $Record
+    try {
+        $launchState = Get-ServiceLaunchProtectedState -ServiceName $Record.Name
+        $launchEvidence = [pscustomobject][ordered]@{
+            LaunchProtectedStatus = $launchState.Status
+            LaunchProtectedLevel = $launchState.Level
+        }
+        Assert-InventoryLaunchProtectedShape $launchEvidence
+    } catch {
+        $launchEvidence = [pscustomobject][ordered]@{
+            LaunchProtectedStatus = 'unavailable'
+            LaunchProtectedLevel = [int]-1
+        }
+    }
+
+    $uninstallEvidence = New-UnavailableLenovoOfficialUninstallEvidence
+    if ([string]::Equals($Record.Name, 'HRWSCCtrl', [System.StringComparison]::OrdinalIgnoreCase)) {
+        try {
+            $uninstallEvidence = Get-LenovoOfficialUninstallEvidence
+            $uninstallValidationRecord = [pscustomobject][ordered]@{
+                Name = $Record.Name
+                UninstallEvidenceStatus = $uninstallEvidence.UninstallEvidenceStatus
+                UninstallRegistryPath = $uninstallEvidence.UninstallRegistryPath
+                UninstallDisplayName = $uninstallEvidence.UninstallDisplayName
+                UninstallPublisher = $uninstallEvidence.UninstallPublisher
+                UninstallDisplayVersion = $uninstallEvidence.UninstallDisplayVersion
+                UninstallInstallLocation = $uninstallEvidence.UninstallInstallLocation
+                UninstallString = $uninstallEvidence.UninstallString
+                UninstallExecutablePath = $uninstallEvidence.UninstallExecutablePath
+            }
+            Assert-InventoryUninstallEvidenceShape $uninstallValidationRecord
+        } catch {
+            $uninstallEvidence = New-UnavailableLenovoOfficialUninstallEvidence
+        }
     }
     return [pscustomobject][ordered]@{
         Name = $Record.Name
@@ -732,6 +1097,20 @@ function ConvertTo-InventoryServiceRecord($Record) {
         StartMode = $Record.StartMode
         PathName = $Record.PathName
         ProcessId = $Record.ProcessId
+        ProcessIdentityStatus = $identity.ProcessIdentityStatus
+        ProcessName = $identity.ProcessName
+        ProcessPath = $identity.ProcessPath
+        ProcessStartTimeUtc = $identity.ProcessStartTimeUtc
+        LaunchProtectedStatus = $launchEvidence.LaunchProtectedStatus
+        LaunchProtectedLevel = $launchEvidence.LaunchProtectedLevel
+        UninstallEvidenceStatus = $uninstallEvidence.UninstallEvidenceStatus
+        UninstallRegistryPath = $uninstallEvidence.UninstallRegistryPath
+        UninstallDisplayName = $uninstallEvidence.UninstallDisplayName
+        UninstallPublisher = $uninstallEvidence.UninstallPublisher
+        UninstallDisplayVersion = $uninstallEvidence.UninstallDisplayVersion
+        UninstallInstallLocation = $uninstallEvidence.UninstallInstallLocation
+        UninstallString = $uninstallEvidence.UninstallString
+        UninstallExecutablePath = $uninstallEvidence.UninstallExecutablePath
     }
 }
 

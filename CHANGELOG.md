@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+目标版本：1.8.1（未发布）
+
+### 修复
+- **真实故障**：HRWSCCtrl 持久禁用会触发访问被拒绝，旧流程既无法完成目标，也把一次性减负错误建模成服务启动模式变更
+- **精确服务运行态停止**：`stop_service_runtime` 在完整身份复验后，通过单一原生 SCM 服务句柄停止 exact HRWSCCtrl 当前运行态；不禁用服务、不修改 `StartMode`、不级联停止依赖服务，也不进入恢复包
+- **执行前身份复验**：在 mutation 前复验服务/路径/PID/进程名/进程路径/启动时间，任一字段变化都拒绝执行并要求重新扫描
+- **v2 身份交接**：受保护清单固定为 `inventory_schema_version: 2`，原子交接服务进程身份；v1、缺失版本和未来版本均拒绝并要求重新扫描，不静默迁移
+- **marker 失败关闭边界**：内部 `ProcessIdentitySource` 只在可信包验证后附加，不序列化到 pending/执行子集；marker-bearing reviewed action 一律失败关闭并拒绝执行
+- **重启检测**：STOP 完成后进行约 5 秒稳定验证；期间服务出现任意正 PID（`> 0`）均记录为 `failed/verification`，避免把服务自动重新拉起误报为成功
+- **结果原因**：每项结果持久化并写回 `result_reason` / `failure_stage`；GUI 只显示经过严格验证和安全净化的 `result_reason` / `failure_stage`
+- **恢复边界不变**：持久动作 `disable_service` / `remove_autostart` / `disable_task` 仍在修改前备份并可通过可信恢复包恢复
+
+### 验证边界
+- 自动测试不等同真实机器验收；自动化覆盖身份漂移、句柄绑定、旧 PID 退出、约 5 秒稳定窗口、任意正 replacement PID 和结果持久化，但本次没有执行真实清理或 UAC
+- 30 秒真实机器验收仍待人工执行，用于观察 HRWSCCtrl 是否在旧 PID 退出后重新拉起；本条不宣称已经验收、发布或推送
+
 ## [1.8.0] - 2026-08-24
 
 ### 新增

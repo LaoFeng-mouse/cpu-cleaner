@@ -113,6 +113,39 @@ Describe 'GUI presentation model' {
         $manual.GroupLabel | Should -BeExactly '可选清理'
     }
 
+    It 'presents HRWSCCtrl manual review and identity fallback observation without a clean conclusion' {
+        $safeReason = '受保护扫描没有提供完整服务进程身份，请重新扫描。'
+        $manual = Get-GuiReviewPresentation -Branch actions -Name '联想安全中心组件 HRWSCCtrl' -ExecutionClass manual_impact -Necessity optional -ImpactCn '只结束当前实例' -CleanupReasonCn '减少当前后台'
+        $observation = Get-GuiReviewPresentation -Branch observations -Name '联想安全中心组件 HRWSCCtrl' -ExecutionClass observation -Necessity informational -ImpactCn $safeReason -CleanupReasonCn $safeReason
+
+        $manual.CanExecute | Should -BeTrue
+        $manual.IsChecked | Should -BeFalse
+        $manual.NeedsConfirmation | Should -BeTrue
+        $manual.AutomationName | Should -Match 'HRWSCCtrl'
+        $manual.NecessityLabel | Should -BeExactly '必要性：按需处理'
+        $manual.ImpactText | Should -BeExactly '影响：只结束当前实例'
+        $manual.CleanupReasonText | Should -BeExactly '清理原因：减少当前后台'
+
+        $observation.CanExecute | Should -BeFalse
+        $observation.IsChecked | Should -BeFalse
+        $observation.NeedsConfirmation | Should -BeFalse
+        $observation.ImpactText | Should -BeExactly ('影响：' + $safeReason)
+        $observation.CleanupReasonText | Should -BeExactly ('清理原因：' + $safeReason)
+        ($observation | ConvertTo-Json -Depth 4) | Should -Not -Match '成功|电脑.*干净|clean computer|success'
+    }
+
+    It 'localizes schema necessity values without changing their execution class' {
+        (Get-GuiReviewPresentation -Branch actions -Name '推荐项' -ExecutionClass automatic_safe -Necessity recommended -ImpactCn '低影响' -CleanupReasonCn '减少后台').NecessityLabel | Should -BeExactly '必要性：建议处理'
+        (Get-GuiReviewPresentation -Branch actions -Name '可选项' -ExecutionClass manual_impact -Necessity optional -ImpactCn '有影响' -CleanupReasonCn '按需处理').NecessityLabel | Should -BeExactly '必要性：按需处理'
+        (Get-GuiReviewPresentation -Branch observations -Name '观察项' -ExecutionClass observation -Necessity informational -ImpactCn '仅观察' -CleanupReasonCn '保留证据').NecessityLabel | Should -BeExactly '必要性：仅供参考'
+    }
+
+    It 'exposes the same necessity localization for confirmation text' {
+        Get-GuiNecessityText optional | Should -BeExactly '按需处理'
+        Get-GuiNecessityText recommended | Should -BeExactly '建议处理'
+        Get-GuiNecessityText informational | Should -BeExactly '仅供参考'
+    }
+
     It 'formats exact matcher provenance without granting authority' {
         $raw = [pscustomobject]@{
             hit_type='service'; service_name='ExactSvc'; action='disable_service'
@@ -157,6 +190,52 @@ Describe 'GUI presentation model' {
         $rows[0].StateLabel | Should -Be '需要手动处理'
         $rows[1].StateLabel | Should -Be '执行中'
         $rows[2].StateLabel | Should -Be '等待执行'
+    }
+
+    It '逐项展示终态目标、结果和经验证的 result_reason' {
+        $rows = @(ConvertTo-GuiExecutionRows @(
+            [pscustomobject]@{ name_cn='服务 A'; action='disable_service'; status='success'; result_reason='服务已停止'; reason_cn='不应显示的旧原因' },
+            [pscustomobject]@{ name_cn='服务 B'; action='stop_service_runtime'; status='failed'; result_reason='当前实例已结束，但服务已自动重新拉起 PID 4321'; failure_stage='verification'; reason_cn='失败' },
+            [pscustomobject]@{ name_cn='服务 C'; action='disable_task'; status='skipped'; result_reason='目标状态已变化，请重新扫描' },
+            [pscustomobject]@{ name_cn='项目 D'; action='uninstall'; status='manual_required'; result_reason='请在应用设置中手动卸载' }
+        ))
+
+        @($rows.Name) | Should -Be @('服务 A','服务 B','服务 C','项目 D')
+        @($rows.StateLabel) | Should -Be @('成功','失败','已跳过','需要手动处理')
+        $rows[0].Reason | Should -BeExactly '服务已停止'
+        $rows[1].Reason | Should -BeExactly '当前实例已结束，但服务已自动重新拉起 PID 4321'
+        $rows[1].Reason | Should -Not -BeExactly '失败'
+        $rows[1].FailureStage | Should -BeExactly 'verification'
+        $rows[1].FailureStageLabel | Should -BeExactly '失败阶段：结果复核'
+    }
+
+    It '按可信动作类型生成非空且精确区分的 TargetLabel' {
+        $rows = @(ConvertTo-GuiExecutionRows @(
+            [pscustomobject]@{ name_cn='服务规则'; hit_type='service'; service_name='Svc.One'; action='disable_service'; status='success'; result_reason='完成' },
+            [pscustomobject]@{ name_cn='服务规则'; hit_type='service'; service_name='Svc.Two'; action='disable_service'; status='success'; result_reason='完成' },
+            [pscustomobject]@{ name_cn='任务规则'; hit_type='task'; task_path='\Vendor\Task One'; action='disable_task'; status='success'; result_reason='完成' },
+            [pscustomobject]@{ name_cn='任务规则'; hit_type='task'; task_path='\Vendor\Task Two'; action='disable_task'; status='success'; result_reason='完成' },
+            [pscustomobject]@{ name_cn='启动项'; hit_type='autostart'; autostart_source='HKCU Run'; autostart_name='MouseAgent'; action='remove_autostart'; status='success'; result_reason='完成' },
+            [pscustomobject]@{ name_cn='进程'; hit_type='process'; process_name='mouse.exe'; process_id=4321; action='investigate'; status='success'; result_reason='完成' }
+        ))
+
+        @($rows.TargetLabel) | Should -Be @('Svc.One','Svc.Two','\Vendor\Task One','\Vendor\Task Two','HKCU Run / MouseAgent','mouse.exe（PID 4321）')
+        @($rows.TargetLabel | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count | Should -Be 0
+    }
+
+    It '为所有合法失败阶段提供友好中文' -ForEach @(
+        @{ Stage='authorization'; Label='权限授权' }
+        @{ Stage='backup'; Label='安全备份' }
+        @{ Stage='mutation'; Label='系统修改' }
+        @{ Stage='verification'; Label='结果复核' }
+        @{ Stage='result_persistence'; Label='结果保存' }
+    ) {
+        $row = @(ConvertTo-GuiExecutionRows @([pscustomobject]@{
+            name_cn='目标'; action='disable_service'; status='failed'
+            result_reason='安全失败说明'; failure_stage=$Stage
+        }))[0]
+
+        $row.FailureStageLabel | Should -BeExactly ("失败阶段：$Label")
     }
 
     It 'presents limited scan health as a warning and never as a clean empty state' {

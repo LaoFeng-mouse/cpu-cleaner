@@ -54,6 +54,26 @@ Describe '清理动作逻辑' {
         if (-not $p.safe) { $p.status = 'skipped' }
         $p.status | Should -Be 'skipped'
     }
+
+    It 'failed transaction metadata requires an explicit legal failure_stage instead of reason inference' {
+        $pending = [pscustomobject]@{status='pending'}
+        { Set-PendingTransactionResult -Pending $pending -Result ([pscustomobject]@{
+            status='failed'; result_reason='localized text without a typed stage'
+        }) } | Should -Throw '*failure_stage*'
+        $pending.status | Should -BeExactly 'pending'
+    }
+
+    It 'service backup failure returns explicit sanitized backup metadata' {
+        Mock Assert-TrustedBackupPackagePath {}
+        Mock Get-ServiceBackupInfo { throw 'C:\internal\secret.reg --token=raw-secret' }
+
+        $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'sanitized-service'
+
+        $result.status | Should -BeExactly 'failed'
+        $result.result_reason | Should -Not -BeNullOrEmpty
+        $result.failure_stage | Should -BeExactly 'backup'
+        $result.result_reason | Should -Not -Match 'internal|secret|token|C:\\'
+    }
     It 'actions 缺省动作返回 none' {
         Get-ActionFor $null 'service' | Should -Be 'none'
         Get-ActionFor ([pscustomobject]@{ process = 'investigate' }) 'service' | Should -Be 'none'
@@ -160,7 +180,7 @@ Describe '清理动作逻辑' {
             [System.IO.File]::WriteAllText($out, "Windows Registry Editor Version 5.00`r`n`r`n[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\ExactSvc]`r`n")
             return $out
         }
-        Mock Add-BackupManifestEntryAtomic { throw 'manifest write failed' }
+        Mock Add-BackupManifestEntryAtomic { throw 'C:\internal\manifest.json --token=raw-secret' }
         Mock Invoke-ServiceConfigDisable {}
 
         $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'svc-journal'
@@ -191,12 +211,14 @@ Describe '清理动作逻辑' {
             [System.IO.File]::WriteAllText($out, '{"key":"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run","name":"Updater","value_type":"String","value":"C:\\Apps\\old.exe"}')
             return $out
         }
-        Mock Add-BackupManifestEntryAtomic { throw 'manifest write failed' }
+        Mock Add-BackupManifestEntryAtomic { throw 'C:\internal\manifest.json --token=raw-secret' }
         Mock Remove-LiteralRegistryValueFromKey {}
 
         $result = Invoke-LiteralAutostartRemovalFromKey -RegistryKey $key -Source 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Updater' -ExpectedValue 'C:\Apps\old.exe' -BackupDir $TestDrive -Tag 'auto-journal' -RequireArtifactIdentity $true
 
         $result.status | Should -BeExactly 'failed'
+        $result.failure_stage | Should -BeExactly 'backup'
+        $result.result_reason | Should -Not -Match 'internal|secret|token|C:\\'
         Should -Invoke Remove-LiteralRegistryValueFromKey -Times 0 -Exactly
     }
 
@@ -226,6 +248,7 @@ Describe '清理动作逻辑' {
         $result = Invoke-TaskDisableAction -Pending ([pscustomobject]@{task_path='\Vendor\Task'}) -BackupDir $TestDrive -Tag 'task-missing'
 
         $result.status | Should -BeExactly 'failed'
+        $result.failure_stage | Should -BeExactly 'verification'
         $result.manifest.backup_verified | Should -BeTrue
         Should -Invoke Disable-ScheduledTask -Times 1 -Exactly
     }
@@ -244,7 +267,8 @@ Describe '清理动作逻辑' {
         $result = Invoke-TaskDisableAction -Pending ([pscustomobject]@{task_path='\Vendor\Task'}) -BackupDir $TestDrive -Tag 'task-still-enabled'
 
         $result.status | Should -BeExactly 'failed'
-        $result.reason | Should -Match 'Ready'
+        $result.failure_stage | Should -BeExactly 'verification'
+        $result.result_reason | Should -Match 'Ready'
         Should -Invoke Disable-ScheduledTask -Times 1 -Exactly
         Should -Invoke Update-BackupManifestEntryAtomic -Times 1 -Exactly -ParameterFilter { $ExecutionStatus -eq 'failed' -and $Verified -eq $false }
     }
@@ -412,7 +436,8 @@ Describe '清理动作逻辑' {
         $result = Invoke-ServiceDisableAction -Pending ([pscustomobject]@{service_name='ExactSvc'}) -BackupDir $TestDrive -Tag 'svc-still-running'
 
         $result.status | Should -BeExactly 'failed'
-        $result.reason | Should -Match '仍在运行'
+        $result.result_reason | Should -Match '仍在运行'
+        $result.failure_stage | Should -BeExactly 'verification'
         Should -Invoke Update-BackupManifestEntryAtomic -Times 1 -Exactly -ParameterFilter { $ExecutionStatus -eq 'failed' -and $Verified -eq $false }
     }
 
@@ -468,7 +493,7 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
     BeforeEach {
         $projectRoot = if ($PSScriptRoot) { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent } else { (Get-Location).Path }
         $script:Root = $projectRoot
-        foreach ($file in @('Utils','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
+        foreach ($file in @('Utils','ProtectedServiceHandoff','ProfileEngine','Scanner','RiskEngine','ReportEngine','ActionEngine','BackupManager')) {
             . (Join-Path $projectRoot ('src\Core\' + $file + '.ps1'))
         }
         function Is-Admin { return $false }
@@ -479,6 +504,69 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
                 service_name=$Id; matched_pattern=$Id; matched_type='exact'; matched_field='service_name'; safe=$true
                 execution_class='automatic_safe'; necessity='optional'; default_selected=$true; requires_confirmation=$false
                 impact_cn='test impact'; cleanup_reason_cn='test reason'
+            }
+        }
+        function New-ServiceStopCleanAction {
+            return [pscustomobject]@{
+                id='lenovo-hrwscctrl'; name_cn='HRWSCCtrl'; detail='HRWSCCtrl'; reason_cn='manual'
+                hit_type='service'; action='stop_service_runtime'; status='pending'; service_name='HRWSCCtrl'
+                service_binary_path='C:\Program Files\Lenovo Security Center\wsctrl11.exe'; process_id=[int]4321
+                process_name='wsctrl11.exe'; process_path='C:\Program Files\Lenovo Security Center\wsctrl11.exe'
+                process_start_time_utc='2026-08-24T01:02:03.0000000Z'
+                matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+                execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
+            }
+        }
+        function New-OfficialUninstallerCleanAction {
+            return [pscustomobject][ordered]@{
+                id='lenovo-hrwscctrl'; name_cn='HRWSCCtrl'; detail='HRWSCCtrl'; reason_cn='official handoff'
+                hit_type='service'; action='open_official_uninstaller'; status='pending'; service_name='HRWSCCtrl'
+                matched_pattern='HRWSCCtrl'; matched_type='exact'; matched_field='service_name'; safe=$false
+                execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                impact_cn='可能移除联想电脑管家的安全、防护、通知和相关后台组件'
+                cleanup_reason_cn='Windows 受保护服务阻止普通管理员实时停止；不需要联想电脑管家时可按需打开联想官方卸载程序'
+                launch_protected_status='complete'; launch_protected_level=[int]3; uninstall_evidence_status='complete'
+                uninstall_registry_path='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+                uninstall_display_name='联想电脑管家'; uninstall_publisher='联想（北京）有限公司'; uninstall_display_version='5.1.0'
+                uninstall_install_location='C:\Program Files\Lenovo\PCManager'
+                uninstall_string='"C:\Program Files\Lenovo\PCManager\uninst.exe"'
+                uninstall_executable_path='C:\Program Files\Lenovo\PCManager\uninst.exe'
+            }
+        }
+        function New-OfficialUninstallerProfiles {
+            $action = New-OfficialUninstallerCleanAction
+            return [pscustomobject]@{ profiles=@([pscustomobject]@{
+                id='lenovo-hrwscctrl'; safe=$false; evidence=[pscustomobject]@{tested=$true}
+                actions=[pscustomobject]@{service='none'}
+                manual_actions=[pscustomobject]@{service='open_official_uninstaller'}
+                cleanup_policy=[pscustomobject]@{
+                    execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                    impact_cn=$action.impact_cn; cleanup_reason_cn=$action.cleanup_reason_cn
+                }
+                detect=[pscustomobject]@{
+                    services=@([pscustomobject]@{match='HRWSCCtrl';type='exact'}); autostarts=@(); tasks=@(); processes=@()
+                }
+            }) }
+        }
+        function Set-OfficialUninstallerAuthorizationDrift($Action, $Profiles, [string]$Drift) {
+            $profile = @($Profiles.profiles) | Select-Object -First 1
+            switch ($Drift) {
+                'profile-removed' { $Profiles.profiles = @() }
+                'manual-action-removed' { $profile.manual_actions.PSObject.Properties.Remove('service') }
+                'manual-action-changed' { $profile.manual_actions.service = 'stop_service_runtime' }
+                'cleanup-policy-drift' { $profile.cleanup_policy.impact_cn = 'changed cleanup policy' }
+                'matcher-removed' { $profile.detect.services = @() }
+                'matcher-contains' { $profile.detect.services = @([pscustomobject]@{match='HRWSCCtrl';type='contains'}) }
+                'matcher-display' {
+                    $Action.matched_field = 'service_display_name'
+                    $Action.matched_pattern = 'Lenovo Security Controller'
+                }
+                'protection-drift' { $Action.launch_protected_status = 'incomplete' }
+                'evidence-drift' { $Action.uninstall_evidence_status = 'incomplete' }
+                'service-missing' { $script:OfficialServiceState = 'missing' }
+                'service-name-mismatch' { $script:OfficialServiceState = 'mismatch' }
+                default { throw "unknown official authorization drift: $Drift" }
             }
         }
         function Write-CleanExitPending([string]$Name, $Actions) {
@@ -544,7 +632,7 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         Mock Load-Profiles { $profiles }
         Mock Get-Service { [pscustomobject]@{Name='HRWSCCtrl';DisplayName='HRWSCCtrl'} } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
         Mock Initialize-ProtectedBackupDirectory { $BackupDir }
-        Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';reason='mocked'} }
+        Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';result_reason='mocked';failure_stage=''} }
         try {
             $null = Invoke-Clean
             Should -Invoke Initialize-ProtectedBackupDirectory -Times $expectedMutation -Exactly
@@ -584,6 +672,44 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         }
     }
 
+    It 'valid manual digest without a verified pending SHA aborts nonzero without rewriting or mutation' {
+        $pendingAction = New-ServiceStopCleanAction
+        $profiles = [pscustomobject]@{ profiles=@([pscustomobject]@{
+            id='lenovo-hrwscctrl'; safe=$false; evidence=[pscustomobject]@{tested=$true}
+            actions=[pscustomobject]@{service='none'}; manual_actions=[pscustomobject]@{service='stop_service_runtime'}
+            cleanup_policy=[pscustomobject]@{
+                execution_class='manual_impact'; necessity='optional'; default_selected=$false; requires_confirmation=$true
+                impact_cn='只结束当前实例'; cleanup_reason_cn='减少当前后台'
+            }
+            detect=[pscustomobject]@{services=@([pscustomobject]@{match='HRWSCCtrl';type='exact'});autostarts=@();tasks=@();processes=@()}
+        }) }
+        $path = Write-CleanExitPending 'unbound-one-time.json' @($pendingAction)
+        $oldPendingFile = $script:PendingFile
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $script:RequirePendingSha256 = $false
+        $script:PendingSha256 = ''
+        $script:ConfirmedImpactSha256 = Get-ManualImpactDigest @($pendingAction)
+        $beforeBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { $profiles }
+        Mock Get-Service { [pscustomobject]@{Name='HRWSCCtrl';DisplayName='HRWSCCtrl'} } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+        Mock Invoke-ServiceProcessStopAction { throw 'unbound one-time action must not reach mutation helper' }
+        Mock Initialize-ProtectedBackupDirectory { throw 'unbound one-time action must not create backup' }
+        try {
+            $exitCode = Invoke-Clean
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+
+        $exitCode | Should -Not -Be 0
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) | Should -BeExactly $beforeBytes
+        Should -Invoke Invoke-ServiceProcessStopAction -Times 0 -Exactly
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+    }
+
     It '重复选择 index 对 <executionClass> 只形成一个最终 action 且只授权和执行一次' -TestCases @(
         @{ executionClass='automatic_safe'; safe=$true }
         @{ executionClass='manual_impact'; safe=$false }
@@ -610,7 +736,7 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         Mock Test-SelectedPendingActionAuthorized { $true }
         Mock Read-Host { '0,0,0' }
         Mock Initialize-ProtectedBackupDirectory { $BackupDir }
-        Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';reason='mocked'} }
+        Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';result_reason='mocked';failure_stage=''} }
         try {
             $null = Invoke-Clean
             Should -Invoke Test-PendingActionEligible -Times 1 -Exactly
@@ -637,8 +763,8 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         Mock Test-SelectedPendingActionAuthorized { $true }
         Mock Initialize-ProtectedBackupDirectory { $BackupDir }
         Mock Invoke-ServiceDisableAction {
-            if ($Pending.service_name -ceq 'FailedSvc') { return [pscustomobject]@{status='failed';reason='mock failure'} }
-            return [pscustomobject]@{status='success';reason='mock success'}
+            if ($Pending.service_name -ceq 'FailedSvc') { return [pscustomobject]@{status='failed';result_reason='mock failure';failure_stage='mutation'} }
+            return [pscustomobject]@{status='success';result_reason='mock success';failure_stage=''}
         }
         try {
             $exitCode = Invoke-Clean
@@ -663,7 +789,7 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         Mock Test-PendingActionEligible { $true }
         Mock Test-SelectedPendingActionAuthorized { $true }
         Mock Initialize-ProtectedBackupDirectory { $BackupDir }
-        Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';reason='mock success'} }
+        Mock Invoke-ServiceDisableAction { [pscustomobject]@{status='success';result_reason='mock success';failure_stage=''} }
         try {
             $exitCode = Invoke-Clean
             $saved = Read-StrictPendingJsonFile $path
@@ -692,9 +818,347 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         } finally { $script:PendingFile = $oldPendingFile }
 
         $exitCode | Should -Be 0
-        @($saved.actions | Where-Object status -ceq 'skipped').Count | Should -Be 1
-        @($saved.actions | Where-Object status -ceq 'manual_required').Count | Should -Be 1
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        [string]::IsNullOrWhiteSpace([string]$saved.actions[0].result_reason) | Should -BeFalse
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        $saved.actions[1].status | Should -BeExactly 'manual_required'
+        [string]::IsNullOrWhiteSpace([string]$saved.actions[1].result_reason) | Should -BeFalse
+        $saved.actions[1].failure_stage | Should -BeOfType [string]
+        $saved.actions[1].failure_stage | Should -BeNullOrEmpty
         Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+    }
+
+    It 'CLI clean always skips an authorized official-uninstaller handoff without launch backup or mutation' {
+        $action = New-OfficialUninstallerCleanAction
+        $path = Write-CleanExitPending 'official-uninstaller-cli-skip.json' @($action)
+        $oldPendingFile = $script:PendingFile
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $script:ConfirmedImpactSha256 = Get-ManualImpactDigest @($action)
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Start-Process { throw 'CLI clean must never launch the official uninstaller' }
+        Mock Initialize-ProtectedBackupDirectory { throw 'official handoff must not create a backup' }
+        Mock Invoke-ServiceDisableAction { throw 'official handoff must not mutate a service' }
+        Mock Invoke-ServiceProcessStopAction { throw 'official handoff must not stop a service runtime' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        $saved.actions[0].result_reason | Should -Match 'GUI|界面'
+        $saved.actions[0].result_reason | Should -Match '确认|打开'
+        $saved.actions[0].result_reason | Should -Not -Match 'C:\\|token|secret|Start-Process'
+        Should -Invoke Start-Process -Times 0 -Exactly
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceProcessStopAction -Times 0 -Exactly
+    }
+
+    It 'official handoff initial reauthorization fails closed for profile policy matcher service protection and evidence drift' -TestCases @(
+        @{ Drift='profile-removed' }, @{ Drift='manual-action-removed' }, @{ Drift='manual-action-changed' },
+        @{ Drift='cleanup-policy-drift' }, @{ Drift='matcher-removed' }, @{ Drift='matcher-contains' },
+        @{ Drift='matcher-display' }, @{ Drift='service-missing' }, @{ Drift='service-name-mismatch' },
+        @{ Drift='protection-drift' }, @{ Drift='evidence-drift' }
+    ) {
+        param($Drift)
+        $action = New-OfficialUninstallerCleanAction
+        $profiles = New-OfficialUninstallerProfiles
+        $reviewedDigest = Get-ManualImpactDigest @($action)
+        $script:OfficialServiceState = 'valid'
+        Set-OfficialUninstallerAuthorizationDrift $action $profiles $Drift
+        $path = Write-CleanExitPending ("official-initial-$Drift.json") @($action)
+        $oldPendingFile = $script:PendingFile
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $script:ConfirmedImpactSha256 = $reviewedDigest
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { $profiles }
+        Mock Get-Service {
+            if ($script:OfficialServiceState -ceq 'missing') { return $null }
+            if ($script:OfficialServiceState -ceq 'mismatch') { return [pscustomobject]@{Name='OtherService';DisplayName='Other Service'} }
+            return [pscustomobject]@{Name='HRWSCCtrl';DisplayName='Lenovo Security Controller'}
+        } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+        Mock Start-Process { throw 'rejected official handoff must not launch' }
+        Mock Initialize-ProtectedBackupDirectory { throw 'rejected official handoff must not back up' }
+        Mock Invoke-ServiceDisableAction { throw 'rejected official handoff must not mutate' }
+        Mock Invoke-ServiceProcessStopAction { throw 'rejected official handoff must not stop runtime' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        [string]::IsNullOrWhiteSpace([string]$saved.actions[0].result_reason) | Should -BeFalse
+        $saved.actions[0].result_reason | Should -Match '授权|确认|变化|重新扫描'
+        $saved.actions[0].result_reason | Should -Not -Match 'C:\\|token|secret|Start-Process|uninst\.exe'
+        Should -Invoke Start-Process -Times 0 -Exactly
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceProcessStopAction -Times 0 -Exactly
+    }
+
+    It 'official handoff final reauthorization catches real profile matcher and live service drift after initial success' -TestCases @(
+        @{ Drift='profile-removed' }, @{ Drift='manual-action-removed' }, @{ Drift='manual-action-changed' },
+        @{ Drift='cleanup-policy-drift' }, @{ Drift='matcher-removed' }, @{ Drift='matcher-contains' },
+        @{ Drift='service-missing' }, @{ Drift='service-name-mismatch' }
+    ) {
+        param($Drift)
+        $action = New-OfficialUninstallerCleanAction
+        $profiles = New-OfficialUninstallerProfiles
+        $path = Write-CleanExitPending ("official-final-$Drift.json") @($action)
+        $oldPendingFile = $script:PendingFile
+        $oldImpactDigest = $script:ConfirmedImpactSha256
+        $script:PendingFile = $path
+        $script:ConfirmedImpactSha256 = Get-ManualImpactDigest @($action)
+        $script:OfficialServiceState = 'valid'
+        $YesToAll = $false
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { $profiles }
+        Mock Get-Service {
+            if ($script:OfficialServiceState -ceq 'missing') { return $null }
+            if ($script:OfficialServiceState -ceq 'mismatch') { return [pscustomobject]@{Name='OtherService';DisplayName='Other Service'} }
+            return [pscustomobject]@{Name='HRWSCCtrl';DisplayName='Lenovo Security Controller'}
+        } -ParameterFilter { $Name -eq 'HRWSCCtrl' }
+        Mock Read-Host {
+            Set-OfficialUninstallerAuthorizationDrift $action $profiles $Drift
+            return 'all'
+        }
+        Mock Start-Process { throw 'drifted official handoff must not launch' }
+        Mock Initialize-ProtectedBackupDirectory { throw 'drifted official handoff must not back up' }
+        Mock Invoke-ServiceDisableAction { throw 'drifted official handoff must not mutate' }
+        Mock Invoke-ServiceProcessStopAction { throw 'drifted official handoff must not stop runtime' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally {
+            $script:PendingFile = $oldPendingFile
+            $script:ConfirmedImpactSha256 = $oldImpactDigest
+        }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        [string]::IsNullOrWhiteSpace([string]$saved.actions[0].result_reason) | Should -BeFalse
+        $saved.actions[0].result_reason | Should -Match '授权|确认|变化|重新扫描'
+        $saved.actions[0].result_reason | Should -Not -Match 'C:\\|token|secret|Start-Process|uninst\.exe'
+        Should -Invoke Read-Host -Times 1 -Exactly
+        Should -Invoke Start-Process -Times 0 -Exactly
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceProcessStopAction -Times 0 -Exactly
+    }
+
+    It 'persists authorization rejection and final identity drift as skipped metadata' -TestCases @(
+        @{ label='initial'; finalDrift=$false }
+        @{ label='final-drift'; finalDrift=$true }
+    ) {
+        param($label, $finalDrift)
+        $action = New-CleanExitAction "Auth-$label"
+        $path = Write-CleanExitPending ("auth-$label.json") @($action)
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        $script:eligibilityCalls = 0
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible {
+            $script:eligibilityCalls++
+            if ($finalDrift) { return $script:eligibilityCalls -eq 1 }
+            return $false
+        }
+        Mock Initialize-ProtectedBackupDirectory { throw 'authorization rejection must precede backup' }
+        Mock Invoke-ServiceDisableAction { throw 'authorization rejection must precede mutation' }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'skipped'
+        [string]::IsNullOrWhiteSpace([string]$saved.actions[0].result_reason) | Should -BeFalse
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+    }
+
+    It 'persists backup initialization failure as failed backup metadata' {
+        $path = Write-CleanExitPending 'backup-init-failed.json' @((New-CleanExitAction 'BackupSvc'))
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { throw 'ACL denied at C:\internal\backup --token=raw-secret' }
+        Mock Invoke-ServiceDisableAction { throw 'backup failure must precede mutation' }
+        $script:capturedHostOutput = [System.Collections.ArrayList]::new()
+        Mock Write-Host { $null = $script:capturedHostOutput.Add([string]$Object) }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 2
+        $saved.actions[0].status | Should -BeExactly 'failed'
+        $saved.actions[0].result_reason | Should -Match '备份|backup|ACL'
+        $saved.actions[0].result_reason | Should -Not -Match 'internal|secret|token|C:\\'
+        $saved.actions[0].failure_stage | Should -BeExactly 'backup'
+        ($script:capturedHostOutput -join "`n") | Should -Match '备份|backup|ACL'
+        ($script:capturedHostOutput -join "`n") | Should -Not -Match 'internal|secret|token|C:\\'
+        Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
+    }
+
+    It 'persists <action> helper <status> with truthful terminal metadata' -TestCases @(
+        @{ action='disable_service'; status='success'; reason='已禁用并停止'; expectedStage='' }
+        @{ action='disable_service'; status='skipped'; reason='服务名无效'; expectedStage='' }
+        @{ action='disable_service'; status='failed'; reason='服务禁用后置验证失败: Status=Running'; expectedStage='verification' }
+        @{ action='disable_task'; status='success'; reason='计划任务已禁用'; expectedStage='' }
+        @{ action='disable_task'; status='skipped'; reason='计划任务不存在'; expectedStage='' }
+        @{ action='disable_task'; status='failed'; reason='计划任务禁用命令执行失败'; expectedStage='mutation' }
+        @{ action='remove_autostart'; status='success'; reason='自启项已完成单值备份并删除'; expectedStage='' }
+        @{ action='remove_autostart'; status='skipped'; reason='自启 Value 已变化，拒绝删除'; expectedStage='' }
+        @{ action='remove_autostart'; status='failed'; reason='自启项单值备份失败'; expectedStage='backup' }
+    ) {
+        param($action, $status, $reason, $expectedStage)
+        $pendingAction = New-CleanExitAction ("helper-$action-$status") $action
+        $path = Write-CleanExitPending ("helper-$action-$status.json") @($pendingAction)
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $YesToAll = $true
+        $script:helperResult = [pscustomobject]@{status=$status;result_reason=$reason;failure_stage=$expectedStage}
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { $BackupDir }
+        Mock Invoke-ServiceDisableAction { $script:helperResult }
+        Mock Invoke-TaskDisableAction { $script:helperResult }
+        Mock Invoke-LiteralAutostartRemoval { $script:helperResult }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be $(if ($status -ceq 'failed') { 2 } else { 0 })
+        $saved.actions[0].status | Should -BeExactly $status
+        $saved.actions[0].result_reason | Should -BeExactly $reason
+        $saved.actions[0].failure_stage | Should -BeOfType [string]
+        $saved.actions[0].failure_stage | Should -BeExactly $expectedStage
+    }
+
+    It 'one-time service stop persists truthful success metadata without creating a backup package' {
+        $path = Write-CleanExitPending 'one-time-stop.json' @((New-ServiceStopCleanAction))
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $script:RequirePendingSha256 = $true
+        $script:PendingSha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { throw 'one-time action must not create backup' }
+        Mock Invoke-ServiceProcessStopAction {
+            [pscustomobject]@{status='success';result_reason='current instance ended';failure_stage=''}
+        }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 0
+        $saved.actions[0].status | Should -BeExactly 'success'
+        $saved.actions[0].result_reason | Should -BeExactly 'current instance ended'
+        $saved.actions[0].failure_stage | Should -BeNullOrEmpty
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+        Should -Invoke Invoke-ServiceProcessStopAction -Times 1 -Exactly
+    }
+
+    It 'one-time failure metadata is persisted and keeps clean exit code 2' {
+        $path = Write-CleanExitPending 'one-time-stop-failed.json' @((New-ServiceStopCleanAction))
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $script:RequirePendingSha256 = $true
+        $script:PendingSha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        $YesToAll = $true
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { throw 'one-time action must not create backup' }
+        Mock Invoke-ServiceProcessStopAction {
+            [pscustomobject]@{status='failed';result_reason='old PID remains';failure_stage='verification'}
+        }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 2
+        $saved.actions[0].status | Should -BeExactly 'failed'
+        $saved.actions[0].result_reason | Should -BeExactly 'old PID remains'
+        $saved.actions[0].failure_stage | Should -BeExactly 'verification'
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
+    }
+
+    It 'mixed actions lazily create backup immediately before the first persistent mutation' -TestCases @(
+        @{ stopFirst=$true; expected=@('one-time','backup','persistent') }
+        @{ stopFirst=$false; expected=@('backup','persistent','one-time') }
+    ) {
+        param($stopFirst, $expected)
+        $stop = New-ServiceStopCleanAction
+        $persistent = New-CleanExitAction 'PersistentSvc'
+        $ordered = if ($stopFirst) { @($stop,$persistent) } else { @($persistent,$stop) }
+        $path = Write-CleanExitPending ("mixed-$stopFirst.json") $ordered
+        $oldPendingFile = $script:PendingFile
+        $script:PendingFile = $path
+        $script:RequirePendingSha256 = $true
+        $script:PendingSha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        $YesToAll = $true
+        $script:executionOrder = [System.Collections.ArrayList]::new()
+        Mock Is-Admin { $true }
+        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Test-PendingActionEligible { $true }
+        Mock Test-SelectedPendingActionAuthorized { $true }
+        Mock Initialize-ProtectedBackupDirectory { $null = $script:executionOrder.Add('backup'); $BackupDir }
+        Mock Invoke-ServiceDisableAction { $null = $script:executionOrder.Add('persistent'); [pscustomobject]@{status='success';result_reason='done';failure_stage=''} }
+        Mock Invoke-ServiceProcessStopAction { $null = $script:executionOrder.Add('one-time'); [pscustomobject]@{status='success';result_reason='done';failure_stage=''} }
+        try {
+            $exitCode = Invoke-Clean
+            $saved = Read-StrictPendingJsonFile $path
+        } finally { $script:PendingFile = $oldPendingFile }
+
+        $exitCode | Should -Be 0
+        @($script:executionOrder) | Should -Be $expected
+        foreach ($item in @($saved.actions)) {
+            $item.status | Should -BeExactly 'success'
+            [string]::IsNullOrWhiteSpace([string]$item.result_reason) | Should -BeFalse
+            $item.failure_stage | Should -BeOfType [string]
+            $item.failure_stage | Should -BeNullOrEmpty
+        }
+        Should -Invoke Initialize-ProtectedBackupDirectory -Times 1 -Exactly
     }
 
     It 'cpu-cleaner clean 分支显式使用 Invoke-Clean 返回码退出' {

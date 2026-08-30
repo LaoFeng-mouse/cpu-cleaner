@@ -251,6 +251,197 @@ function Get-SuspiciousProcesses($TopProcs, $ProfileHits = @()) {
 }
 
 # ---------- 4. 服务列表 ----------
+function ConvertTo-ServiceProcessStartTimeUtc {
+    param($Value)
+
+    try {
+        $utc = $null
+        if ($Value -is [datetimeoffset]) {
+            $utc = $Value.ToUniversalTime()
+        } elseif ($Value -is [datetime]) {
+            if ($Value.Kind -eq [DateTimeKind]::Utc) {
+                $utc = [datetimeoffset]::new($Value)
+            } elseif ($Value.Kind -eq [DateTimeKind]::Local) {
+                $utc = [datetimeoffset]::new($Value.ToUniversalTime())
+            } else {
+                return $null
+            }
+        } else {
+            return $null
+        }
+        if ($utc.Year -lt 1970) { return $null }
+        return $utc.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        return $null
+    }
+}
+
+function Set-ServiceProcessIdentityFailureReason {
+    param([ref]$FailureReason, [string]$Reason)
+    if ($null -ne $FailureReason) { $FailureReason.Value = '服务进程身份无法安全确认，请重新扫描后再试。' }
+}
+
+function Get-StrictServiceProcessId {
+    param($Value)
+
+    if ($null -eq $Value) { return $null }
+    $allowedTypes = @(
+        'System.Byte','System.SByte','System.Int16','System.UInt16',
+        'System.Int32','System.UInt32','System.Int64','System.UInt64'
+    )
+    if ($allowedTypes -cnotcontains $Value.GetType().FullName) { return $null }
+    try {
+        $numeric = [uint64]$Value
+        if ($numeric -eq 0 -or $numeric -gt [int]::MaxValue) { return $null }
+        return [int]$numeric
+    } catch {
+        return $null
+    }
+}
+
+function Get-CurrentServiceExecutionSnapshot {
+    param([Parameter(Mandatory=$true)][string]$ServiceName, [ref]$FailureReason)
+
+    $escapedName = $ServiceName.Replace('\', '\\').Replace("'", "\'")
+    try {
+        $services = @(Get-CimInstance -ClassName Win32_Service -Filter ("Name = '{0}'" -f $escapedName) -ErrorAction Stop)
+    } catch {
+        Set-ServiceProcessIdentityFailureReason $FailureReason ('无法读取当前服务身份: ' + $_.Exception.Message)
+        return $null
+    }
+    if ($services.Count -ne 1 -or $null -eq $services[0]) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '当前服务身份缺失或不唯一，无法建立稳定快照。'
+        return $null
+    }
+    $service = $services[0]
+    if ($service.Name -isnot [string] -or $service.Name -cne $ServiceName) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '当前服务名称与精确命中名称不一致。'
+        return $null
+    }
+    if ($service.State -isnot [string] -or $service.State -cne 'Running') {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '当前服务状态不是 Running，无法建立进程身份。'
+        return $null
+    }
+    $processId = Get-StrictServiceProcessId $service.ProcessId
+    if ($null -eq $processId) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '当前服务没有严格有效的正整数 PID。'
+        return $null
+    }
+    if ($service.PathName -isnot [string] -or [string]::IsNullOrWhiteSpace($service.PathName)) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '当前服务 PathName 缺失。'
+        return $null
+    }
+    $binaryPath = Get-ServiceBinaryPathFromPathName $service.PathName
+    if ([string]::IsNullOrWhiteSpace([string]$binaryPath) -or -not (Test-InventoryFullyQualifiedWindowsPath $binaryPath)) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '当前服务二进制路径缺失、含糊或不是绝对路径。'
+        return $null
+    }
+    try { $binaryPath = [System.IO.Path]::GetFullPath([string]$binaryPath) }
+    catch {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '当前服务二进制路径无法规范化。'
+        return $null
+    }
+    if (-not [System.IO.File]::Exists($binaryPath)) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '当前服务二进制路径不存在。'
+        return $null
+    }
+    return [pscustomobject]@{
+        Name = $service.Name
+        State = $service.State
+        ProcessId = $processId
+        PathName = $service.PathName
+        BinaryPath = $binaryPath
+    }
+}
+
+function Get-ServiceProcessExecutionIdentity {
+    param($Service, [ref]$FailureReason)
+
+    if ($null -ne $FailureReason) { $FailureReason.Value = '' }
+    if ($null -eq $Service -or $Service.Name -isnot [string] -or [string]::IsNullOrWhiteSpace($Service.Name)) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '扫描服务名称缺失，无法回读当前服务。'
+        return $null
+    }
+    if ($Service.ProcessIdentitySource -isnot [string] -or $Service.ProcessIdentitySource -cne 'trusted_inventory_v3' -or
+        $Service.ProcessIdentityStatus -isnot [string] -or $Service.ProcessIdentityStatus -cne 'complete') {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '扫描服务没有可信且完整的进程身份。'
+        return $null
+    }
+    $first = Get-CurrentServiceExecutionSnapshot -ServiceName $Service.Name -FailureReason $FailureReason
+    if ($null -eq $first) { return $null }
+
+    $originalProcessId = Get-StrictServiceProcessId $Service.ProcessId
+    if ($Service.Name -isnot [string] -or $Service.Name -cne $first.Name -or
+        $Service.State -isnot [string] -or $Service.State -cne 'Running' -or
+        $first.State -isnot [string] -or $first.State -cne 'Running' -or
+        $null -eq $originalProcessId -or $originalProcessId -ne $first.ProcessId -or
+        $Service.PathName -isnot [string] -or $Service.PathName -cne $first.PathName) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '扫描服务与首次当前服务快照的名称、状态、PID 或 PathName 不一致。'
+        return $null
+    }
+    $originalBinaryPath = Get-ServiceBinaryPathFromPathName $Service.PathName
+    try { $originalBinaryPath = [System.IO.Path]::GetFullPath([string]$originalBinaryPath) }
+    catch {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '扫描服务二进制路径无法规范化。'
+        return $null
+    }
+    if (-not [string]::Equals($originalBinaryPath, $first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '扫描服务与首次当前服务快照的二进制路径不一致。'
+        return $null
+    }
+
+    $processName = [string]$Service.ProcessName
+    $expectedName = [System.IO.Path]::GetFileName($first.BinaryPath)
+    if ($Service.ProcessName -isnot [string] -or [string]::IsNullOrWhiteSpace($processName) -or
+        $processName -cne $processName.Trim() -or
+        [System.IO.Path]::GetFileName($processName) -cne $processName -or
+        -not [string]::Equals($processName, $expectedName, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '进程名称与服务二进制名称不一致，无法安全结束。'
+        return $null
+    }
+
+    $processPath = [string]$Service.ProcessPath
+    if ($Service.ProcessPath -isnot [string] -or [string]::IsNullOrWhiteSpace($processPath) -or
+        -not (Test-InventoryFullyQualifiedWindowsPath $processPath)) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '进程路径缺失或不是绝对路径，无法安全结束。'
+        return $null
+    }
+    try { $processPath = [System.IO.Path]::GetFullPath($processPath) }
+    catch {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '进程路径无效，无法建立执行身份。'
+        return $null
+    }
+    if (-not [System.IO.File]::Exists($processPath) -or
+        -not [string]::Equals($processPath, $first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '进程路径与服务二进制路径不一致，无法安全结束。'
+        return $null
+    }
+
+    $startTimeUtc = [string]$Service.ProcessStartTimeUtc
+    $parsedStartTimeUtc = ConvertFrom-InventoryCanonicalUtc $Service.ProcessStartTimeUtc
+    if ($null -eq $parsedStartTimeUtc) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '进程 UTC 启动时间缺失、时区不明确或格式无效，无法安全结束。'
+        return $null
+    }
+
+    $second = Get-CurrentServiceExecutionSnapshot -ServiceName $first.Name -FailureReason $FailureReason
+    if ($null -eq $second) { return $null }
+    if ($second.Name -cne $first.Name -or $second.State -cne 'Running' -or
+        $second.ProcessId -ne $first.ProcessId -or $second.PathName -cne $first.PathName -or
+        -not [string]::Equals($second.BinaryPath, $first.BinaryPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Set-ServiceProcessIdentityFailureReason $FailureReason '服务在进程读取前后发生名称、状态、PID、PathName 或二进制路径漂移。'
+        return $null
+    }
+
+    return [pscustomobject]@{
+        service_binary_path = $first.BinaryPath
+        process_id = $first.ProcessId
+        process_name = $processName
+        process_path = $processPath
+        process_start_time_utc = $startTimeUtc
+    }
+}
+
 function Test-ServiceTriggerHint {
     param([Parameter(Mandatory=$true)]$Service)
 
@@ -533,6 +724,21 @@ function Get-ScanServiceTaskInventory {
                 StartMode   = $_.StartMode
                 PathName    = $_.PathName
                 ProcessId   = $_.ProcessId
+                ProcessIdentityStatus = $_.ProcessIdentityStatus
+                ProcessName = $_.ProcessName
+                ProcessPath = $_.ProcessPath
+                ProcessStartTimeUtc = $_.ProcessStartTimeUtc
+                LaunchProtectedStatus = $_.LaunchProtectedStatus
+                LaunchProtectedLevel = $_.LaunchProtectedLevel
+                UninstallEvidenceStatus = $_.UninstallEvidenceStatus
+                UninstallRegistryPath = $_.UninstallRegistryPath
+                UninstallDisplayName = $_.UninstallDisplayName
+                UninstallPublisher = $_.UninstallPublisher
+                UninstallDisplayVersion = $_.UninstallDisplayVersion
+                UninstallInstallLocation = $_.UninstallInstallLocation
+                UninstallString = $_.UninstallString
+                UninstallExecutablePath = $_.UninstallExecutablePath
+                ProcessIdentitySource = 'trusted_inventory_v3'
                 TriggerHint = Test-ServiceTriggerHint $_
             }
         })
