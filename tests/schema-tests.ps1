@@ -251,7 +251,7 @@ $changelogText = Get-Content (Join-Path $projectRoot 'CHANGELOG.md') -Raw -Encod
 $identityPlanText = Get-Content (Join-Path $projectRoot 'docs\superpowers\plans\2026-08-26-privileged-service-process-identity-handoff.md') -Raw -Encoding UTF8
 $changelogTarget181 = Get-ChangelogVersionBlock $changelogText 'Unreleased'
 
-Assert-Match '版本精确为 1.8.1' $cleanerText '(?m)^\$script:Version = ''1\.8\.1''$'
+Assert-Match '版本精确为 1.8.1' $cleanerText '(?m)^\$script:Version = ''1\.8\.1''\r?$'
 Assert-Match '脚本标题版本精确为 1.8.1' $cleanerText '(?m)^#  CPU 后台整理工具 v1\.8\.1 \(cpu-cleaner\.ps1\)'
 
 # README：用户行为与可见结果
