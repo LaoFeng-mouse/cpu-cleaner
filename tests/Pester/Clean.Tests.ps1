@@ -829,19 +829,29 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
         Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
     }
 
-    It 'CLI clean always skips an authorized official-uninstaller handoff without launch backup or mutation' {
+    It 'clean executes an authorized official-uninstaller handoff and persists the manual-required result' {
         $action = New-OfficialUninstallerCleanAction
-        $path = Write-CleanExitPending 'official-uninstaller-cli-skip.json' @($action)
+        $path = Write-CleanExitPending 'official-uninstaller-clean-handoff.json' @($action)
         $oldPendingFile = $script:PendingFile
+        $oldRequirePendingSha256 = $script:RequirePendingSha256
+        $oldPendingSha256 = $script:PendingSha256
         $oldImpactDigest = $script:ConfirmedImpactSha256
         $script:PendingFile = $path
+        $script:RequirePendingSha256 = $true
+        $script:PendingSha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
         $script:ConfirmedImpactSha256 = Get-ManualImpactDigest @($action)
         $YesToAll = $true
         Mock Is-Admin { $true }
-        Mock Load-Profiles { [pscustomobject]@{profiles=@()} }
+        Mock Load-Profiles { New-OfficialUninstallerProfiles }
         Mock Test-PendingActionEligible { $true }
         Mock Test-SelectedPendingActionAuthorized { $true }
-        Mock Start-Process { throw 'CLI clean must never launch the official uninstaller' }
+        Mock Invoke-ReviewedLenovoUninstallerHandoff {
+            [pscustomobject]@{
+                status='manual_required'
+                result_reason='联想官方卸载程序已打开，请在其中确认或取消'
+                failure_stage=''
+            }
+        } -ParameterFilter { $Action -eq $action }
         Mock Initialize-ProtectedBackupDirectory { throw 'official handoff must not create a backup' }
         Mock Invoke-ServiceDisableAction { throw 'official handoff must not mutate a service' }
         Mock Invoke-ServiceProcessStopAction { throw 'official handoff must not stop a service runtime' }
@@ -850,17 +860,18 @@ Describe 'clean impact confirmation 参数与最终选择闸门' {
             $saved = Read-StrictPendingJsonFile $path
         } finally {
             $script:PendingFile = $oldPendingFile
+            $script:RequirePendingSha256 = $oldRequirePendingSha256
+            $script:PendingSha256 = $oldPendingSha256
             $script:ConfirmedImpactSha256 = $oldImpactDigest
         }
 
         $exitCode | Should -Be 0
-        $saved.actions[0].status | Should -BeExactly 'skipped'
+        $saved.actions[0].status | Should -BeExactly 'manual_required'
         $saved.actions[0].failure_stage | Should -BeOfType [string]
         $saved.actions[0].failure_stage | Should -BeNullOrEmpty
-        $saved.actions[0].result_reason | Should -Match 'GUI|界面'
-        $saved.actions[0].result_reason | Should -Match '确认|打开'
+        $saved.actions[0].result_reason | Should -BeExactly '联想官方卸载程序已打开，请在其中确认或取消'
         $saved.actions[0].result_reason | Should -Not -Match 'C:\\|token|secret|Start-Process'
-        Should -Invoke Start-Process -Times 0 -Exactly
+        Should -Invoke Invoke-ReviewedLenovoUninstallerHandoff -Times 1 -Exactly -ParameterFilter { $Action -eq $action }
         Should -Invoke Initialize-ProtectedBackupDirectory -Times 0 -Exactly
         Should -Invoke Invoke-ServiceDisableAction -Times 0 -Exactly
         Should -Invoke Invoke-ServiceProcessStopAction -Times 0 -Exactly

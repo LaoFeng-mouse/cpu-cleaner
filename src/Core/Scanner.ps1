@@ -700,6 +700,35 @@ function Get-TasksInfo {
     return $tasks
 }
 
+function ConvertTo-TrustedScanServiceRecord {
+    param([Parameter(Mandatory=$true)]$Record)
+
+    return [pscustomobject]@{
+        Name        = $Record.Name
+        DisplayName = $Record.DisplayName
+        State       = $Record.State
+        StartMode   = $Record.StartMode
+        PathName    = $Record.PathName
+        ProcessId   = $Record.ProcessId
+        ProcessIdentityStatus = $Record.ProcessIdentityStatus
+        ProcessName = $Record.ProcessName
+        ProcessPath = $Record.ProcessPath
+        ProcessStartTimeUtc = $Record.ProcessStartTimeUtc
+        LaunchProtectedStatus = $Record.LaunchProtectedStatus
+        LaunchProtectedLevel = $Record.LaunchProtectedLevel
+        UninstallEvidenceStatus = $Record.UninstallEvidenceStatus
+        UninstallRegistryPath = $Record.UninstallRegistryPath
+        UninstallDisplayName = $Record.UninstallDisplayName
+        UninstallPublisher = $Record.UninstallPublisher
+        UninstallDisplayVersion = $Record.UninstallDisplayVersion
+        UninstallInstallLocation = $Record.UninstallInstallLocation
+        UninstallString = $Record.UninstallString
+        UninstallExecutablePath = $Record.UninstallExecutablePath
+        ProcessIdentitySource = 'trusted_inventory_v3'
+        TriggerHint = Test-ServiceTriggerHint $Record
+    }
+}
+
 function Get-ScanServiceTaskInventory {
     param(
         [string]$InventoryNonce = '',
@@ -716,32 +745,7 @@ function Get-ScanServiceTaskInventory {
         foreach ($warning in @($trusted.Package.warnings)) { Add-ScanWarning ([string]$warning) }
         $script:ScanHealth['services'] = 'complete'
         $script:ScanHealth['tasks'] = 'complete'
-        $trustedServices = @($trusted.Package.services | ForEach-Object {
-            [pscustomobject]@{
-                Name        = $_.Name
-                DisplayName = $_.DisplayName
-                State       = $_.State
-                StartMode   = $_.StartMode
-                PathName    = $_.PathName
-                ProcessId   = $_.ProcessId
-                ProcessIdentityStatus = $_.ProcessIdentityStatus
-                ProcessName = $_.ProcessName
-                ProcessPath = $_.ProcessPath
-                ProcessStartTimeUtc = $_.ProcessStartTimeUtc
-                LaunchProtectedStatus = $_.LaunchProtectedStatus
-                LaunchProtectedLevel = $_.LaunchProtectedLevel
-                UninstallEvidenceStatus = $_.UninstallEvidenceStatus
-                UninstallRegistryPath = $_.UninstallRegistryPath
-                UninstallDisplayName = $_.UninstallDisplayName
-                UninstallPublisher = $_.UninstallPublisher
-                UninstallDisplayVersion = $_.UninstallDisplayVersion
-                UninstallInstallLocation = $_.UninstallInstallLocation
-                UninstallString = $_.UninstallString
-                UninstallExecutablePath = $_.UninstallExecutablePath
-                ProcessIdentitySource = 'trusted_inventory_v3'
-                TriggerHint = Test-ServiceTriggerHint $_
-            }
-        })
+        $trustedServices = @($trusted.Package.services | ForEach-Object { ConvertTo-TrustedScanServiceRecord $_ })
         return [pscustomobject]@{
             Services = [object[]]@($trustedServices)
             Tasks    = [object[]]@($trusted.Package.tasks)
@@ -799,6 +803,15 @@ function Get-ScanServiceTaskInventory {
         }
         $detail = if ($details.Count -gt 0) { ': ' + ($details -join '; ') } else { '' }
         throw ('系统服务或计划任务采集不完整' + $detail)
+    }
+    if (Is-Admin) {
+        $services = @($services | ForEach-Object {
+            if ($_.Name -is [string] -and $_.Name -ceq 'HRWSCCtrl') {
+                ConvertTo-TrustedScanServiceRecord (ConvertTo-InventoryServiceRecord $_)
+            } else {
+                $_
+            }
+        })
     }
     return [pscustomobject]@{
         Services = [object[]]$services

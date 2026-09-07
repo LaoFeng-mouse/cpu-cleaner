@@ -1114,6 +1114,56 @@ function ConvertTo-InventoryServiceRecord($Record) {
     }
 }
 
+function Get-PrivilegedInventoryServiceNames {
+    $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $profiles = Load-Profiles
+    foreach ($profile in @($profiles.profiles)) {
+        if ((Get-ManualActionFor $profile 'service') -cnotin @('stop_service_runtime','open_official_uninstaller')) { continue }
+        if ($null -eq $profile.detect -or $null -eq $profile.detect.services) { continue }
+        foreach ($detect in @($profile.detect.services)) {
+            $normalized = Normalize-DetectItem $detect
+            if ($normalized.type -ceq 'exact' -and $normalized.match -is [string] -and
+                -not [string]::IsNullOrWhiteSpace($normalized.match)) {
+                $null = $names.Add($normalized.match)
+            }
+        }
+    }
+    return [string[]]$names
+}
+
+function ConvertTo-InventoryUnprivilegedServiceRecord($Record) {
+    if ($null -eq $Record) { throw 'Inventory service record cannot be null.' }
+    foreach ($name in @('Name','DisplayName','State','StartMode','PathName','ProcessId')) {
+        if (@($Record.PSObject.Properties.Name) -cnotcontains $name) {
+            throw "Inventory service collection is missing required field $name."
+        }
+    }
+    Assert-InventoryServiceBaseRecord $Record
+    $uninstallEvidence = New-UnavailableLenovoOfficialUninstallEvidence
+    return [pscustomobject][ordered]@{
+        Name = $Record.Name
+        DisplayName = $Record.DisplayName
+        State = $Record.State
+        StartMode = $Record.StartMode
+        PathName = $Record.PathName
+        ProcessId = $Record.ProcessId
+        ProcessIdentityStatus = 'unavailable'
+        ProcessName = ''
+        ProcessPath = ''
+        ProcessStartTimeUtc = ''
+        LaunchProtectedStatus = 'unavailable'
+        LaunchProtectedLevel = [int]-1
+        UninstallEvidenceStatus = $uninstallEvidence.UninstallEvidenceStatus
+        UninstallRegistryPath = $uninstallEvidence.UninstallRegistryPath
+        UninstallDisplayName = $uninstallEvidence.UninstallDisplayName
+        UninstallPublisher = $uninstallEvidence.UninstallPublisher
+        UninstallDisplayVersion = $uninstallEvidence.UninstallDisplayVersion
+        UninstallInstallLocation = $uninstallEvidence.UninstallInstallLocation
+        UninstallString = $uninstallEvidence.UninstallString
+        UninstallExecutablePath = $uninstallEvidence.UninstallExecutablePath
+    }
+}
+
 function ConvertTo-InventoryTaskRecord($Record) {
     if ($null -eq $Record) { throw 'Inventory task record cannot be null.' }
     $propertyNames = @($Record.PSObject.Properties.Name)
@@ -1148,7 +1198,17 @@ function Invoke-ScanInventory([string]$Nonce) {
     if ([string]$script:ScanHealth.services -cne 'complete' -or [string]$script:ScanHealth.tasks -cne 'complete') {
         throw 'Privileged inventory collection health is incomplete.'
     }
-    $serviceRecords = @($services | ForEach-Object { ConvertTo-InventoryServiceRecord $_ })
+    $privilegedNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @(Get-PrivilegedInventoryServiceNames)) {
+        if ($name -is [string] -and -not [string]::IsNullOrWhiteSpace($name)) { $null = $privilegedNames.Add($name) }
+    }
+    $serviceRecords = @($services | ForEach-Object {
+        if ($_.Name -is [string] -and $privilegedNames.Contains($_.Name)) {
+            ConvertTo-InventoryServiceRecord $_
+        } else {
+            ConvertTo-InventoryUnprivilegedServiceRecord $_
+        }
+    })
     $taskRecords = @($tasks | ForEach-Object { ConvertTo-InventoryTaskRecord $_ })
     $warnings = @($script:ScanWarnings | ForEach-Object {
         if ($_ -isnot [string]) { throw 'Inventory warning must be a scalar string.' }

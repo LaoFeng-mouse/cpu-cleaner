@@ -623,7 +623,8 @@ Describe '扫描器与评分' {
         $script:ScanHealth.services | Should -BeExactly 'degraded'
         @($script:ScanWarnings) -join "`n" | Should -Match '服务|services'
     }
-    It '普通 scan 不合成保护状态或卸载证据' {
+    It '非管理员普通 scan 不合成保护状态或卸载证据' {
+        Mock Is-Admin { $false }
         Mock Get-ServicesInfo { [pscustomobject]@{ Name='Svc';DisplayName='Service';State='Running';StartMode='Auto';PathName='C:\svc.exe';ProcessId=1;TriggerHint=$false } }
         Mock Get-TasksInfo { [pscustomobject]@{ TaskName='Task';TaskPath='\';State='Ready';Author='';Description='';Actions=[object[]]@() } }
 
@@ -631,6 +632,49 @@ Describe '扫描器与评分' {
 
         $result.Services[0].PSObject.Properties.Name | Should -Not -Contain 'LaunchProtectedStatus'
         $result.Services[0].PSObject.Properties.Name | Should -Not -Contain 'UninstallEvidenceStatus'
+    }
+    It '管理员普通 scan 使用与可信 inventory 相同的 v3 服务证据投影' {
+        $baseService = [pscustomobject]@{
+            Name='HRWSCCtrl';DisplayName='Lenovo Windows Security Center';State='Running';StartMode='Manual'
+            PathName='"C:\Program Files (x86)\Lenovo\PCManager\wsctrl11.exe" /svc_run';ProcessId=21824;TriggerHint=$true
+        }
+        $ordinaryService = [pscustomobject]@{
+            Name='OrdinarySvc';DisplayName='Ordinary Service';State='Running';StartMode='Auto'
+            PathName='C:\Program Files\Vendor\ordinary.exe';ProcessId=1234;TriggerHint=$false
+        }
+        $enrichedService = [pscustomobject][ordered]@{
+            Name=$baseService.Name;DisplayName=$baseService.DisplayName;State=$baseService.State;StartMode=$baseService.StartMode
+            PathName=$baseService.PathName;ProcessId=$baseService.ProcessId
+            ProcessIdentityStatus='unavailable';ProcessName='';ProcessPath='';ProcessStartTimeUtc=''
+            LaunchProtectedStatus='complete';LaunchProtectedLevel=[int]3
+            UninstallEvidenceStatus='complete';UninstallRegistryPath='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+            UninstallDisplayName='联想电脑管家';UninstallPublisher='联想(北京)有限公司';UninstallDisplayVersion='5.1'
+            UninstallInstallLocation='C:\Program Files (x86)\Lenovo\PCManager';UninstallString='"C:\Program Files (x86)\Lenovo\PCManager\uninst.exe"'
+            UninstallExecutablePath='C:\Program Files (x86)\Lenovo\PCManager\uninst.exe'
+        }
+        $baseTask = [pscustomobject]@{ TaskName='Task';TaskPath='\';State='Ready';Author='Vendor';Description='Task';Actions=[object[]]@('C:\task.exe') }
+        $projectedTask = [pscustomobject]@{ TaskName='Task';TaskPath='\';State='Ready';Author='Vendor';Description='Task';Actions=[object[]]@('C:\task.exe') }
+        Mock Is-Admin { $true }
+        Mock Get-ServicesInfo { @($baseService,$ordinaryService) }
+        Mock Get-TasksInfo { $baseTask }
+        Mock ConvertTo-InventoryServiceRecord { $enrichedService }
+        Mock ConvertTo-InventoryTaskRecord { $projectedTask }
+
+        $result = Get-ScanServiceTaskInventory
+
+        $result.Services[0].ProcessIdentitySource | Should -BeExactly 'trusted_inventory_v3'
+        $result.Services[0].LaunchProtectedStatus | Should -BeExactly 'complete'
+        $result.Services[0].LaunchProtectedLevel | Should -Be 3
+        $result.Services[0].UninstallEvidenceStatus | Should -BeExactly 'complete'
+        $result.Services[0].UninstallExecutablePath | Should -BeExactly $enrichedService.UninstallExecutablePath
+        $result.Services[0].TriggerHint | Should -BeFalse
+        [object]::ReferenceEquals($result.Services[0], $enrichedService) | Should -BeFalse
+        $result.Services[1].Name | Should -BeExactly 'OrdinarySvc'
+        $result.Services[1].PSObject.Properties.Name | Should -Not -Contain 'ProcessIdentitySource'
+        [object]::ReferenceEquals($result.Tasks[0], $baseTask) | Should -BeTrue
+        Assert-MockCalled ConvertTo-InventoryServiceRecord -Times 1 -Exactly -ParameterFilter { $Record.Name -ceq 'HRWSCCtrl' }
+        Assert-MockCalled ConvertTo-InventoryServiceRecord -Times 1 -Exactly
+        Assert-MockCalled ConvertTo-InventoryTaskRecord -Times 0 -Exactly
     }
     It '显式 limited 成功生成结果并把健康状态与警告传给报告和 pending' {
         Mock Get-SystemInfo { [pscustomobject]@{ Computer='PC' } }

@@ -332,6 +332,43 @@ function Update-GuiStopProcessAvailability {
     $window.FindName('BtnStopProcesses').IsEnabled = ($selected.Count -gt 0 -and -not $script:SuspiciousStopInProgress -and -not $script:ExecutionInProgress -and -not $restoreBusy -and -not (Test-GuiInventoryBusy) -and -not (Test-GuiNormalScanBusy))
 }
 
+# CheckBox.Click 会早于 WPF 绑定源回写到达 ListBox；先从已切换的 CheckBox 同步 DataContext，
+# 再计算按钮可用性，避免出现“已勾选但仍无法执行”。
+function Sync-GuiCheckboxSelectionFromClick {
+    param([Parameter(Mandatory=$true)]$EventArgs)
+    $source = $EventArgs.Source
+    if ($source -isnot [System.Windows.Controls.CheckBox] -or $source.IsChecked -isnot [bool]) { return }
+    $row = $source.DataContext
+    if ($null -eq $row -or $null -eq $row.PSObject.Properties['IsChecked']) { return }
+    $row.IsChecked = [bool]$source.IsChecked
+}
+
+function Sync-GuiPendingSelectionFromClick {
+    param([Parameter(Mandatory=$true)]$EventArgs, $List = $window.FindName('PendingList'))
+    Sync-GuiCheckboxSelectionFromClick -EventArgs $EventArgs
+    Update-GuiExecuteAvailability -List $List
+}
+
+function Sync-GuiSuspiciousSelectionFromClick {
+    param([Parameter(Mandatory=$true)]$EventArgs, $List = $window.FindName('SuspiciousList'))
+    Sync-GuiCheckboxSelectionFromClick -EventArgs $EventArgs
+    Update-GuiStopProcessAvailability -List $List
+}
+
+function Queue-GuiExecuteAvailabilityUpdate {
+    param($List = $window.FindName('PendingList'))
+    $updater = ${function:Update-GuiExecuteAvailability}
+    $callback = [Action]({ & $updater -List $List }.GetNewClosure())
+    $null = $List.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::DataBind, $callback)
+}
+
+function Queue-GuiStopProcessAvailabilityUpdate {
+    param($List = $window.FindName('SuspiciousList'))
+    $updater = ${function:Update-GuiStopProcessAvailability}
+    $callback = [Action]({ & $updater -List $List }.GetNewClosure())
+    $null = $List.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::DataBind, $callback)
+}
+
 function Set-GuiState {
     param(
         [Parameter(Mandatory=$true)][ValidateSet('idle','scanning','results','review','executing','completed','error')][string]$Name,
@@ -1663,7 +1700,8 @@ $window.FindName('BtnClearAll').Add_Click({
 
 $script:PendingSelectionChangedHandler = [System.Windows.RoutedEventHandler]{
     param($sender, $eventArgs)
-    Update-GuiExecuteAvailability -List $window.FindName('PendingList')
+    Sync-GuiPendingSelectionFromClick -EventArgs $eventArgs -List $window.FindName('PendingList')
+    Queue-GuiExecuteAvailabilityUpdate -List $window.FindName('PendingList')
 }
 $window.FindName('PendingList').AddHandler(
     [System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,
@@ -1672,7 +1710,8 @@ $window.FindName('PendingList').AddHandler(
 
 $script:SuspiciousSelectionChangedHandler = [System.Windows.RoutedEventHandler]{
     param($sender, $eventArgs)
-    Update-GuiStopProcessAvailability -List $window.FindName('SuspiciousList')
+    Sync-GuiSuspiciousSelectionFromClick -EventArgs $eventArgs -List $window.FindName('SuspiciousList')
+    Queue-GuiStopProcessAvailabilityUpdate -List $window.FindName('SuspiciousList')
 }
 $window.FindName('SuspiciousList').AddHandler(
     [System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,
@@ -2139,8 +2178,6 @@ function Read-GuiStrictExecutionResult {
         }
     }
     $actionCopies = [System.Collections.Generic.List[object]]::new()
-    $resultRecords = [System.Collections.Generic.List[object]]::new()
-    $statusMap = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
     foreach ($action in $items) {
         $metadata = Get-GuiValidatedTerminalResultMetadata -Action $action
         $resultKey = Get-PendingIdentityKey $action
@@ -2148,8 +2185,25 @@ function Read-GuiStrictExecutionResult {
         $copy.status = [string]$action.status
         $copy | Add-Member -NotePropertyName result_reason -NotePropertyValue $metadata.ResultReason -Force
         $copy | Add-Member -NotePropertyName failure_stage -NotePropertyValue $metadata.FailureStage -Force
+        $actionCopies.Add($copy)
+    }
+    return New-GuiStrictExecutionResultFromActions -Actions $actionCopies
+}
+
+function New-GuiStrictExecutionResultFromActions {
+    param([Parameter(Mandatory=$true)]$Actions)
+    $actionCopies = [System.Collections.Generic.List[object]]::new()
+    $resultRecords = [System.Collections.Generic.List[object]]::new()
+    $statusMap = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+    foreach ($sourceAction in @($Actions)) {
+        $metadata = Get-GuiValidatedTerminalResultMetadata -Action $sourceAction
+        $copy = Copy-PendingActionForSubset $sourceAction
+        $copy.status = [string]$sourceAction.status
+        $copy | Add-Member -NotePropertyName result_reason -NotePropertyValue $metadata.ResultReason -Force
+        $copy | Add-Member -NotePropertyName failure_stage -NotePropertyValue $metadata.FailureStage -Force
         $key = Get-PendingIdentityKey $copy
         $status = [string]$copy.status
+        if ($statusMap.ContainsKey($key)) { throw 'execution result identity set contains duplicates.' }
         $actionCopies.Add($copy)
         $recordValues = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
         $recordValues.Add('IdentityKey', $key)
@@ -2171,6 +2225,94 @@ function Read-GuiStrictExecutionResult {
         Summary = [System.Collections.ObjectModel.ReadOnlyDictionary[string,int]]::new($summaryMap)
         Rows = $rows.AsReadOnly()
     }
+}
+
+function Invoke-GuiReviewedLenovoUninstallerHandoffIsolated {
+    param(
+        [Parameter(Mandatory=$true)]$Action,
+        [scriptblock]$Runner
+    )
+    $modulePath = Join-Path $script:Root 'src\Core\ProtectedServiceHandoff.ps1'
+    if (-not [System.IO.File]::Exists($modulePath)) {
+        throw 'official uninstaller handoff module is missing.'
+    }
+    if ($null -eq $Runner) {
+        $Runner = {
+            param($ModulePath, $ReviewedAction)
+            $job = $null
+            try {
+                $job = Start-Job -ScriptBlock {
+                    param($HandoffModulePath, $TrustedAction)
+                    . $HandoffModulePath
+                    Invoke-ReviewedLenovoUninstallerHandoff -Action $TrustedAction
+                } -ArgumentList $ModulePath, $ReviewedAction
+                $completed = Wait-Job -Job $job -Timeout 20
+                if ($null -eq $completed -or $job.State -cne 'Completed') {
+                    return [pscustomobject]@{ status='skipped'; result_reason='启动前安全复核失败，请重新扫描后再试'; failure_stage='' }
+                }
+                $output = @(Receive-Job -Job $job -ErrorAction Stop)
+                if ($output.Count -ne 1) { throw 'isolated handoff returned an invalid result count.' }
+                return $output[0]
+            }
+            catch {
+                return [pscustomobject]@{ status='skipped'; result_reason='启动前安全复核失败，请重新扫描后再试'; failure_stage='' }
+            }
+            finally {
+                if ($null -ne $job) {
+                    if ($job.State -cin @('Running','NotStarted','Blocked')) { Stop-Job -Job $job -ErrorAction SilentlyContinue }
+                    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+    return & $Runner $modulePath $Action
+}
+
+function Invoke-GuiReviewedLenovoUninstallerHandoffWithRetry {
+    param(
+        [Parameter(Mandatory=$true)]$Action,
+        [ValidateRange(1,3)][int]$RetryLimit = 3,
+        [ValidateRange(0,2000)][int]$RetryDelayMilliseconds = 1500
+    )
+    $retryableReason = '启动前安全复核失败，请重新扫描后再试'
+    $result = $null
+    for ($attempt = 1; $attempt -le $RetryLimit; $attempt++) {
+        $result = Invoke-GuiReviewedLenovoUninstallerHandoffIsolated -Action $Action
+        if ($null -eq $result -or $result.status -cne 'skipped' -or
+            $result.result_reason -cne $retryableReason -or $attempt -eq $RetryLimit) {
+            return $result
+        }
+        if ($RetryDelayMilliseconds -gt 0) { Start-Sleep -Milliseconds $RetryDelayMilliseconds }
+    }
+    return $result
+}
+
+function Complete-GuiOfficialUninstallerHandoffs {
+    param([Parameter(Mandatory=$true)]$ExecutionResult)
+    $authorizedReason = '需要返回 GUI 完成人工确认并打开官方卸载程序'
+    $updatedActions = [System.Collections.Generic.List[object]]::new()
+    foreach ($sourceAction in @($ExecutionResult.Actions)) {
+        $copy = Copy-PendingActionForSubset $sourceAction
+        $copy.status = [string]$sourceAction.status
+        $copy | Add-Member -NotePropertyName result_reason -NotePropertyValue ([string]$sourceAction.result_reason) -Force
+        $copy | Add-Member -NotePropertyName failure_stage -NotePropertyValue ([string]$sourceAction.failure_stage) -Force
+        if ($copy.action -ceq 'open_official_uninstaller' -and
+            $copy.status -ceq 'skipped' -and
+            $copy.result_reason -ceq $authorizedReason) {
+            $handoff = Invoke-GuiReviewedLenovoUninstallerHandoffWithRetry -Action $copy
+            if ($null -eq $handoff -or $handoff.status -cnotin @('manual_required','skipped','failed')) {
+                throw 'official uninstaller handoff returned an invalid terminal status.'
+            }
+            $copy.status = [string]$handoff.status
+            $copy.result_reason = [string]$handoff.result_reason
+            $handoffStage = [string]$handoff.failure_stage
+            if ($copy.status -ceq 'failed' -and $handoffStage -ceq 'launch') { $handoffStage = 'mutation' }
+            $copy.failure_stage = $handoffStage
+            $null = Get-GuiValidatedTerminalResultMetadata -Action $copy
+        }
+        $updatedActions.Add($copy)
+    }
+    return New-GuiStrictExecutionResultFromActions -Actions $updatedActions
 }
 
 function Get-GuiValidatedTerminalResultMetadata {
@@ -2291,6 +2433,7 @@ function Complete-ExecutionPoll {
             if ($exitCode -eq 2 -and $result.Summary['failed'] -le 0) {
                 throw 'execution exit 2 result does not contain a failed action.'
             }
+            $result = Complete-GuiOfficialUninstallerHandoffs -ExecutionResult $result
             Merge-PendingStatus $result
             $window.FindName('CompletedList').ItemsSource = @($result.Rows)
             Set-GuiCompletedSummary -Success $result.Summary['success'] -Failed $result.Summary['failed'] -Skipped $result.Summary['skipped'] -Manual $result.Summary['manual_required']

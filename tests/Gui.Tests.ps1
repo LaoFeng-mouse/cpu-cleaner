@@ -2160,6 +2160,42 @@ Describe '勾选视图 (v1.5.5)' {
         $script:Win.FindName('BtnExecute').IsEnabled | Should -BeFalse
     }
 
+    It 'checkbox 视图已切换但绑定源尚未回写时先同步选择再启用执行按钮' {
+        $list = $script:Win.FindName('PendingList')
+        $row = [pscustomobject]@{CanExecute=$true;IsChecked=$false}
+        $list.ItemsSource = @($row)
+        $script:ExecutionInProgress = $false
+        Update-GuiExecuteAvailability -List $list
+        $checkbox = [System.Windows.Controls.CheckBox]::new()
+        $checkbox.DataContext = $row
+        $checkbox.IsChecked = $true
+        $eventArgs = [pscustomobject]@{ Source=$checkbox }
+
+        Sync-GuiPendingSelectionFromClick -EventArgs $eventArgs -List $list
+
+        $row.IsChecked | Should -BeTrue
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeTrue
+    }
+
+    It 'checkbox Click 早于绑定源回写时在 DataBind 队列之后重算执行按钮' {
+        $list = $script:Win.FindName('PendingList')
+        $row = [pscustomobject]@{CanExecute=$true;IsChecked=$false}
+        $list.ItemsSource = @($row)
+        $script:ExecutionInProgress = $false
+        Update-GuiExecuteAvailability -List $list
+
+        Queue-GuiExecuteAvailabilityUpdate -List $list
+        $row.IsChecked = $true
+        $list.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+
+        $script:Win.FindName('BtnExecute').IsEnabled | Should -BeTrue
+    }
+
+    It '建议项与可疑进程 checkbox 显式使用 TwoWay PropertyChanged 回写选择' {
+        $xaml = Get-Content -LiteralPath (Join-Path $script:GuiRoot 'src\Gui\MainWindow.xaml') -Raw -Encoding UTF8
+        @([regex]::Matches($xaml, 'IsChecked="\{Binding IsChecked, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged\}"')).Count | Should -BeGreaterOrEqual 2
+    }
+
     It 'HRWSCCtrl review row is initially optional and enables execution through the real checkbox route' {
         $fixture = Set-GuiReviewedPendingFixture -Pending (New-GuiHRWSCCtrlPendingFixture)
         $row = @($fixture.List.Items)[0]
@@ -3594,6 +3630,109 @@ Describe '勾选视图 (v1.5.5)' {
             $script:Win.FindName('CompletedSummaryText').Text | Should -Match 'success 1.*failed 1.*skipped 1.*manual 1'
             Test-Path -LiteralPath $subsetPath | Should -BeFalse
         } finally { $script:Root = $oldRoot }
+    }
+
+    It '管理员核心授权官方卸载 handoff 后 GUI 安全复核并打开卸载程序' {
+        $oldRoot = $script:Root
+        $tempRoot = Join-Path $TestDrive ('official-handoff-' + [guid]::NewGuid().ToString('N'))
+        [void][System.IO.Directory]::CreateDirectory($tempRoot)
+        $script:Root = $tempRoot
+        try {
+            $expected = (New-GuiOfficialUninstallerPendingFixture).actions[0]
+            $mainPath = Join-Path $tempRoot 'pending_actions.json'
+            [System.IO.File]::WriteAllText($mainPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+                pending_schema_version=3; actions=@($expected); resolved=@(); observations=@(); suspicious=@()
+            })), [System.Text.UTF8Encoding]::new($false))
+            Set-GuiReviewedGenerationFromFile $mainPath
+
+            $authorized = $expected.PSObject.Copy()
+            $authorized.status = 'skipped'
+            $authorized | Add-Member -NotePropertyName result_reason -NotePropertyValue '需要返回 GUI 完成人工确认并打开官方卸载程序' -Force
+            $authorized | Add-Member -NotePropertyName failure_stage -NotePropertyValue '' -Force
+            $subsetPath = Join-Path $tempRoot ('shushu_pending_' + [guid]::NewGuid().ToString('N') + '.json')
+            [System.IO.File]::WriteAllText($subsetPath, (ConvertTo-GuiPendingJson ([pscustomobject]@{
+                pending_schema_version=3; actions=@($authorized); resolved=@(); observations=@(); suspicious=@()
+            })), [System.Text.UTF8Encoding]::new($false))
+
+            Mock Invoke-GuiReviewedLenovoUninstallerHandoffIsolated {
+                return [pscustomobject]@{
+                    status='manual_required'
+                    result_reason='联想官方卸载程序已打开，请在其中确认或取消'
+                    failure_stage=''
+                }
+            }
+            $script:ExecutionProcess = [pscustomobject]@{ HasExited=$true; ExitCode=0 }
+            $script:ExecutionTimer = New-ExecutionFakeTimer
+            $script:ExecutionTempPath = $subsetPath
+            $script:ExecutionActions = @($expected)
+            $script:ExecutionInProgress = $true; $script:ExecutionLifecycle = 'running'
+            Set-GuiState executing -Force
+
+            Complete-ExecutionPoll | Should -BeTrue
+
+            Assert-MockCalled Invoke-GuiReviewedLenovoUninstallerHandoffIsolated -Times 1 -Exactly -ParameterFilter {
+                $Action.action -ceq 'open_official_uninstaller' -and $Action.service_name -ceq 'HRWSCCtrl'
+            }
+            $script:GuiState | Should -BeExactly 'completed'
+            $row = @($script:Win.FindName('CompletedList').ItemsSource)[0]
+            $row.State | Should -BeExactly 'manual_required'
+            $row.Reason | Should -BeExactly '联想官方卸载程序已打开，请在其中确认或取消'
+            $merged = Get-Content -LiteralPath $mainPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $merged.actions[0].status | Should -BeExactly 'manual_required'
+            $merged.actions[0].result_reason | Should -BeExactly '联想官方卸载程序已打开，请在其中确认或取消'
+            Test-Path -LiteralPath $subsetPath | Should -BeFalse
+        } finally { $script:Root = $oldRoot }
+    }
+
+    It '普通 skipped 结果不得触发官方卸载 handoff' {
+        $action = (New-GuiOfficialUninstallerPendingFixture).actions[0]
+        $action.status = 'skipped'
+        $action | Add-Member -NotePropertyName result_reason -NotePropertyValue '当前条件不允许执行' -Force
+        $action | Add-Member -NotePropertyName failure_stage -NotePropertyValue '' -Force
+        $strict = New-GuiStrictExecutionResultFromActions -Actions @($action)
+        Mock Invoke-GuiReviewedLenovoUninstallerHandoffIsolated { throw 'ordinary skipped result must not launch' }
+
+        $result = Complete-GuiOfficialUninstallerHandoffs -ExecutionResult $strict
+
+        Assert-MockCalled Invoke-GuiReviewedLenovoUninstallerHandoffIsolated -Times 0 -Exactly
+        $result.Actions[0].status | Should -BeExactly 'skipped'
+        $result.Actions[0].result_reason | Should -BeExactly '当前条件不允许执行'
+    }
+
+    It '管理员 clean 退出后首次安全复核瞬时 skipped 时在固定窗口内重做完整复核' {
+        $action = (New-GuiOfficialUninstallerPendingFixture).actions[0]
+        $script:GuiHandoffAttemptCount = 0
+        Mock Invoke-GuiReviewedLenovoUninstallerHandoffIsolated {
+            $script:GuiHandoffAttemptCount++
+            if ($script:GuiHandoffAttemptCount -eq 1) {
+                return [pscustomobject]@{ status='skipped'; result_reason='启动前安全复核失败，请重新扫描后再试'; failure_stage='' }
+            }
+            return [pscustomobject]@{ status='manual_required'; result_reason='联想官方卸载程序已打开，请在其中确认或取消'; failure_stage='' }
+        }
+
+        $result = Invoke-GuiReviewedLenovoUninstallerHandoffWithRetry -Action $action -RetryLimit 2 -RetryDelayMilliseconds 0
+
+        Assert-MockCalled Invoke-GuiReviewedLenovoUninstallerHandoffIsolated -Times 2 -Exactly
+        $result.status | Should -BeExactly 'manual_required'
+    }
+
+    It '官方卸载 handoff 通过短生命周期隔离运行器复核可信动作' {
+        $action = (New-GuiOfficialUninstallerPendingFixture).actions[0]
+        $script:IsolatedRunnerAction = $null
+        $runner = {
+            param($ModulePath, $ReviewedAction)
+            $script:IsolatedRunnerAction = $ReviewedAction
+            return [pscustomobject]@{
+                status='manual_required'
+                result_reason='联想官方卸载程序已打开，请在其中确认或取消'
+                failure_stage=''
+            }
+        }
+
+        $result = Invoke-GuiReviewedLenovoUninstallerHandoffIsolated -Action $action -Runner $runner
+
+        $script:IsolatedRunnerAction.service_name | Should -BeExactly 'HRWSCCtrl'
+        $result.status | Should -BeExactly 'manual_required'
     }
 
     It 'exit 0 验证结果只读一次且显示与主清单合并使用同一快照' {

@@ -1348,6 +1348,7 @@ Describe 'internal scan_inventory collector' {
         Mock Get-NativeProcessIdentity { $null }
         Mock Get-ServiceLaunchProtectedState { [pscustomobject][ordered]@{ Status='complete'; Level=[int]2 } }
         Mock Get-LenovoOfficialUninstallEvidence { New-UnavailableLenovoOfficialUninstallEvidence }
+        Mock Get-PrivilegedInventoryServiceNames { @('Svc') }
         Mock Get-CurrentUserSid { $script:ReaderSid }
         Mock Get-ServicesInfo {
             [pscustomobject]@{
@@ -1464,6 +1465,41 @@ Describe 'internal scan_inventory collector' {
         { Invoke-ScanInventory -Nonce '..\inventory.json' } | Should -Throw '*nonce*'
         Assert-MockCalled Get-ServicesInfo -Times 0 -Exactly
         Assert-MockCalled Get-TasksInfo -Times 0 -Exactly
+    }
+
+    It '只对当前特征库要求特权身份的服务执行昂贵 v3 增强采集' {
+        $ordinary = [pscustomobject]@{
+            Name='OrdinarySvc';DisplayName='Ordinary Service';State='Running';StartMode='Auto'
+            PathName='C:\Program Files\Vendor\ordinary.exe';ProcessId=1234;TriggerHint=$false
+        }
+        $hrws = [pscustomobject]@{
+            Name='HRWSCCtrl';DisplayName='Lenovo Windows Security Center';State='Running';StartMode='Manual'
+            PathName='"C:\Program Files (x86)\Lenovo\PCManager\wsctrl11.exe" /svc_run';ProcessId=21824;TriggerHint=$false
+        }
+        $hrwsEnriched = [pscustomobject][ordered]@{
+            Name=$hrws.Name;DisplayName=$hrws.DisplayName;State=$hrws.State;StartMode=$hrws.StartMode;PathName=$hrws.PathName;ProcessId=$hrws.ProcessId
+            ProcessIdentityStatus='unavailable';ProcessName='';ProcessPath='';ProcessStartTimeUtc=''
+            LaunchProtectedStatus='complete';LaunchProtectedLevel=[int]3
+            UninstallEvidenceStatus='complete';UninstallRegistryPath='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\LenovoPcManager'
+            UninstallDisplayName='联想电脑管家';UninstallPublisher='联想(北京)有限公司';UninstallDisplayVersion='5.1'
+            UninstallInstallLocation='C:\Program Files (x86)\Lenovo\PCManager';UninstallString='"C:\Program Files (x86)\Lenovo\PCManager\uninst.exe"'
+            UninstallExecutablePath='C:\Program Files (x86)\Lenovo\PCManager\uninst.exe'
+        }
+        Mock Get-ServicesInfo { @($ordinary,$hrws) }
+        Mock Get-PrivilegedInventoryServiceNames { @('HRWSCCtrl') }
+        Mock ConvertTo-InventoryServiceRecord { $hrwsEnriched }
+
+        $package = Invoke-ScanInventory -Nonce $script:Nonce
+
+        $package.services.Count | Should -Be 2
+        $package.services[0].Name | Should -BeExactly 'OrdinarySvc'
+        $package.services[0].ProcessIdentityStatus | Should -BeExactly 'unavailable'
+        $package.services[0].LaunchProtectedStatus | Should -BeExactly 'unavailable'
+        $package.services[0].UninstallEvidenceStatus | Should -BeExactly 'unavailable'
+        $package.services[1].Name | Should -BeExactly 'HRWSCCtrl'
+        $package.services[1].LaunchProtectedLevel | Should -Be 3
+        Assert-MockCalled ConvertTo-InventoryServiceRecord -Times 1 -Exactly -ParameterFilter { $Record.Name -ceq 'HRWSCCtrl' }
+        Assert-MockCalled ConvertTo-InventoryServiceRecord -Times 1 -Exactly
     }
 
     It 'captures a stable protected service process identity into the exact schema v3 package shape' {
@@ -1665,6 +1701,7 @@ Describe 'internal scan_inventory collector' {
         $goodPathName = '"' + $script:CollectorServiceExecutable + '" --service'
         $badPathName = '"' + $script:CollectorOtherExecutable + '" --service'
         $script:TwoServiceQueryLog = [System.Collections.Generic.List[string]]::new()
+        Mock Get-PrivilegedInventoryServiceNames { @('GoodSvc','BadSvc') }
         Mock Get-ServicesInfo {
             @(
                 [pscustomobject]@{ Name='GoodSvc';DisplayName='Good Service';State='Running';StartMode='Auto';PathName=$goodPathName;ProcessId=$goodPid }

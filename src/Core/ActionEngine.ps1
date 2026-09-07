@@ -3293,10 +3293,18 @@ function Invoke-Clean {
                     else { Write-Host "  失败: $($taskResult.result_reason)" -ForegroundColor Red }
                 }
                 'open_official_uninstaller' {
-                    Write-Host '  跳过: 该动作只能返回 GUI 完成人工确认并打开官方卸载程序。' -ForegroundColor DarkYellow
-                    Set-PendingTransactionResult -Pending $p -Result ([pscustomobject]@{
-                        status='skipped'; result_reason='需要返回 GUI 完成人工确认并打开官方卸载程序'; failure_stage=''
-                    })
+                    $handoffResult = Invoke-ReviewedLenovoUninstallerHandoff -Action $p
+                    if ($handoffResult.status -ceq 'failed' -and $handoffResult.failure_stage -ceq 'launch') {
+                        $handoffResult.failure_stage = 'mutation'
+                    }
+                    Set-PendingTransactionResult -Pending $p -Result $handoffResult
+                    if ($handoffResult.status -ceq 'manual_required') {
+                        Write-Host "  已打开: $($handoffResult.result_reason)" -ForegroundColor Yellow
+                    } elseif ($handoffResult.status -ceq 'skipped') {
+                        Write-Host "  跳过: $($handoffResult.result_reason)" -ForegroundColor DarkYellow
+                    } else {
+                        Write-Host "  失败: $($handoffResult.result_reason)" -ForegroundColor Red
+                    }
                 }
                 'uninstall' {
                     Write-Host '  uninstall 动作需要人工确认, 请到 设置 -> 应用 -> 已安装的应用 手动卸载。' -ForegroundColor Yellow
