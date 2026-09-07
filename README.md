@@ -18,7 +18,7 @@
 - 华为 / Dell / HP / ASUS / 小米等品牌已写入特征库，但大多是 tested=false → 动作降级为 investigate（只报告、不自动处理）
 - 因此更准确的定位是：**联想部分机型已具备实战能力的 Windows 后台诊断工具 + 其他品牌的实验性识别框架**，尚不能宣称"任何品牌电脑都可以安全清理"
 - 多品牌实测覆盖是持续积累方向（扫描→人工确认→补 evidence 实测字段，见 CHANGELOG Unreleased 计划）
-- 自动测试全部使用 Mock 或非破坏性夹具；自动测试不等同真实机器验收，也不能替代真实 UAC、清理和恢复闭环。`HRWSCCtrl` 修复的 30 秒真实机器验收仍待人工执行，用于观察旧 PID 退出后是否出现 replacement PID；实际 destructive clean 仍需管理员权限和用户确认
+- 自动测试全部使用 Mock 或非破坏性夹具；自动测试不等同真实机器验收，也不能替代其他机器上的真实 UAC、清理和恢复闭环。2026-09-07 已在当前联想机器上完成一次官方卸载入口验收：安全复核后打开联想卸载程序，由用户在厂商界面完成卸载，随后 0 / 5 / 30 秒回读均未发现 `HRWSCCtrl`、目标进程或对应卸载项。该结果只证明这台机器和这次厂商卸载流程，不代表所有联想版本都已覆盖
 
 ```
 ├── gui-cleaner.ps1          鼠鼠风格图形界面（WPF，双击 bat 或命令行启动）
@@ -70,13 +70,15 @@
 | 已处理（`resolved`） | 目标当前已经是 `disabled` 等目标状态 | 不可选 | 不重复清理 |
 | 仅观察（`observation`） | 只有 `contains` / `regex` 等宽匹配，或身份/扫描信息不完整 | 不可选 | 只能识别和提示 |
 
-其中，联想通知与诊断计划任务属于推荐/自动安全项；`HRWSCCtrl`（联想 Windows Security Center）属于可选有影响项：必要性是 `optional`，默认不选，只有用户主动勾选后才会弹出二次确认。它可能影响联想电脑管家的安全状态、主动防护和通知。确认后，工具停止 exact `HRWSCCtrl` 服务的当前运行态，但不禁用服务、不修改 `StartMode`；其他组件可能再次启动该服务。`HRWSCCtrl` 的宽匹配命中仍只进入“仅观察”，不能执行。
+其中，联想通知与诊断计划任务属于推荐/自动安全项；`HRWSCCtrl`（联想 Windows Security Center）属于可选有影响项：必要性是 `optional`，默认不选，只有用户主动勾选后才会弹出二次确认。若可信扫描确认它是 PPL 受保护服务，工具不会承诺强停，而是在管理员清理进程内再次验证 exact 服务、卸载注册表、文件身份、路径和联想签名后，仅打开官方卸载程序；后续是否卸载由用户决定。非 PPL 且身份完整的 exact `HRWSCCtrl` 才可走一次性 `stop_service_runtime`。宽匹配命中始终只进入“仅观察”。
 
-受保护清单使用 `inventory_schema_version: 2`。只有服务进程身份状态为 `complete` 且验证稳定，`HRWSCCtrl` 才会成为可选项；`not_running` 或 `unavailable` 只观察、不可执行，并提示重新扫描。
+受保护清单使用 `inventory_schema_version: 3`。它同时绑定服务进程身份、`LaunchProtected` 状态和官方卸载证据；旧 v1/v2、缺失版本及未来版本都拒绝消费并要求重新扫描。只有对应动作所需的可信字段完整、稳定，`HRWSCCtrl` 才会成为可选项；`not_running` 只观察、不可执行并要求重新扫描，`unavailable` 同样只观察、不可执行并要求重新扫描。
 
 `stop_service_runtime` 是一次性、非持久动作，不进入恢复包，因此不可通过恢复包恢复。执行前会复验服务/路径/PID/进程名/进程路径/启动时间；随后在同一个原生 SCM 服务句柄上核对 exact 服务的原始配置和 PID，再直接发送 STOP。该动作授权停止 exact 服务的当前运行态，不修改 `StartMode`，也不会自动停止依赖服务。停止后继续进行约 5 秒稳定验证；期间服务出现任意正 PID（`> 0`）都记录为 `failed/verification`，不会把自动重新拉起误报成成功。
 
 执行清单中的每项结果都会持久化并写回 `result_reason` / `failure_stage`；GUI 只显示经过严格验证和安全净化的 `result_reason` / `failure_stage`。持久动作 `disable_service` / `remove_autostart` / `disable_task` 仍在修改前备份并可通过可信恢复包恢复，与一次性结束进程严格分开。
+
+`open_official_uninstaller` 不是自动卸载：它只在用户主动勾选、二次确认、pending SHA-256 与影响摘要验证、管理员态重新授权以及启动前文件/签名复验全部通过后打开官方 EXE。结果记为 `manual_required`，不记为 `success`，也不生成 Cleaner 恢复包。
 
 扫描可以识别宽匹配，但执行必须保持窄匹配：实际命中 `contains` / `regex` 的项目只作为观察项展示，复核页中不能勾选。`exact` / `path` 也必须绑定实际命中的 pattern、类型、字段和目标身份；进入管理员执行后，仍会用同一个 matcher、同一个字段和当前系统对象重新验证。
 
@@ -133,7 +135,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 |---|---|---|---|
 | scan_inventory | GUI 内部模式：按 nonce 采集完整服务与计划任务，写入 ACL 保护的短期结果包 | 是 | **完全不改** |
 | scan | 验证并消费受保护清单，或显式 `-AllowLimited` 降级；同时收集系统概况、进程、自启并生成待办清单和报告 | 否 | **完全不改** |
-| clean | 按清单逐条确认后执行（禁用服务/删自启/禁计划任务），**每项持久化变更先备份** | 是 | 是（可恢复） |
+| clean | 按清单逐条确认后执行；持久动作先备份，官方卸载动作只打开经复验的厂商卸载程序 | 是 | 按动作而定 |
 | stop_process | 仅由 GUI 对用户已勾选且身份复核通过的进程执行一次性结束；不删除文件、不关闭自启 | 否 | 否（进程结束不可恢复） |
 | restore | 从备份目录一键恢复上次处理 | 是 | 是（恢复原状） |
 | update | 从配置的 URL 更新特征库（自动备份旧版） | 否 | 是（只改特征库文件） |
@@ -156,7 +158,7 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 - **状态机：** `actions` 中的项目按 `pending → success / failed / skipped / manual_required` 流转；已完成项目进入 `resolved`，重跑不会重复清理，观察项目保留在 `observations`
 - **高 CPU 可选处理：** 多次采样达到高占用条件且不是可信 Windows 核心身份的进程会进入独立 `suspicious` 列表，即使它带有效第三方签名；默认不勾选，并逐条显示是否必要、列出原因和处理影响。执行只结束当前进程实例，不删除文件、不关闭自启，并按 PID、名称、绝对路径和 UTC 启动时间重新绑定验证；可信 Windows 路径中的核心进程继续拒绝处理，可疑目录中的冒名系统进程不能只凭名称绕过扫描
 - **自动备份与恢复：** 服务、自启和计划任务等持久化系统变更在执行前备份原状态到 `backups\时间戳\`；restore 只接受本工具创建且校验通过的备份，恢复后重新读取并核对状态。一次性结束当前进程不是持久化变更，不能恢复，必须由用户单独勾选确认
-- 卸载动作不自动执行：只提示，人工去"设置-应用"卸载（卸载是重操作，交给用户）
+- 卸载不静默执行：通用 `uninstall` 只提示去“设置-应用”；受保护联想服务的 `open_official_uninstaller` 只打开经复验的联想官方卸载程序，最终选择仍由用户完成
 
 ---
 
@@ -241,13 +243,13 @@ powershell -ExecutionPolicy Bypass -File cpu-cleaner.ps1 -Mode update
 
 matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sha256`。危险动作只接受实际命中的 `exact`，或命中 `autostart_value` / `task_path` / `process_path` 的 `path`；`contains` / `regex` 只能识别，不能因为规则声明了动作或 `allow_auto` 就获得执行资格。
 
-可选清理规则还应声明 `cleanup_policy`：`execution_class`、必要性、默认选择、是否需要确认、中文影响和清理原因。`HRWSCCtrl` 通过 `manual_actions.service=stop_service_runtime` 进入手动路径；它不是自动安全项，默认不选，必须二次确认。该动作只停止 exact 服务当前运行态，不修改服务 `StartMode`，也不生成恢复包。
+可选清理规则还应声明 `cleanup_policy`：`execution_class`、必要性、默认选择、是否需要确认、中文影响和清理原因。`HRWSCCtrl` 通过 `manual_actions.service=open_official_uninstaller` 声明 PPL 场景意图；运行时只有 exact 服务名、保护级别 3 和完整可信卸载证据同时成立才保留该动作，非 PPL exact 服务可降级为 `stop_service_runtime`。两种动作都默认不选并要求二次确认。
 
 **程序启动时自动校验，错误规则直接拒绝加载：**
 - 当前特征库格式为 Schema 3.0；Schema 2.0 可在加载时迁移，未来版本拒绝加载。特征库迁移规则与 pending 清单必须使用 schema 3、且不自动迁移的规则相互独立
 - id 必须存在且唯一
 - risk 必须是 high/medium/low
-- action 必须是 disable_service / remove_autostart / disable_task / uninstall / investigate / none
+- action 必须是 disable_service / stop_service_runtime / open_official_uninstaller / remove_autostart / disable_task / uninstall / investigate / none，并满足各自动或手动动作的专属约束
 - detect 不能全空（四类至少一个关键词）
 - detect matcher 的 match 必须非空、type 必须合法；`execution.allow_auto` 若存在必须是布尔值，但不参与危险动作授权
 - **safe=false 的规则不能配自动危险动作；若声明 `manual_impact`，必须同时提供合法 `manual_actions`、`optional` 必要性、默认不选和二次确认，并且运行时仍只接受 `exact/path` 实际命中**
@@ -260,6 +262,8 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 | remove_autostart | 删除开机自启项 | ✅ |
 | disable_task | 禁用计划任务 | ✅ |
 | uninstall | 提示人工去"设置-应用"卸载（不自动执行） | ✅（标记 manual_required） |
+| stop_service_runtime | 只停止已复验的 exact 服务当前实例，不改启动模式 | ✅（手动影响项） |
+| open_official_uninstaller | 复验后只打开联想官方卸载程序，不代替用户卸载 | ✅（手动影响项，标记 manual_required） |
 | investigate | 只报告，人工调查 | ❌ |
 | none | 只报告（safe=false 常用） | ❌ |
 
@@ -276,9 +280,9 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 ## 已知限制
 
 - **restore 按可信备份恢复稳定状态**：服务恢复 StartType/DelayedAutoStart，并尝试恢复备份记录的 Running/Stopped 状态；`sc start` 返回“已在运行”(1056)时仍会继续读取最终状态，只有最终状态吻合才算成功。删除的自启项和禁用的任务也按备份还原。
-- **卸载动作不自动执行**：uninstall 只提示，需要人工到"设置-应用"卸载（安全考虑）
+- **卸载不静默执行**：通用 uninstall 只提示；联想官方卸载入口只打开受信 EXE，最终确认和卸载由用户完成
 - **NOT_STOPPABLE 服务**（如联想 LISFService）：禁用成功但进程杀不掉，重启后消失，工具会如实提示
-- **联想 HRWSCCtrl**：属于可选有影响项，不自动处理；用户主动确认后尝试停止 exact 服务当前运行态，但不修改服务启动模式。若系统拒绝 STOP，或服务在稳定验证期内再次出现正 PID，按失败结果记录，不应反复强行处理
+- **联想 HRWSCCtrl**：属于可选有影响项，不自动处理。PPL 保护级别为 3 时不尝试强停，只能在完整证据复验后打开联想官方卸载程序；非 PPL exact 服务才尝试一次性停止当前运行态。任何证据缺失或漂移都拒绝执行并要求重新扫描
 - **瞬时采样**：Top CPU 进程是 2 秒采样，长期监控请用任务管理器
 - PowerShell 5.1 环境下脚本为 UTF-8 BOM 编码；如自行编辑脚本，**必须保持 BOM**（否则中文报错）。特征库 JSON 用 UTF-8 即可。
 
@@ -286,7 +290,7 @@ matcher 类型包括 `exact`、`contains`、`regex`、`path`、`publisher`、`sh
 
 ## 版本记录
 
-- v1.8.1（待发布）：新增 HRWSCCtrl 的一次性 exact 服务运行态停止语义，不修改服务启动模式、不级联停止依赖服务；30 秒真实机器验收仍待人工执行。
+- v1.8.1（未正式发布，修复已进入 `master`）：增加 inventory v3、PPL 识别与联想官方卸载安全交接；2026-09-07 当前机器已完成厂商卸载及 0 / 5 / 30 秒回读。随后加入的管理员 clean 直接交接路径已有完整自动回归，但因目标已卸载，未在同一目标上重复实机启动
 - 2026-08-24 v1.8.0（联想可选清理与桌面 GUI）：Schema 3 matcher 来源绑定、可选 OEM 清理、受保护管理员扫描、一次性结束高 CPU 进程、鼠鼠 GUI 与桌面快捷方式；旧 pending 清单拒绝自动迁移，执行前重新验证当前身份与状态。
 - 2026-08-09 v1.7.0（模块化拆分）：cpu-cleaner.ps1 1539 行 → 主脚本 ~90 行 + src/Core/ 7 个域文件（Utils/ProfileEngine/Scanner/RiskEngine/ReportEngine/ActionEngine/BackupManager），dot-source 保持作用域共享；run-unit/CI analyzer 适配；测试 85+14 项。
 - 2026-08-09 v1.6.0（Schema 3.0 match_type）：detect 从字符串子串升级为显式 match_type（exact/contains/regex/path/publisher/sha256），**执行闸门**——危险动作必须是窄匹配（exact/path）才能自动执行，contains/regex 宽匹配默认降级 investigate（识别保留、执行收紧），实机验证过的规则可显式 execution.allow_auto=true 豁免；旧特征库加载自动迁移 v3（11 条联想实测规则保留自动资格）；测试 85+14 项。

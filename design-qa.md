@@ -86,6 +86,13 @@ UAC cancellation is the only automatic route to explicit limited scanning. The G
 
 - P3: production screenshot fixtures could use fully localized sample item names in a future pass; current mixed-language sample rows are useful for deterministic width testing and do not affect the shipped runtime copy.
 
+### Pass 6 - interaction and Lenovo handoff accepted
+
+- Explicit TwoWay/PropertyChanged checkbox binding plus immediate and queued availability recomputation fixed the real “checked but action button disabled” path.
+- Privileged service enrichment is limited to profile-declared candidates, avoiding full-inventory stalls while preserving trusted inventory v3 evidence for HRWSCCtrl.
+- On 2026-09-07 the validated Lenovo uninstaller opened and the user completed the vendor flow; 0 / 5 / 30 second readback found no HRWSCCtrl service, target process, or matching uninstall entry.
+- The subsequent short-lived clean-process handoff correction passed 1525 Pester, 38 logic, and 168 current Schema tests. Because the target was already removed, that corrected integrated route was not re-launched against the same machine.
+
 ## Final result
 
-final result: prior runtime and visual revalidation passed; privileged read-only scan automation added, fresh live UAC acceptance pending
+final result: runtime/visual/checkbox validation passed; current-machine Lenovo vendor uninstall accepted; corrected post-uninstall integrated handoff remains automation-verified on the removed target

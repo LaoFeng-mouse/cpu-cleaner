@@ -1,5 +1,6 @@
 # 机器相关文件，不入库
 backups/
+diagnostics/
 pending_actions.json
 report_*.html
 

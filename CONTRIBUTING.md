@@ -5,7 +5,7 @@
 ## 你可以贡献什么
 
 1. **特征库规则**（最有价值）：`bloatware-profiles.json` 是纯数据文件，发现新机型/新软件往里加规则即可，不用改代码。
-2. **Bug 修复 / 新功能**：代码在 `cpu-cleaner.ps1`。
+2. **Bug 修复 / 新功能**：入口在 `cpu-cleaner.ps1` / `gui-cleaner.ps1`，核心逻辑按职责位于 `src/Core/`，GUI 展示位于 `src/Gui/`。
 3. **文档**：README / 手动整理方案 / 零基础指南 / 命令行入门指南。
 4. **测试**：`tests/` 下的单元测试与 Pester 测试。
 

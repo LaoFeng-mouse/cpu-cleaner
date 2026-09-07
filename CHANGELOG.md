@@ -10,15 +10,20 @@
 - **真实故障**：HRWSCCtrl 持久禁用会触发访问被拒绝，旧流程既无法完成目标，也把一次性减负错误建模成服务启动模式变更
 - **精确服务运行态停止**：`stop_service_runtime` 在完整身份复验后，通过单一原生 SCM 服务句柄停止 exact HRWSCCtrl 当前运行态；不禁用服务、不修改 `StartMode`、不级联停止依赖服务，也不进入恢复包
 - **执行前身份复验**：在 mutation 前复验服务/路径/PID/进程名/进程路径/启动时间，任一字段变化都拒绝执行并要求重新扫描
-- **v2 身份交接**：受保护清单固定为 `inventory_schema_version: 2`，原子交接服务进程身份；v1、缺失版本和未来版本均拒绝并要求重新扫描，不静默迁移
+- **v3 证据交接**：受保护清单固定为 `inventory_schema_version: 3`，原子交接服务进程身份、LaunchProtected 状态和官方卸载证据；v1/v2、缺失版本和未来版本均拒绝并要求重新扫描，不静默迁移
 - **marker 失败关闭边界**：内部 `ProcessIdentitySource` 只在可信包验证后附加，不序列化到 pending/执行子集；marker-bearing reviewed action 一律失败关闭并拒绝执行
 - **重启检测**：STOP 完成后进行约 5 秒稳定验证；期间服务出现任意正 PID（`> 0`）均记录为 `failed/verification`，避免把服务自动重新拉起误报为成功
 - **结果原因**：每项结果持久化并写回 `result_reason` / `failure_stage`；GUI 只显示经过严格验证和安全净化的 `result_reason` / `failure_stage`
 - **恢复边界不变**：持久动作 `disable_service` / `remove_autostart` / `disable_task` 仍在修改前备份并可通过可信恢复包恢复
+- **PPL 官方卸载交接**：inventory v3 识别 `ANTIMALWARE_LIGHT` 保护和联想官方卸载证据；用户确认后由管理员 clean 在短生命周期进程内完成最终复验并无参数打开官方卸载器，结果为 `manual_required` 而非清理成功
+- **扫描性能与一致性**：昂贵的保护级别、进程身份和卸载证据增强只用于当前 profile 声明的特权候选服务；管理员普通 scan 与受保护 inventory 使用同一 v3 服务投影
+- **GUI 选择交互**：CheckBox 显式 TwoWay/PropertyChanged 回写，并在 Click 与 DataBind 后重算按钮状态，修复“看似勾选但不能执行/结束”的问题
+- **GUI 兼容交接**：旧版 clean sentinel 结果仍可通过短生命周期隔离进程复验，避免长驻 WPF 运行空间污染导致稳定误判
 
 ### 验证边界
-- 自动测试不等同真实机器验收；自动化覆盖身份漂移、句柄绑定、旧 PID 退出、约 5 秒稳定窗口、任意正 replacement PID 和结果持久化，但本次没有执行真实清理或 UAC
-- 30 秒真实机器验收仍待人工执行，用于观察 HRWSCCtrl 是否在旧 PID 退出后重新拉起；本条不宣称已经验收、发布或推送
+- 2026-09-07 当前联想机器完成用户批准的官方卸载入口验收：联想卸载程序真实打开，用户完成卸载后 0 / 5 / 30 秒均未发现 `HRWSCCtrl`、目标进程或对应卸载项
+- 管理员 clean 直接交接修复在上述卸载之后完成，因此无法在已消失的同一目标上重复实机启动；其授权、调用与终态持久化由自动回归覆盖
+- 全量验证：Pester 1525/1525、逻辑测试 38/38、Schema 测试 168/168。修复提交已推送到 `master`，目标版本仍未正式发布
 
 ## [1.8.0] - 2026-08-24
 

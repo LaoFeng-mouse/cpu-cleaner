@@ -1,10 +1,12 @@
 # Protected Lenovo Official Uninstaller Implementation Plan
 
+> 2026-09-07 implementation note: this plan records the original GUI-local handoff design. Real WPF execution exposed repeatable validation contamination, so the shipped flow now performs the already-confirmed handoff inside the short-lived elevated clean process; GUI keeps an isolated-process fallback only for the historical sentinel result. `src/Core/ActionEngine.ps1`, `gui-cleaner.ps1`, README and SECURITY are authoritative for current behavior.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Detect PPL-protected `HRWSCCtrl` truthfully and, only after explicit review and fresh security validation, open Lenovo's signed official uninstaller without silent arguments or a false cleanup-success claim.
 
-**Architecture:** Add one shared, fail-closed `ProtectedServiceHandoff` core module for native service-protection collection, strict Lenovo uninstall evidence discovery, and launch-time revalidation. Bind that evidence into protected inventory schema v3 and pending identities. Keep non-PPL service stopping in the existing elevated ActionEngine path; route `open_official_uninstaller` through a separate standard-user GUI handoff that returns `manual_required` after process creation.
+**Architecture:** Add one shared, fail-closed `ProtectedServiceHandoff` core module for native service-protection collection, strict Lenovo uninstall evidence discovery, and launch-time revalidation. Bind that evidence into protected inventory schema v3 and pending identities. Keep non-PPL service stopping in the existing elevated ActionEngine path. The implemented correction routes `open_official_uninstaller` through the short-lived elevated clean process after GUI confirmation and digest binding; the terminal result remains `manual_required` after process creation.
 
 **Tech Stack:** Windows PowerShell 5.1, PowerShell 7, WPF, P/Invoke (`advapi32!QueryServiceConfig2W`, `kernel32!GetFileInformationByHandle`), Windows registry, Authenticode, Pester 5, existing non-Pester and GUI test runners.
 

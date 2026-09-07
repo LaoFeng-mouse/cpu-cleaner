@@ -29,7 +29,7 @@ function Get-ReadmeCurrentReleaseContract($text) {
     for ($index = 0; $index -lt $lines.Count; $index++) {
         $line = [string]$lines[$index]
         if ($itemIndent -lt 0) {
-            $startMatch = [regex]::Match($line, '^(\s*)-\s+v1\.8\.1（(?:待发布|未发布)')
+            $startMatch = [regex]::Match($line, '^(\s*)-\s+v1\.8\.1（(?:待发布|未(?:正式)?发布)')
             if ($startMatch.Success) {
                 $itemIndent = $startMatch.Groups[1].Value.Length
                 $itemLines = @($line)
@@ -256,43 +256,42 @@ Assert-Match '脚本标题版本精确为 1.8.1' $cleanerText '(?m)^#  CPU 后�
 
 # README：用户行为与可见结果
 Assert-Match 'README 顶部区分持久恢复与一次性不可恢复' $readmeText '(?m)^一键扫描[^\r\n]{0,180}持久化变更[^\r\n]{0,80}(自动备份|备份)[^\r\n]{0,40}可恢复[^\r\n]{0,80}一次性结束进程[^\r\n]{0,40}不可恢复'
-Assert-Match 'README 明确 HRWSCCtrl 使用 stop_service_runtime' $readmeText '`?HRWSCCtrl`?[\s\S]{0,180}`?manual_actions\.service=stop_service_runtime`?'
+Assert-Match 'README 明确 PPL HRWSCCtrl 使用官方卸载手动动作' $readmeText '`?HRWSCCtrl`?[\s\S]{0,260}`?manual_actions\.service=open_official_uninstaller`?'
 Assert-Match 'README 明确默认不选和二次确认' $readmeText 'HRWSCCtrl[\s\S]{0,240}默认不选[\s\S]{0,100}二次确认'
 Assert-Match 'README 明确一次性不可恢复且 StartMode 不变' $readmeText 'stop_service_runtime[\s\S]{0,180}(一次性|非持久)[\s\S]{0,160}不可.{0,20}恢复包.{0,20}恢复[\s\S]{0,500}不修改 `?StartMode`?|不修改 `?StartMode`?[\s\S]{0,500}stop_service_runtime[\s\S]{0,180}(一次性|非持久)[\s\S]{0,160}不可.{0,20}恢复包.{0,20}恢复'
 Assert-Match 'README 明确约 5 秒与任意正服务 PID 失败' $readmeText '停止后[\s\S]{0,40}约 5 秒[\s\S]{0,160}任意正 PID[\s\S]{0,120}`?failed/verification`?'
 Assert-Equal 'README GUI 仅显示严格验证和净化后的安全字段' (Test-GuiSafeResultContract $readmeText) $true
-Assert-Match 'README 明确 30 秒真实机器验收待完成' $readmeText '(还需要|仍待)[^\r\n]{0,40}30 秒真实机器验收|30 秒真实机器验收[^\r\n]{0,40}仍待'
-Assert-Match 'README 说明受保护 inventory v2 完整身份才可选' $readmeText 'inventory_schema_version:?\s*2[\s\S]{0,300}complete[\s\S]{0,180}HRWSCCtrl[\s\S]{0,180}(可选|勾选)'
+Assert-Match 'README 记录当前机器 0 5 30 秒真实回读及适用范围' $readmeText '2026-09-07[\s\S]{0,260}0\s*/\s*5\s*/\s*30 秒[\s\S]{0,260}(只证明|不代表)[^\r\n]{0,120}(这台机器|所有联想版本)'
+Assert-Match 'README 说明受保护 inventory v3 并拒绝旧版' $readmeText 'inventory_schema_version:?\s*3[\s\S]{0,260}(v1/v2|旧 v1/v2)[\s\S]{0,160}(拒绝|重新扫描)'
 Assert-Match 'README 说明 not_running 只观察并重新扫描' $readmeText 'not_running[\s\S]{0,160}(只观察|不可执行)[\s\S]{0,120}重新扫描'
 Assert-Match 'README 说明 unavailable 只观察并重新扫描' $readmeText 'unavailable[\s\S]{0,160}(只观察|不可执行)[\s\S]{0,120}重新扫描'
 Assert-NotMatch 'README 禁止 HRWSCCtrl 绑定 disable_service' $readmeText '(?i)HRWSCCtrl[^\r\n]{0,240}(manual_actions\.service=disable_service|通过[^\r\n]{0,80}disable_service|尝试禁用|禁用它)|disable_service[^\r\n]{0,160}HRWSCCtrl'
-Assert-Match 'README 版本记录包含 v1.8.1 未发布与待验收' $readmeText '(?m)^- .*v1\.8\.1（(?:待发布|未发布)[^\r\n]*HRWSCCtrl[^\r\n]*30 秒[^\r\n]*(?:待人工|待验收|仍待)'
+Assert-Match 'README 版本记录包含 v1.8.1 未正式发布与实机边界' $readmeText '(?m)^- v1\.8\.1（未正式发布[^\r\n]*master[^\r\n]*2026-09-07[^\r\n]*未在同一目标上重复实机启动'
 $readmeCurrent181 = Get-ReadmeCurrentReleaseContract $readmeText
-Assert-Match 'README 当前区域包含 v1.8.1 待发布记录' $readmeCurrent181 '(?m)^- v1\.8\.1（待发布）'
+Assert-Match 'README 当前区域包含 v1.8.1 未正式发布记录' $readmeCurrent181 '(?m)^- v1\.8\.1（未正式发布'
 Assert-NotMatch 'README 当前区域排除 v1.8.0 历史记录' $readmeCurrent181 '(?m)^- .*v1\.8\.0'
-Assert-Equal 'README 当前区域禁止无否定上下文的完成声称' (Test-NoUnsupportedCompletionClaim $readmeCurrent181) $true
+Assert-NotMatch 'README 当前区域不得宣称正式发布' $readmeCurrent181 '(?i)(已经|现已|已|完成|成功|通过).{0,12}(正式发布|对外发布)|(正式发布|对外发布).{0,12}(完成|成功|通过)'
 
 # SECURITY：信任边界、失败关闭与安全展示
 Assert-Match 'SECURITY 明确六字段执行前复验' $securityText '执行前复验服务/路径/PID/进程名/进程路径/启动时间'
 Assert-Match 'SECURITY 身份漂移失败关闭' $securityText '任何身份漂移[^\r\n]{0,120}`?skipped`?[^\r\n]{0,180}重新扫描'
 Assert-Match 'SECURITY 服务重新出现正 PID 失败关闭' $securityText '出现任意正 PID[\s\S]{0,100}`?failed/verification`?'
-Assert-Match 'SECURITY inventory v2 拒绝旧版未来版且不迁移' $securityText 'inventory_schema_version:?\s*2[\s\S]{0,220}(v1|旧版)[\s\S]{0,100}(未来|future|v3)[\s\S]{0,180}(重新扫描|fresh scan)[\s\S]{0,100}(不自动迁移|不静默迁移)'
-Assert-Match 'SECURITY complete 使用真实受保护清单字段名' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*`complete`[^\r\n]{0,180}(稳定运行 PID|运行中的稳定 PID)[^\r\n]{0,180}`ProcessName`[^\r\n]{0,100}`ProcessPath`[^\r\n]{0,100}`ProcessStartTimeUtc`'
-Assert-NotMatch 'SECURITY complete 禁止不存在的 collector 字段名' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*`process_started_utc`'
-Assert-NotMatch 'SECURITY complete 不依赖 matcher 授权' $securityText '(?m)^14\. \*\*服务进程身份状态机\*\*：[^\r\n]*(?:`?service_name`?|`?exact`?)'
+Assert-Match 'SECURITY inventory v3 拒绝旧版未来版且不迁移' $securityText 'inventory_schema_version:?\s*3[\s\S]{0,180}v1/v2[\s\S]{0,100}未来[\s\S]{0,180}重新扫描[\s\S]{0,100}(不自动迁移|不静默迁移)'
+Assert-Match 'SECURITY v3 服务证据分离状态并不替代授权' $securityText '(进程身份|ProcessIdentity)[\s\S]{0,120}LaunchProtected[\s\S]{0,120}卸载证据[\s\S]{0,220}`complete`[\s\S]{0,220}(不替代|不判断)[\s\S]{0,100}(matcher|授权)'
+Assert-NotMatch 'SECURITY 禁止不存在的 collector 字段名' $securityText '`process_started_utc`'
 Assert-Match 'SECURITY not_running unavailable 仅观察不可执行' $securityText 'not_running[\s\S]{0,180}unavailable[\s\S]{0,220}(只观察|观察项)[\s\S]{0,120}(不可执行|不能执行)[\s\S]{0,120}重新扫描'
-Assert-Match 'SECURITY 只读采集双服务快照和单记录隔离' $securityText '(只读|read-only)[\s\S]{0,260}(两次|两个|双)服务快照[\s\S]{0,260}(唯一进程身份|唯一身份)[\s\S]{0,300}(单条|每条|逐条)[\s\S]{0,140}(净化|sanitized)[\s\S]{0,120}unavailable[\s\S]{0,180}(其他记录|兄弟记录|同级记录)'
+Assert-Match 'SECURITY 只对特权候选做昂贵增强且单记录隔离' $securityText '(只读|read-only)[\s\S]{0,260}(特权候选|候选服务)[\s\S]{0,180}(昂贵|增强)[\s\S]{0,260}(单条|每条|逐条)[\s\S]{0,180}unavailable[\s\S]{0,180}(其他记录|继续独立)'
 Assert-Match 'SECURITY marker 仅在可信包验证后附加且不序列化' $securityText 'ProcessIdentitySource[\s\S]{0,220}(可信包|受保护包|inventory 包)[\s\S]{0,120}(验证通过|验证成功|完成验证)[\s\S]{0,260}(不序列化|不得序列化)[\s\S]{0,120}(pending|执行子集|subset)'
 Assert-Match 'SECURITY marker 执行动作失败关闭' $securityText 'ProcessIdentitySource[\s\S]{0,500}(带有|携带|含有).{0,40}(reviewed action|已复核动作|执行动作)[\s\S]{0,120}(失败关闭|拒绝执行)'
-Assert-Match 'SECURITY 普通扫描消费可信证据与双快照' $securityText '(普通扫描|normal scan)[\s\S]{0,260}(不再需要|无需)[\s\S]{0,160}Win32_Process[\s\S]{0,80}ExecutablePath[\s\S]{0,300}(可信证据|受信证据)[\s\S]{0,160}(两次|两个|双)服务快照'
-Assert-Match 'SECURITY 只有 exact service_name 授权服务进程停止' $securityText 'stop_service_runtime[\s\S]{0,260}exact[\s\S]{0,100}service_name[\s\S]{0,280}(显示名|display.?name)[\s\S]{0,180}(contains|regex)[\s\S]{0,180}(不授权|不能授权|不得授权)'
+Assert-Match 'SECURITY 管理员与有限扫描证据边界' $securityText '管理员普通 scan[\s\S]{0,160}(同一 v3|v3 服务投影)[\s\S]{0,180}非管理员[\s\S]{0,180}(不得合成|不合成)'
+Assert-Match 'SECURITY 只有 exact service_name 授权服务停止或卸载交接' $securityText 'stop_service_runtime[\s\S]{0,100}open_official_uninstaller[\s\S]{0,180}exact[\s\S]{0,80}service_name[\s\S]{0,180}(contains|regex)[\s\S]{0,100}不授权'
 Assert-Match 'SECURITY 漂移为 skipped 且 failure_stage 为空' $securityText '(漂移|变化|不一致)[\s\S]{0,200}status.?=.?`?skipped`?[\s\S]{0,140}failure_stage[\s\S]{0,80}(空|empty)[\s\S]{0,220}result_reason[\s\S]{0,120}(重新扫描|rescan)'
 Assert-Match 'SECURITY failure_stage 仅供 failed 终态' $securityText 'failure_stage[\s\S]{0,120}(仅|只).{0,40}(status.?=.?`?failed`?|failed 终态)'
 Assert-Equal 'SECURITY GUI 仅显示严格验证和净化后的安全字段' (Test-GuiSafeResultContract $securityText) $true
 Assert-Match 'SECURITY 自动测试不等同真实验收' $securityText '自动测试不等同真实机器验收'
-Assert-Match 'SECURITY 重启及真实 0 5 30 秒验收与批准仍未完成' $securityText '(重启|restart)[\s\S]{0,120}0 秒[\s/、,，]+5 秒[\s/、,，]+30 秒[\s\S]{0,180}(尚未完成|仍未完成|待完成)[\s\S]{0,180}(用户批准|用户确认|人工批准)'
-Assert-Match 'SECURITY v1.8.1 未发布未推送未实机清理验证' $securityText 'v1\.8\.1[\s\S]{0,160}未发布[\s/、,，]+未推送[\s/、,，]+(未通过真实清理验证|未验证真实清理|未完成真实清理验证)'
-Assert-Equal 'SECURITY 禁止无否定上下文的完成声称' (Test-NoUnsupportedCompletionClaim $securityText) $true
+Assert-Match 'SECURITY 记录真实 0 5 30 秒验收与集成复测边界' $securityText '2026-09-07[\s\S]{0,260}0\s*/\s*5\s*/\s*30 秒[\s\S]{0,260}(目标已经卸载|同一目标)[\s\S]{0,120}(未在|无法)[^\r\n]{0,80}(重复实机|实机启动)'
+Assert-Match 'SECURITY v1.8.1 未正式发布但已推送 master' $securityText 'v1\.8\.1[\s\S]{0,100}未正式发布[\s\S]{0,100}已推送.{0,20}`?master`?'
+Assert-NotMatch 'SECURITY 不得宣称 v1.8.1 正式发布' $securityText 'v1\.8\.1[^\r\n]{0,120}(已经|现已|已)(正式发布|对外发布)'
 
 # CHANGELOG：只审查 Unreleased 中目标 1.8.1，旧版本历史措辞不参与发布契约
 Assert-Match 'CHANGELOG Unreleased 目标版本为 1.8.1 未发布' $changelogTarget181 '(?m)^## \[Unreleased\][\s\S]{0,160}目标版本[：:]?\s*1\.8\.1[^\r\n]{0,30}未发布'
@@ -300,11 +299,11 @@ Assert-NotMatch 'CHANGELOG 不得存在正式 1.8.1 标题' $changelogText '(?m)
 Assert-Match 'CHANGELOG 目标 1.8.1 记录真实故障和精确服务运行态修复' $changelogTarget181 '\*\*真实故障\*\*[\s\S]{0,500}\*\*精确服务运行态停止\*\*'
 Assert-Match 'CHANGELOG 目标 1.8.1 记录 restart 检测和结果字段' $changelogTarget181 '\*\*重启检测\*\*[\s\S]{0,500}`?result_reason`?[\s/、,，]+`?failure_stage`?'
 Assert-Match 'CHANGELOG 目标 1.8.1 记录持久动作安全恢复边界' $changelogTarget181 '`?disable_service`?[\s/、,，]+`?remove_autostart`?[\s/、,，]+`?disable_task`?[\s\S]{0,160}(备份.{0,30}恢复|可恢复)'
-Assert-Match 'CHANGELOG 目标 1.8.1 记录 v2 身份交接' $changelogTarget181 'inventory_schema_version:?\s*2[\s\S]{0,260}(服务进程身份|process identity)[\s\S]{0,220}(重新扫描|拒绝 v1|v1.{0,30}拒绝)'
+Assert-Match 'CHANGELOG 目标 1.8.1 记录 inventory v3 与官方卸载交接' $changelogTarget181 'inventory v3[\s\S]{0,260}open_official_uninstaller|PPL 官方卸载交接[\s\S]{0,260}inventory v3'
 Assert-Match 'CHANGELOG 目标 1.8.1 记录 marker 失败关闭边界' $changelogTarget181 'ProcessIdentitySource[\s\S]{0,260}(不序列化|不得序列化)[\s\S]{0,180}(失败关闭|拒绝执行)'
-Assert-Match 'CHANGELOG 目标 1.8.1 明确真实操作未执行且验收待人工' $changelogTarget181 '没有执行真实清理或 UAC[\s\S]{0,300}30 秒真实机器验收仍待人工执行'
-Assert-Match 'CHANGELOG 目标 1.8.1 明确未发布未推送未验收' $changelogTarget181 '不宣称已经验收、发布或推送'
-Assert-Equal 'CHANGELOG 目标 1.8.1 禁止无否定上下文的完成声称' (Test-NoUnsupportedCompletionClaim $changelogTarget181) $true
+Assert-Match 'CHANGELOG 目标 1.8.1 记录真实厂商卸载验收与后续集成边界' $changelogTarget181 '2026-09-07[\s\S]{0,260}0\s*/\s*5\s*/\s*30 秒[\s\S]{0,300}(上述卸载之后|目标已经卸载)[\s\S]{0,180}(无法|未在)[^\r\n]{0,100}重复实机启动'
+Assert-Match 'CHANGELOG 目标 1.8.1 明确已推送但未正式发布' $changelogTarget181 '已推送.{0,20}`?master`?[\s\S]{0,80}仍未正式发布|仍未正式发布[\s\S]{0,80}已推送.{0,20}`?master`?'
+Assert-NotMatch 'CHANGELOG 目标 1.8.1 不得出现正式版本标题' $changelogText '(?m)^## \[1\.8\.1\]'
 
 # 实施计划勘误：保持严格终态 schema，skipped 不占用 failed 专属 failure_stage
 Assert-Match 'Task 4 身份漂移断言 skipped 且 failure_stage 为空' $identityPlanText '\$result\.status \| Should -BeExactly ''skipped''[\s\S]{0,120}\$result\.failure_stage \| Should -BeExactly ''''[\s\S]{0,160}\$result\.result_reason \| Should -Match ''[^'']*(授权|重新扫描|身份)[^'']*'''
